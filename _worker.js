@@ -31,6 +31,7 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/auth/google') return handleGoogleAuth(request, env);
   if (path === '/api/auth/callback') return handleCallback(request, env);
   if (path === '/api/auth/logout') return handleLogout(request, env);
+  if (path === '/api/auth/debug') return handleAuthDebug(request, env); // TEMP — remove after fix
 
   // Protected routes — require valid session token
   const user = await getUserFromRequest(request, env);
@@ -62,10 +63,22 @@ const OAUTH_SCOPES = 'openid email profile';
 // whatever domain the worker is served from (aide-support.pages.dev or a
 // future custom domain). Whatever this returns must be registered in the
 // Google Cloud console as an Authorized redirect URI.
+const PROD_HOST = 'aide-support.pages.dev';
+
 function getRedirectUri(request, env) {
-  if (env.GOOGLE_REDIRECT_URI) return env.GOOGLE_REDIRECT_URI;
-  return `${new URL(request.url).origin}/api/auth/callback`;
+  const url = new URL(request.url);
+  // On the production host, always use its own callback — never a stale
+  // localhost value that might be lingering in an env var/secret.
+  if (url.host === PROD_HOST) return `https://${PROD_HOST}/api/auth/callback`;
+  // Otherwise: explicit override (local dev .dev.vars) or derive from origin.
+  if (env.GOOGLE_REDIRECT_URI) return env.GOOGLE_REDIRECT_URI.trim();
+  return `${url.origin}/api/auth/callback`;
 }
+
+// Credentials are read from env and trimmed — a trailing newline/space (easy to
+// introduce via `wrangler pages secret put`) makes Google return invalid_client.
+const clientId = (env) => (env.GOOGLE_CLIENT_ID || '').trim();
+const clientSecret = (env) => (env.GOOGLE_CLIENT_SECRET || '').trim();
 
 // Access control. ALLOWED_EMAILS is a comma-separated list (kept out of the
 // repo — set as a Pages var/secret). If unset, everyone is allowed (useful
@@ -83,9 +96,31 @@ function roleForEmail(email, env) {
   return owner && (email || '').toLowerCase() === owner ? 'owner' : 'assistant';
 }
 
+// TEMP diagnostic — reveals what the worker actually has, to pinpoint
+// invalid_client. client_id is public (it appears in the OAuth URL), so it's
+// safe to return; client_secret is reported only as present/length, never its
+// value. REMOVE this route once login is confirmed working.
+function handleAuthDebug(request, env) {
+  const id = clientId(env);
+  const secret = clientSecret(env);
+  return json({
+    requestOrigin: new URL(request.url).origin,
+    redirectUri: getRedirectUri(request, env),
+    googleClientId: id || null,
+    clientIdEndsCorrectly: /\.apps\.googleusercontent\.com$/.test(id),
+    clientIdLength: id.length,
+    clientIdHadWhitespace: (env.GOOGLE_CLIENT_ID || '') !== id,
+    hasClientSecret: secret.length > 0,
+    clientSecretLength: secret.length,
+    clientSecretHadWhitespace: (env.GOOGLE_CLIENT_SECRET || '') !== secret,
+    allowedEmailsSet: !!(env.ALLOWED_EMAILS && env.ALLOWED_EMAILS.trim()),
+    ownerEmailSet: !!(env.OWNER_EMAIL && env.OWNER_EMAIL.trim())
+  });
+}
+
 function handleGoogleAuth(request, env) {
   const params = new URLSearchParams({
-    client_id: env.GOOGLE_CLIENT_ID,
+    client_id: clientId(env),
     redirect_uri: getRedirectUri(request, env),
     response_type: 'code',
     scope: OAUTH_SCOPES,
@@ -110,8 +145,8 @@ async function handleCallback(request, env) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       code,
-      client_id: env.GOOGLE_CLIENT_ID,
-      client_secret: env.GOOGLE_CLIENT_SECRET,
+      client_id: clientId(env),
+      client_secret: clientSecret(env),
       redirect_uri: getRedirectUri(request, env),
       grant_type: 'authorization_code'
     })

@@ -7,6 +7,7 @@ import Login from './components/Login';
 import LoadingSpinner from './components/shared/LoadingSpinner';
 import SettingsPage from './components/SettingsPage';
 import ProfilePage from './components/ProfilePage';
+import TasksPage from './components/tasks/TasksPage';
 
 function Placeholder({ title }) {
   return (
@@ -86,7 +87,7 @@ export default function App() {
     <Layout>
       <Routes>
         <Route path="/" element={<Navigate to="/tasks" replace />} />
-        <Route path="/tasks" element={<Placeholder title="Tarefas" />} />
+        <Route path="/tasks" element={<TasksPage />} />
         <Route path="/planning" element={<Placeholder title="Planejamento" />} />
         <Route path="/timer" element={<Placeholder title="Timer" />} />
         <Route path="/calendar" element={<Placeholder title="Calendário" />} />

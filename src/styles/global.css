@@ -24,3 +24,15 @@ body {
 * {
   box-sizing: border-box;
 }
+
+@layer components {
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-sm text-ink
+      placeholder:text-muted focus:border-accent focus:outline-none
+      focus:shadow-[0_0_0_3px_rgba(99,102,241,0.12)];
+  }
+  .btn-icon {
+    @apply flex items-center justify-center rounded-lg border border-line bg-surface2 px-2.5
+      text-ink2 transition hover:bg-line hover:text-ink;
+  }
+}

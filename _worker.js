@@ -12,6 +12,14 @@ export default {
 
     // ALL other routes: serve React static assets
     return env.ASSETS.fetch(request);
+  },
+
+  // Cloudflare Pages does NOT fire scheduled events, so this handler only runs
+  // if this worker is ever deployed as a standalone Worker. In production the
+  // daily run is driven by the satellite `aide-cron` worker hitting
+  // POST /api/cron/run (see aide_cron_worker/).
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runDailyNotifications(env));
   }
 };
 
@@ -35,6 +43,9 @@ async function handleAPI(request, env, ctx) {
 
   // Bridge — auth handled inside (AIDE session OR X-Bridge-Secret).
   if (path.startsWith('/api/bridge/')) return handleBridge(request, env, ctx, path);
+
+  // Cron run — auth handled inside (owner session OR X-Cron-Secret).
+  if (path === '/api/cron/run') return handleCronRun(request, env, ctx);
 
   // Protected routes — require valid session token
   const user = await getUserFromRequest(request, env);
@@ -1860,6 +1871,74 @@ async function handleBridgeReceiveXp(request, env) {
     }
   }
   return json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Daily deadline notifications (cron)
+// ---------------------------------------------------------------------------
+
+// Reuses createNotification (which inserts the in-app row AND pushes via
+// pushToUser using the correct flat subscription shape). Dedupe per
+// user+task+day in AIDE_SYNC KV (24h TTL) so re-runs don't double-notify.
+async function runDailyNotifications(env) {
+  const today = new Date().toISOString().split('T')[0];
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+
+  const dueSoon = await env.DB.prepare(
+    `SELECT id, title, due_date, assigned_to AS uid FROM tasks
+     WHERE status != 'done' AND due_date IS NOT NULL AND due_date = ? AND assigned_to IS NOT NULL`
+  ).bind(tomorrow).all();
+
+  const overdue = await env.DB.prepare(
+    `SELECT id, title, due_date, assigned_to AS uid FROM tasks
+     WHERE status != 'done' AND due_date IS NOT NULL AND due_date < ? AND assigned_to IS NOT NULL`
+  ).bind(today).all();
+
+  let sent = 0;
+
+  for (const task of dueSoon.results || []) {
+    const key = `notif:${task.uid}:${task.id}:due:${today}`;
+    if (await env.AIDE_SYNC.get(key)) continue;
+    await createNotification(env, null, {
+      to_user_id: task.uid,
+      type: 'task_due_soon',
+      title: 'Prazo amanhã',
+      body: `"${task.title}" vence amanhã (${task.due_date})`,
+      task_id: task.id
+    });
+    await env.AIDE_SYNC.put(key, '1', { expirationTtl: 86400 });
+    sent += 1;
+  }
+
+  for (const task of overdue.results || []) {
+    const key = `notif:${task.uid}:${task.id}:overdue:${today}`;
+    if (await env.AIDE_SYNC.get(key)) continue;
+    await createNotification(env, null, {
+      to_user_id: task.uid,
+      type: 'task_overdue',
+      title: 'Tarefa em atraso',
+      body: `"${task.title}" estava prevista para ${task.due_date}`,
+      task_id: task.id
+    });
+    await env.AIDE_SYNC.put(key, '1', { expirationTtl: 86400 });
+    sent += 1;
+  }
+
+  return { dueSoon: (dueSoon.results || []).length, overdue: (overdue.results || []).length, sent };
+}
+
+// POST /api/cron/run — owner session OR X-Cron-Secret (used by aide-cron worker).
+async function handleCronRun(request, env, ctx) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const cronSecret = request.headers.get('X-Cron-Secret');
+  let authorized = !!(env.CRON_SECRET && cronSecret === env.CRON_SECRET);
+  if (!authorized) {
+    const user = await getUserFromRequest(request, env);
+    authorized = !!(user && user.role === 'owner');
+  }
+  if (!authorized) return json({ error: 'Não autorizado' }, 401);
+  const result = await runDailyNotifications(env);
+  return json({ ok: true, message: 'Cron executado manualmente', result });
 }
 
 // ---------------------------------------------------------------------------

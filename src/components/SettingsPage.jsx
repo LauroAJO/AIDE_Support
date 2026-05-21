@@ -43,6 +43,17 @@ export default function SettingsPage() {
   const [bridgeLog, setBridgeLog] = useState([]);
   const [savingBridge, setSavingBridge] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
+  const [cronMsg, setCronMsg] = useState('');
+
+  const runCron = async () => {
+    setCronMsg('Executando...');
+    try {
+      const res = await apiFetch('/api/cron/run', { method: 'POST' });
+      setCronMsg(`${res.message || 'Concluído'} — ${res.result?.sent ?? 0} notificação(ões) enviada(s).`);
+    } catch {
+      setCronMsg('Falha ao executar.');
+    }
+  };
 
   useEffect(() => {
     apiFetch('/api/users').then(setUsers).catch(() => {});
@@ -159,6 +170,17 @@ export default function SettingsPage() {
             Exportar minhas notas
           </button>
         </div>
+      </Section>
+
+      {/* System */}
+      <Section title="Sistema">
+        <button
+          onClick={runCron}
+          className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2"
+        >
+          Executar notificações agora
+        </button>
+        {cronMsg && <p className="mt-2 text-xs text-ink2">{cronMsg}</p>}
       </Section>
 
       {/* Bridge */}

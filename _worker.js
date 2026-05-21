@@ -292,11 +292,8 @@ async function handleCallback(request, env) {
     now
   ).run();
 
-  // 4. Store tokens in AIDE_TOKENS KV
-  await env.AIDE_TOKENS.put(
-    `token:${userId}`,
-    JSON.stringify({ access_token, refresh_token: refresh_token || null, expires_at })
-  );
+  // 4. Tokens are persisted in the users table above (no KV write — KV write
+  //    limits are shared with Lifegame).
 
   // 5. Create session in D1 (30 days)
   const sessionToken = crypto.randomUUID();
@@ -884,14 +881,15 @@ async function handleAvailability(request, env, user) {
 // refresh_token when expired (5-min buffer). `force` refreshes regardless of
 // expiry (used after a 401). Returns null if the grant was revoked.
 async function refreshGoogleToken(userId, env, force = false) {
-  const raw = await env.AIDE_TOKENS.get(`token:${userId}`);
-  if (!raw) return null;
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  const row = await env.DB.prepare(
+    'SELECT google_access_token, google_refresh_token, google_token_expires_at FROM users WHERE id = ?'
+  ).bind(userId).first();
+  if (!row) return null;
+  const data = {
+    access_token: row.google_access_token,
+    refresh_token: row.google_refresh_token,
+    expires_at: row.google_token_expires_at
+  };
   const now = Math.floor(Date.now() / 1000);
   if (!force && data.access_token && data.expires_at && data.expires_at > now + 300) {
     return data.access_token;
@@ -915,7 +913,9 @@ async function refreshGoogleToken(userId, env, force = false) {
     refresh_token: t.refresh_token || data.refresh_token,
     expires_at: now + (t.expires_in || 3600)
   };
-  await env.AIDE_TOKENS.put(`token:${userId}`, JSON.stringify(next));
+  await env.DB.prepare(
+    'UPDATE users SET google_access_token = ?, google_refresh_token = ?, google_token_expires_at = ? WHERE id = ?'
+  ).bind(next.access_token, next.refresh_token, next.expires_at, userId).run();
   return next.access_token;
 }
 
@@ -1915,12 +1915,33 @@ async function handleBridgeReceiveXp(request, env) {
 }
 
 // ---------------------------------------------------------------------------
+// Dedup (D1-backed, replaces AIDE_SYNC KV writes which share Lifegame's limit)
+// ---------------------------------------------------------------------------
+
+async function dedupCheck(key, env) {
+  const now = Math.floor(Date.now() / 1000);
+  // Opportunistic cleanup of expired rows (best-effort, never blocks).
+  await env.DB.prepare('DELETE FROM dedup_log WHERE expires_at < ?').bind(now).run().catch(() => {});
+  const existing = await env.DB.prepare(
+    'SELECT id FROM dedup_log WHERE key = ? AND expires_at > ?'
+  ).bind(key, now).first();
+  return !!existing;
+}
+
+async function dedupSet(key, ttlSeconds, env) {
+  const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
+  await env.DB.prepare(
+    'INSERT OR REPLACE INTO dedup_log (id, key, expires_at) VALUES (?, ?, ?)'
+  ).bind(crypto.randomUUID(), key, expires).run();
+}
+
+// ---------------------------------------------------------------------------
 // Daily deadline notifications (cron)
 // ---------------------------------------------------------------------------
 
 // Reuses createNotification (which inserts the in-app row AND pushes via
 // pushToUser using the correct flat subscription shape). Dedupe per
-// user+task+day in AIDE_SYNC KV (24h TTL) so re-runs don't double-notify.
+// user+task+day in D1 dedup_log (24h TTL) so re-runs don't double-notify.
 async function runDailyNotifications(env) {
   const today = new Date().toISOString().split('T')[0];
   const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
@@ -1939,7 +1960,7 @@ async function runDailyNotifications(env) {
 
   for (const task of dueSoon.results || []) {
     const key = `notif:${task.uid}:${task.id}:due:${today}`;
-    if (await env.AIDE_SYNC.get(key)) continue;
+    if (await dedupCheck(key, env)) continue;
     await createNotification(env, null, {
       to_user_id: task.uid,
       type: 'task_due_soon',
@@ -1947,13 +1968,13 @@ async function runDailyNotifications(env) {
       body: `"${task.title}" vence amanhã (${task.due_date})`,
       task_id: task.id
     });
-    await env.AIDE_SYNC.put(key, '1', { expirationTtl: 86400 });
+    await dedupSet(key, 86400, env);
     sent += 1;
   }
 
   for (const task of overdue.results || []) {
     const key = `notif:${task.uid}:${task.id}:overdue:${today}`;
-    if (await env.AIDE_SYNC.get(key)) continue;
+    if (await dedupCheck(key, env)) continue;
     await createNotification(env, null, {
       to_user_id: task.uid,
       type: 'task_overdue',
@@ -1961,7 +1982,7 @@ async function runDailyNotifications(env) {
       body: `"${task.title}" estava prevista para ${task.due_date}`,
       task_id: task.id
     });
-    await env.AIDE_SYNC.put(key, '1', { expirationTtl: 86400 });
+    await dedupSet(key, 86400, env);
     sent += 1;
   }
 
@@ -2133,7 +2154,7 @@ async function evaluateAlertRules(env) {
 async function evaluateRule(rule, config, env, force) {
   const today = new Date().toISOString().split('T')[0];
   const dedupKey = `alert:${rule.id}:${today}`;
-  if (!force && (await env.AIDE_SYNC.get(dedupKey))) return false;
+  if (!force && (await dedupCheck(dedupKey, env))) return false;
 
   const threshold = Number(config.threshold) || 0;
   let triggered = false;
@@ -2173,7 +2194,7 @@ async function evaluateRule(rule, config, env, force) {
   for (const uid of targetUserIds(rule.target_user, roleUsers)) {
     await deliverAlert(env, uid, 'alert', rule.name, body, rule.channel || 'both');
   }
-  if (!force) await env.AIDE_SYNC.put(dedupKey, '1', { expirationTtl: 86400 });
+  if (!force) await dedupSet(dedupKey, 86400, env);
   return true;
 }
 

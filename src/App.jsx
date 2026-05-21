@@ -8,6 +8,8 @@ import LoadingSpinner from './components/shared/LoadingSpinner';
 import SettingsPage from './components/SettingsPage';
 import ProfilePage from './components/ProfilePage';
 import TasksPage from './components/tasks/TasksPage';
+import TimerPage from './components/timer/TimerPage';
+import PlanningPage from './components/planning/PlanningPage';
 
 function Placeholder({ title }) {
   return (
@@ -88,8 +90,8 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/tasks" replace />} />
         <Route path="/tasks" element={<TasksPage />} />
-        <Route path="/planning" element={<Placeholder title="Planejamento" />} />
-        <Route path="/timer" element={<Placeholder title="Timer" />} />
+        <Route path="/planning" element={<PlanningPage />} />
+        <Route path="/timer" element={<TimerPage />} />
         <Route path="/calendar" element={<Placeholder title="Calendário" />} />
         <Route path="/drive" element={<Placeholder title="Drive" />} />
         <Route path="/notes" element={<Placeholder title="Notas" />} />

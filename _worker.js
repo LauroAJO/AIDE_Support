@@ -46,6 +46,20 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/projects') return handleProjectsCollection(request, env, user);
   if (path.startsWith('/api/projects/')) return handleProjectItem(request, env, user, path.split('/')[3]);
 
+  // Timer
+  if (path === '/api/timer/start') return handleTimerStart(request, env, user);
+  if (path === '/api/timer/stop') return handleTimerStop(request, env, user);
+  if (path === '/api/timer/active') return handleTimerActive(request, env, user);
+  if (path === '/api/timer/entries') return handleTimerEntries(request, env, user);
+  if (path.startsWith('/api/timer/entries/')) return handleTimerEntryItem(request, env, user, path.split('/')[4]);
+
+  // Planning
+  if (path === '/api/planning/week') return handleWeekPlanGet(request, env, user);
+  if (path.startsWith('/api/planning/week/')) return handleWeekPlanUpdate(request, env, user, path.split('/')[4]);
+
+  // Availability
+  if (path === '/api/availability') return handleAvailability(request, env, user);
+
   return json({ error: 'Rota não encontrada' }, 404);
 }
 
@@ -464,6 +478,281 @@ async function handleProjectItem(request, env, user, projectId) {
     await env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(projectId).run();
     return json({ ok: true });
   }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---------------------------------------------------------------------------
+// Timer / time entries
+// ---------------------------------------------------------------------------
+
+const ENTRY_SELECT =
+  'SELECT e.*, t.title AS task_title FROM time_entries e ' +
+  'LEFT JOIN tasks t ON e.task_id = t.id';
+
+function shapeEntry(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    task_id: row.task_id || null,
+    task_title: row.task_title || null,
+    user_id: row.user_id,
+    started_at: row.started_at,
+    ended_at: row.ended_at || null,
+    duration_seconds: row.duration_seconds || null,
+    hourly_rate: row.hourly_rate || 0,
+    paid: !!row.paid,
+    paid_at: row.paid_at || null,
+    notes: row.notes || '',
+    created_at: row.created_at
+  };
+}
+
+// Stops the user's active (un-ended) entry if any; returns its id or null.
+async function stopActiveEntry(env, userId, now) {
+  const active = await env.DB.prepare(
+    'SELECT * FROM time_entries WHERE user_id = ? AND ended_at IS NULL'
+  ).bind(userId).first();
+  if (!active) return null;
+  await env.DB.prepare(
+    'UPDATE time_entries SET ended_at = ?, duration_seconds = ? WHERE id = ?'
+  ).bind(now, now - active.started_at, active.id).run();
+  return active.id;
+}
+
+async function handleTimerStart(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const body = (await readJson(request)) || {};
+  const now = Math.floor(Date.now() / 1000);
+
+  // Only one active entry per user — stop the previous one first.
+  await stopActiveEntry(env, user.id, now);
+
+  const avail = await env.DB.prepare(
+    'SELECT hourly_rate FROM availability WHERE user_id = ?'
+  ).bind(user.id).first();
+  const rate = body.hourly_rate != null ? Number(body.hourly_rate) || 0 : (avail?.hourly_rate || 0);
+
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO time_entries
+       (id, task_id, user_id, started_at, ended_at, duration_seconds, hourly_rate, paid, notes, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
+  ).bind(id, body.task_id || null, user.id, now, null, null, rate, 0, body.notes || '', now).run();
+
+  const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
+  return json(shapeEntry(row), 201);
+}
+
+async function handleTimerStop(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const now = Math.floor(Date.now() / 1000);
+  const stoppedId = await stopActiveEntry(env, user.id, now);
+  if (!stoppedId) return json({ error: 'Nenhum timer ativo' }, 404);
+  const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(stoppedId).first();
+  return json(shapeEntry(row));
+}
+
+async function handleTimerActive(request, env, user) {
+  const row = await env.DB.prepare(
+    `${ENTRY_SELECT} WHERE e.user_id = ? AND e.ended_at IS NULL`
+  ).bind(user.id).first();
+  return json(row ? shapeEntry(row) : null);
+}
+
+async function handleTimerEntries(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  const { results } = await env.DB.prepare(
+    `${ENTRY_SELECT} WHERE e.user_id = ? ORDER BY e.started_at DESC`
+  ).bind(user.id).all();
+  return json((results || []).map(shapeEntry));
+}
+
+async function handleTimerEntryItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+
+  if (request.method === 'PUT') {
+    const existing = await env.DB.prepare(
+      'SELECT * FROM time_entries WHERE id = ? AND user_id = ?'
+    ).bind(id, user.id).first();
+    if (!existing) return json({ error: 'Registro não encontrado' }, 404);
+
+    const body = (await readJson(request)) || {};
+    const notes = body.notes !== undefined ? body.notes : existing.notes;
+    const rate = body.hourly_rate !== undefined ? (Number(body.hourly_rate) || 0) : existing.hourly_rate;
+    let paid = existing.paid;
+    let paidAt = existing.paid_at;
+    if (body.paid !== undefined) {
+      paid = body.paid ? 1 : 0;
+      paidAt = body.paid ? (existing.paid_at || Math.floor(Date.now() / 1000)) : null;
+    }
+    await env.DB.prepare(
+      'UPDATE time_entries SET notes = ?, hourly_rate = ?, paid = ?, paid_at = ? WHERE id = ?'
+    ).bind(notes, rate, paid, paidAt, id).run();
+    const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
+    return json(shapeEntry(row));
+  }
+
+  if (request.method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM time_entries WHERE id = ? AND user_id = ?').bind(id, user.id).run();
+    return json({ ok: true });
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---------------------------------------------------------------------------
+// Weekly planning
+// ---------------------------------------------------------------------------
+
+// Monday (YYYY-MM-DD, UTC) of the week containing dateStr.
+function mondayOf(dateStr) {
+  const base = dateStr || new Date().toISOString().slice(0, 10);
+  const d = new Date(`${base}T00:00:00Z`);
+  const day = d.getUTCDay(); // 0=Sun..6=Sat
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setUTCDate(d.getUTCDate() + diff);
+  return d.toISOString().slice(0, 10);
+}
+
+function shapeWeekPlan(row) {
+  let dayPlans = {};
+  try {
+    dayPlans = JSON.parse(row.day_plans || '{}');
+  } catch {
+    dayPlans = {};
+  }
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    week_start: row.week_start,
+    day_plans: dayPlans,
+    weekly_goal: row.weekly_goal || '',
+    weekly_review: row.weekly_review || '',
+    short_term: row.short_term || '',
+    tactical: row.tactical || '',
+    strategic: row.strategic || '',
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+async function handleWeekPlanGet(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  const date = new URL(request.url).searchParams.get('date');
+  const weekStart = mondayOf(date);
+  let row = await env.DB.prepare(
+    'SELECT * FROM week_plans WHERE user_id = ? AND week_start = ?'
+  ).bind(user.id, weekStart).first();
+  if (!row) {
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO week_plans (id, user_id, week_start, day_plans, weekly_goal, weekly_review, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(id, user.id, weekStart, '{}', '', '', now, now).run();
+    row = await env.DB.prepare('SELECT * FROM week_plans WHERE id = ?').bind(id).first();
+  }
+  return json(shapeWeekPlan(row));
+}
+
+async function handleWeekPlanUpdate(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  const existing = await env.DB.prepare(
+    'SELECT * FROM week_plans WHERE id = ? AND user_id = ?'
+  ).bind(id, user.id).first();
+  if (!existing) return json({ error: 'Plano não encontrado' }, 404);
+
+  const body = (await readJson(request)) || {};
+  const dayPlans = body.day_plans !== undefined ? JSON.stringify(body.day_plans || {}) : existing.day_plans;
+  const goal = body.weekly_goal !== undefined ? body.weekly_goal : existing.weekly_goal;
+  const review = body.weekly_review !== undefined ? body.weekly_review : existing.weekly_review;
+  const shortTerm = body.short_term !== undefined ? body.short_term : existing.short_term;
+  const tactical = body.tactical !== undefined ? body.tactical : existing.tactical;
+  const strategic = body.strategic !== undefined ? body.strategic : existing.strategic;
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(
+    `UPDATE week_plans SET day_plans = ?, weekly_goal = ?, weekly_review = ?,
+       short_term = ?, tactical = ?, strategic = ?, updated_at = ? WHERE id = ?`
+  ).bind(dayPlans, goal, review, shortTerm, tactical, strategic, now, id).run();
+  const row = await env.DB.prepare('SELECT * FROM week_plans WHERE id = ?').bind(id).first();
+  return json(shapeWeekPlan(row));
+}
+
+// ---------------------------------------------------------------------------
+// Availability
+// ---------------------------------------------------------------------------
+
+function shapeAvailability(row) {
+  let workDays = [1, 2, 3, 4, 5];
+  try {
+    workDays = JSON.parse(row.work_days || '[1,2,3,4,5]');
+  } catch {
+    workDays = [1, 2, 3, 4, 5];
+  }
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    work_days: workDays,
+    work_start: row.work_start,
+    work_end: row.work_end,
+    lunch_start: row.lunch_start,
+    lunch_end: row.lunch_end,
+    hourly_rate: row.hourly_rate || 0,
+    updated_at: row.updated_at
+  };
+}
+
+async function handleAvailability(request, env, user) {
+  if (request.method === 'GET') {
+    const row = await env.DB.prepare('SELECT * FROM availability WHERE user_id = ?').bind(user.id).first();
+    if (!row) {
+      return json({
+        user_id: user.id,
+        work_days: [1, 2, 3, 4, 5],
+        work_start: '09:00',
+        work_end: '18:00',
+        lunch_start: '12:00',
+        lunch_end: '13:00',
+        hourly_rate: 0
+      });
+    }
+    return json(shapeAvailability(row));
+  }
+
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const now = Math.floor(Date.now() / 1000);
+    const fields = {
+      work_days: JSON.stringify(body.work_days || [1, 2, 3, 4, 5]),
+      work_start: body.work_start || '09:00',
+      work_end: body.work_end || '18:00',
+      lunch_start: body.lunch_start || '12:00',
+      lunch_end: body.lunch_end || '13:00',
+      hourly_rate: Number(body.hourly_rate) || 0
+    };
+    const existing = await env.DB.prepare('SELECT id FROM availability WHERE user_id = ?').bind(user.id).first();
+    if (existing) {
+      await env.DB.prepare(
+        `UPDATE availability SET work_days=?, work_start=?, work_end=?, lunch_start=?, lunch_end=?, hourly_rate=?, updated_at=?
+         WHERE user_id=?`
+      ).bind(
+        fields.work_days, fields.work_start, fields.work_end, fields.lunch_start,
+        fields.lunch_end, fields.hourly_rate, now, user.id
+      ).run();
+    } else {
+      await env.DB.prepare(
+        `INSERT INTO availability (id, user_id, work_days, work_start, work_end, lunch_start, lunch_end, hourly_rate, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        crypto.randomUUID(), user.id, fields.work_days, fields.work_start, fields.work_end,
+        fields.lunch_start, fields.lunch_end, fields.hourly_rate, now
+      ).run();
+    }
+    const row = await env.DB.prepare('SELECT * FROM availability WHERE user_id = ?').bind(user.id).first();
+    return json(shapeAvailability(row));
+  }
+
   return json({ error: 'Método não permitido' }, 405);
 }
 

@@ -12,6 +12,13 @@ export const useStore = create((set) => ({
   selectedTask: null,
   taskFilter: { status: 'all', search: '', assignedTo: 'all' },
 
+  // Phase 2 — timer & planning
+  activeEntry: null,
+  elapsedSeconds: 0,
+  timeEntries: [],
+  weekPlan: null,
+  availability: null,
+
   setUser: (user) => set({ user }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
@@ -22,6 +29,12 @@ export const useStore = create((set) => ({
   setSelectedTask: (selectedTask) => set({ selectedTask }),
   setTaskFilter: (patch) =>
     set((state) => ({ taskFilter: { ...state.taskFilter, ...patch } })),
+
+  setActiveEntry: (activeEntry) => set({ activeEntry }),
+  setElapsedSeconds: (elapsedSeconds) => set({ elapsedSeconds }),
+  setTimeEntries: (timeEntries) => set({ timeEntries }),
+  setWeekPlan: (weekPlan) => set({ weekPlan }),
+  setAvailability: (availability) => set({ availability }),
 }));
 
 // Derived: tasks filtered by the current taskFilter.

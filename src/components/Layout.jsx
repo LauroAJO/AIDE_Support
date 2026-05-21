@@ -7,15 +7,14 @@ import {
   Calendar,
   HardDrive,
   StickyNote,
-  Settings,
   Bell,
-  Play,
   Search,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
 import { APP_VERSION } from '../version';
 import Avatar from './shared/Avatar';
+import TimerIndicator from './timer/TimerIndicator';
 
 const NAV_ITEMS = [
   { to: '/tasks', label: 'Tarefas', icon: CheckSquare },
@@ -77,12 +76,17 @@ export default function Layout({ children }) {
           <span className="text-[11px] font-medium text-muted">v{APP_VERSION}</span>
         </div>
 
-        {/* CENTER — search bar */}
+        {/* CENTER — timer (mobile only) */}
+        <div className="absolute left-1/2 block -translate-x-1/2 md:hidden">
+          <TimerIndicator variant="header" />
+        </div>
+
+        {/* CENTER — search bar (desktop) */}
         <div
-          className="absolute left-1/2 hidden -translate-x-1/2 sm:block"
+          className="absolute left-1/2 hidden -translate-x-1/2 md:flex"
           style={{ width: 320, maxWidth: '40vw' }}
         >
-          <div className="relative">
+          <div className="relative w-full">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
             <input
               type="text"
@@ -95,7 +99,7 @@ export default function Layout({ children }) {
           </div>
         </div>
 
-        {/* RIGHT — bell, settings, avatar/name, sair */}
+        {/* RIGHT — bell, avatar/name, sair */}
         <div className="flex items-center gap-3">
           {/* Notification bell */}
           <div ref={notifRef} className="relative">
@@ -113,16 +117,6 @@ export default function Layout({ children }) {
               </div>
             )}
           </div>
-
-          {/* Settings gear */}
-          <button
-            type="button"
-            onClick={() => navigate('/settings')}
-            className="flex items-center rounded-md p-1.5 text-ink2 transition hover:bg-surface2 hover:text-ink"
-            aria-label="Configurações"
-          >
-            <Settings className="h-5 w-5" />
-          </button>
 
           {/* Avatar + first name + profile dropdown */}
           <div ref={menuRef} className="relative">
@@ -195,20 +189,8 @@ export default function Layout({ children }) {
           {/* Spacer pushes the timer + Settings to the bottom */}
           <div className="flex-1" />
 
-          {/* Timer indicator (placeholder for future task timer) */}
-          <button
-            type="button"
-            title="Timer (em breve)"
-            className="mb-2 flex w-full items-center gap-2 rounded-lg bg-surface2 px-3 py-2 font-mono text-sm text-ink2 transition hover:text-ink"
-          >
-            <Play className="h-3.5 w-3.5" />
-            00:00
-          </button>
-
-          <NavLink to="/settings" className={navClass}>
-            <Settings className="h-5 w-5" />
-            Configurações
-          </NavLink>
+          {/* Functional timer (counts up while an entry is active) */}
+          <TimerIndicator />
         </aside>
 
         {/* Content */}

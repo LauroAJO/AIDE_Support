@@ -24,10 +24,36 @@ export default function ProfilePage() {
   const [permission, setPermission] = useState(
     typeof Notification !== 'undefined' ? Notification.permission : 'default'
   );
+  const [personal, setPersonal] = useState(null);
+  const [extraPairs, setExtraPairs] = useState([]);
+  const [savingPersonal, setSavingPersonal] = useState(false);
 
   useEffect(() => {
     apiFetch('/api/availability').then(setAvail).catch(() => {});
+    apiFetch('/api/profile/personal')
+      .then((p) => {
+        setPersonal(p);
+        setExtraPairs(Object.entries(p.extra_info || {}).map(([key, value]) => ({ key, value })));
+      })
+      .catch(() => {});
   }, []);
+
+  const savePersonal = async () => {
+    setSavingPersonal(true);
+    try {
+      const extra_info = {};
+      extraPairs.forEach(({ key, value }) => {
+        if (key.trim()) extra_info[key.trim()] = value;
+      });
+      const saved = await apiFetch('/api/profile/personal', {
+        method: 'PUT',
+        body: JSON.stringify({ ...personal, extra_info }),
+      });
+      setPersonal(saved);
+    } finally {
+      setSavingPersonal(false);
+    }
+  };
 
   if (!user) return null;
   const roleLabel = ROLE_LABELS[user.role] || user.role || '—';
@@ -159,6 +185,99 @@ export default function ProfilePage() {
               className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover disabled:opacity-60"
             >
               {savingAvail ? 'Salvando...' : 'Salvar'}
+            </button>
+          </div>
+        )}
+      </section>
+
+      {/* Personal data */}
+      <section className="rounded-xl border border-line bg-surface p-5">
+        <h2 className="mb-3 text-base font-bold text-ink">Dados Pessoais</h2>
+        {!personal ? (
+          <p className="text-sm text-muted">Carregando...</p>
+        ) : (
+          <div className="space-y-3">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Telefone</span>
+              <input
+                value={personal.phone}
+                onChange={(e) => setPersonal({ ...personal, phone: e.target.value })}
+                placeholder="+31 6 XXXX XXXX"
+                className="input"
+              />
+            </label>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-ink2">Tipo de chave PIX</span>
+                <select
+                  value={personal.pix_key_type}
+                  onChange={(e) => setPersonal({ ...personal, pix_key_type: e.target.value })}
+                  className="input"
+                >
+                  <option value="">—</option>
+                  {['CPF', 'CNPJ', 'Email', 'Telefone', 'Chave aleatória'].map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-ink2">Chave PIX</span>
+                <input
+                  value={personal.pix_key}
+                  onChange={(e) => setPersonal({ ...personal, pix_key: e.target.value })}
+                  className="input"
+                />
+              </label>
+            </div>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Banco</span>
+              <input
+                value={personal.bank_name}
+                onChange={(e) => setPersonal({ ...personal, bank_name: e.target.value })}
+                className="input"
+              />
+            </label>
+
+            <div>
+              <p className="mb-1 text-xs font-medium text-ink2">Informações extras</p>
+              <div className="space-y-1.5">
+                {extraPairs.map((pair, idx) => (
+                  <div key={idx} className="flex gap-2">
+                    <input
+                      value={pair.key}
+                      onChange={(e) => setExtraPairs(extraPairs.map((p, i) => (i === idx ? { ...p, key: e.target.value } : p)))}
+                      placeholder="Ex.: Endereço"
+                      className="input flex-1"
+                    />
+                    <input
+                      value={pair.value}
+                      onChange={(e) => setExtraPairs(extraPairs.map((p, i) => (i === idx ? { ...p, value: e.target.value } : p)))}
+                      placeholder="Valor"
+                      className="input flex-1"
+                    />
+                    <button
+                      onClick={() => setExtraPairs(extraPairs.filter((_, i) => i !== idx))}
+                      className="rounded-lg border border-line px-2 text-muted hover:text-danger"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => setExtraPairs([...extraPairs, { key: '', value: '' }])}
+                className="mt-1.5 text-xs font-medium text-accent hover:opacity-80"
+              >
+                + Adicionar informação
+              </button>
+            </div>
+
+            <button
+              onClick={savePersonal}
+              disabled={savingPersonal}
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover disabled:opacity-60"
+            >
+              {savingPersonal ? 'Salvando...' : 'Salvar dados pessoais'}
             </button>
           </div>
         )}

@@ -7,6 +7,9 @@ import {
   Calendar,
   HardDrive,
   FileText,
+  Bell,
+  CreditCard,
+  LayoutDashboard,
   Search,
 } from 'lucide-react';
 import { useStore } from '../store';
@@ -23,7 +26,11 @@ const NAV_ITEMS = [
   { to: '/calendar', label: 'Calendário', icon: Calendar },
   { to: '/drive', label: 'Drive', icon: HardDrive },
   { to: '/notes', label: 'Notas', icon: FileText },
+  { to: '/alerts', label: 'Avisos', icon: Bell },
+  { to: '/payment', label: 'Pagamentos', icon: CreditCard },
 ];
+
+const OWNER_NAV = [{ to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard }];
 
 const navClass = ({ isActive }) =>
   `flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
@@ -41,6 +48,7 @@ export default function Layout({ children }) {
   const menuRef = useRef(null);
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
+  const navItems = user?.role === 'owner' ? [...NAV_ITEMS, ...OWNER_NAV] : NAV_ITEMS;
 
   const handleLogout = () => {
     clearToken();
@@ -161,7 +169,7 @@ export default function Layout({ children }) {
         {/* Sidebar (desktop) */}
         <aside className="hidden w-60 shrink-0 flex-col border-r border-line bg-surface p-3 md:flex">
           <div className="flex flex-col gap-1">
-            {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
+            {navItems.map(({ to, label, icon: Icon }) => (
               <NavLink key={to} to={to} className={navClass}>
                 <Icon className="h-5 w-5" />
                 {label}
@@ -184,7 +192,7 @@ export default function Layout({ children }) {
 
       {/* Bottom nav (mobile) */}
       <nav className="fixed inset-x-0 bottom-0 z-10 flex h-16 items-stretch border-t border-line bg-surface md:hidden">
-        {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
+        {navItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}

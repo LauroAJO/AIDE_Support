@@ -35,6 +35,12 @@ export const useStore = create((set) => ({
   unreadCount: 0,
   monthPlan: null,
 
+  // Phase 2 — alerts, payment, reports, personal data
+  alertRules: [],
+  paymentSummary: null,
+  monthlyReport: null,
+  personalData: null,
+
   setUser: (user) => set({ user }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
@@ -65,6 +71,11 @@ export const useStore = create((set) => ({
   setNotifications: (notifications) => set({ notifications }),
   setUnreadCount: (unreadCount) => set({ unreadCount }),
   setMonthPlan: (monthPlan) => set({ monthPlan }),
+
+  setAlertRules: (alertRules) => set({ alertRules }),
+  setPaymentSummary: (paymentSummary) => set({ paymentSummary }),
+  setMonthlyReport: (monthlyReport) => set({ monthlyReport }),
+  setPersonalData: (personalData) => set({ personalData }),
 }));
 
 // Derived: tasks filtered by the current taskFilter.

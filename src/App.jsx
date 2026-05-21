@@ -15,6 +15,9 @@ import PlanningPage from './components/planning/PlanningPage';
 import CalendarPage from './components/calendar/CalendarPage';
 import DrivePage from './components/drive/DrivePage';
 import NotesPage from './components/notes/NotesPage';
+import AlertsPage from './components/alerts/AlertsPage';
+import PaymentPage from './components/payment/PaymentPage';
+import DashboardPage from './components/dashboard/DashboardPage';
 
 function Placeholder({ title }) {
   return (
@@ -106,6 +109,9 @@ export default function App() {
         <Route path="/calendar" element={<CalendarPage />} />
         <Route path="/drive" element={<DrivePage />} />
         <Route path="/notes" element={<NotesPage />} />
+        <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/payment" element={<PaymentPage />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="*" element={<Navigate to="/tasks" replace />} />

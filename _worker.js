@@ -5,9 +5,15 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Handle API routes
+    // Handle API routes. Wrapped so an uncaught error (e.g. a query against a
+    // table that a partially-applied migration never created) returns a clean
+    // JSON 500 instead of crashing the Worker with Cloudflare Error 1101.
     if (url.pathname.startsWith('/api/')) {
-      return handleAPI(request, env, ctx);
+      try {
+        return await handleAPI(request, env, ctx);
+      } catch (err) {
+        return json({ error: 'internal_error', detail: String((err && err.message) || err) }, 500);
+      }
     }
 
     // ALL other routes: serve React static assets
@@ -114,6 +120,30 @@ async function handleAPI(request, env, ctx) {
   // Month planning
   if (path === '/api/planning/month') return handleMonthPlanGet(request, env, user);
   if (path.startsWith('/api/planning/month/')) return handleMonthPlanUpdate(request, env, user, path.split('/')[4]);
+
+  // Alert rules
+  if (path === '/api/alerts/rules') return handleAlertRules(request, env, user);
+  if (path.startsWith('/api/alerts/rules/') && path.endsWith('/test')) {
+    return handleAlertRuleTest(request, env, user, path.split('/')[4]);
+  }
+  if (path.startsWith('/api/alerts/rules/')) return handleAlertRuleItem(request, env, user, path.split('/')[4]);
+
+  // Payment
+  if (path === '/api/payment/summary') return handlePaymentSummary(request, env, user);
+  if (path.startsWith('/api/payment/entries/') && path.endsWith('/paid')) {
+    return handlePaymentEntryPaid(request, env, user, path.split('/')[4]);
+  }
+
+  // Personal data
+  if (path === '/api/profile/personal') return handlePersonalData(request, env, user);
+  if (path.startsWith('/api/profile/personal/')) return handlePersonalDataByUser(request, env, user, path.split('/')[4]);
+
+  // Reports
+  if (path === '/api/reports/monthly') return handleMonthlyReport(request, env, user);
+  if (path === '/api/reports/list') return handleReportsList(env);
+
+  // Dashboard
+  if (path === '/api/dashboard/alice-timer') return handleAliceTimer(env, user);
 
   return json({ error: 'Rota não encontrada' }, 404);
 }
@@ -405,6 +435,13 @@ async function handleProfileUpdate(request, env, user) {
 
 async function handleTasksCollection(request, env, user, ctx) {
   if (request.method === 'GET') {
+    if (new URL(request.url).searchParams.get('completed_today') === 'true') {
+      const midnight = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000);
+      const { results } = await env.DB.prepare(
+        `${TASK_SELECT} WHERE t.status = 'done' AND t.updated_at >= ? ORDER BY t.updated_at DESC`
+      ).bind(midnight).all();
+      return json((results || []).map(shapeTask));
+    }
     const { results } = await env.DB.prepare(
       `${TASK_SELECT} ORDER BY (t.urgency + t.importance) DESC, t.created_at DESC`
     ).all();
@@ -1406,10 +1443,14 @@ async function notifyTaskDue(env, ctx, task) {
 
 async function handleNotifications(request, env, user, ctx) {
   if (request.method === 'GET') {
-    const { results } = await env.DB.prepare(
-      `${NOTIF_SELECT} WHERE n.to_user_id = ? ORDER BY n.read ASC, n.created_at DESC LIMIT 50`
-    ).bind(user.id).all();
-    return json((results || []).map(shapeNotif));
+    try {
+      const { results } = await env.DB.prepare(
+        `${NOTIF_SELECT} WHERE n.to_user_id = ? ORDER BY n.read ASC, n.created_at DESC LIMIT 50`
+      ).bind(user.id).all();
+      return json((results || []).map(shapeNotif));
+    } catch {
+      return json([]); // table not migrated yet — degrade gracefully
+    }
   }
   if (request.method === 'POST') {
     const body = (await readJson(request)) || {};
@@ -1924,6 +1965,8 @@ async function runDailyNotifications(env) {
     sent += 1;
   }
 
+  await evaluateAlertRules(env);
+
   return { dueSoon: (dueSoon.results || []).length, overdue: (overdue.results || []).length, sent };
 }
 
@@ -1939,6 +1982,412 @@ async function handleCronRun(request, env, ctx) {
   if (!authorized) return json({ error: 'Não autorizado' }, 401);
   const result = await runDailyNotifications(env);
   return json({ ok: true, message: 'Cron executado manualmente', result });
+}
+
+// ---------------------------------------------------------------------------
+// Alert rules
+// ---------------------------------------------------------------------------
+
+function shapeRule(row) {
+  let config = {};
+  try {
+    config = JSON.parse(row.trigger_config || '{}');
+  } catch {
+    config = {};
+  }
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description || '',
+    trigger_type: row.trigger_type,
+    trigger_config: config,
+    target_user: row.target_user || 'both',
+    channel: row.channel || 'both',
+    active: !!row.active,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+async function handleAlertRules(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare('SELECT * FROM alert_rules ORDER BY created_at DESC').all();
+      return json((results || []).map(shapeRule));
+    } catch {
+      return json([]);
+    }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name || !body.trigger_type) return json({ error: 'Nome e tipo são obrigatórios' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO alert_rules (id, created_by, name, description, trigger_type, trigger_config, target_user, channel, active, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      id, user.id, body.name, body.description || '', body.trigger_type,
+      JSON.stringify(body.trigger_config || {}), body.target_user || 'both',
+      body.channel || 'both', body.active === false ? 0 : 1, now, now
+    ).run();
+    const row = await env.DB.prepare('SELECT * FROM alert_rules WHERE id = ?').bind(id).first();
+    return json(shapeRule(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleAlertRuleItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'PUT') {
+    const existing = await env.DB.prepare('SELECT * FROM alert_rules WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Regra não encontrada' }, 404);
+    const body = (await readJson(request)) || {};
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `UPDATE alert_rules SET name=?, description=?, trigger_type=?, trigger_config=?, target_user=?, channel=?, active=?, updated_at=? WHERE id=?`
+    ).bind(
+      body.name !== undefined ? body.name : existing.name,
+      body.description !== undefined ? body.description : existing.description,
+      body.trigger_type !== undefined ? body.trigger_type : existing.trigger_type,
+      body.trigger_config !== undefined ? JSON.stringify(body.trigger_config || {}) : existing.trigger_config,
+      body.target_user !== undefined ? body.target_user : existing.target_user,
+      body.channel !== undefined ? body.channel : existing.channel,
+      body.active !== undefined ? (body.active ? 1 : 0) : existing.active,
+      now, id
+    ).run();
+    const row = await env.DB.prepare('SELECT * FROM alert_rules WHERE id = ?').bind(id).first();
+    return json(shapeRule(row));
+  }
+  if (request.method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM alert_rules WHERE id = ?').bind(id).run();
+    return json({ ok: true });
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleAlertRuleTest(request, env, user, id) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const row = await env.DB.prepare('SELECT * FROM alert_rules WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: 'Regra não encontrada' }, 404);
+  let config = {};
+  try {
+    config = JSON.parse(row.trigger_config || '{}');
+  } catch {
+    config = {};
+  }
+  const triggered = await evaluateRule(row, config, env, true);
+  return json({ ok: true, triggered });
+}
+
+async function getRoleUsers(env) {
+  const { results } = await env.DB.prepare('SELECT id, role FROM users').all();
+  const owner = (results || []).find((u) => u.role === 'owner');
+  const assistant = (results || []).find((u) => u.role === 'assistant');
+  return { ownerId: owner ? owner.id : null, assistantId: assistant ? assistant.id : null };
+}
+
+function targetUserIds(target, roleUsers) {
+  if (target === 'lauro') return [roleUsers.ownerId].filter(Boolean);
+  if (target === 'alice') return [roleUsers.assistantId].filter(Boolean);
+  return [roleUsers.ownerId, roleUsers.assistantId].filter(Boolean);
+}
+
+// Insert in-app notification and/or push, honoring channel ('app'|'push'|'both').
+async function deliverAlert(env, userId, type, title, body, channel) {
+  if (channel === 'app' || channel === 'both') {
+    await env.DB.prepare(
+      `INSERT INTO notifications (id, from_user_id, to_user_id, type, title, body, task_id, note_id, read, created_at)
+       VALUES (?,?,?,?,?,?,?,?,0,?)`
+    ).bind(crypto.randomUUID(), null, userId, type, title, body || '', null, null, Math.floor(Date.now() / 1000)).run();
+  }
+  if (channel === 'push' || channel === 'both') {
+    await pushToUser(env, userId, {
+      title, body: body || '', icon: '/icon-192.png', badge: '/icon-192.png', data: { url: '/' }
+    });
+  }
+}
+
+async function evaluateAlertRules(env) {
+  let results = [];
+  try {
+    ({ results } = await env.DB.prepare('SELECT * FROM alert_rules WHERE active = 1').all());
+  } catch {
+    return; // alert_rules table not migrated yet
+  }
+  for (const rule of results || []) {
+    let config = {};
+    try {
+      config = JSON.parse(rule.trigger_config || '{}');
+    } catch {
+      config = {};
+    }
+    try {
+      await evaluateRule(rule, config, env, false);
+    } catch {
+      /* one rule failing shouldn't block others */
+    }
+  }
+}
+
+async function evaluateRule(rule, config, env, force) {
+  const today = new Date().toISOString().split('T')[0];
+  const dedupKey = `alert:${rule.id}:${today}`;
+  if (!force && (await env.AIDE_SYNC.get(dedupKey))) return false;
+
+  const threshold = Number(config.threshold) || 0;
+  let triggered = false;
+  let body = rule.description || '';
+
+  if (rule.trigger_type === 'task_overdue') {
+    const cutoff = new Date(Date.now() - threshold * 86400000).toISOString().split('T')[0];
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND due_date IS NOT NULL AND due_date < ?").bind(cutoff).first();
+    if ((r ? r.n : 0) > 0) { triggered = true; body = `${r.n} tarefa(s) em atraso há mais de ${threshold} dia(s).`; }
+  } else if (rule.trigger_type === 'task_no_date') {
+    const cutoff = Math.floor((Date.now() - threshold * 86400000) / 1000);
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND (due_date IS NULL OR due_date = '') AND created_at < ?").bind(cutoff).first();
+    if ((r ? r.n : 0) > 0) { triggered = true; body = `${r.n} tarefa(s) sem data há mais de ${threshold} dia(s).`; }
+  } else if (rule.trigger_type === 'task_no_update') {
+    const cutoff = Math.floor((Date.now() - threshold * 86400000) / 1000);
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND updated_at < ?").bind(cutoff).first();
+    if ((r ? r.n : 0) > 0) { triggered = true; body = `${r.n} tarefa(s) sem atualização há mais de ${threshold} dia(s).`; }
+  } else if (rule.trigger_type === 'timer_running_long') {
+    const cutoff = Math.floor(Date.now() / 1000) - threshold * 3600;
+    const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM time_entries WHERE ended_at IS NULL AND started_at < ?').bind(cutoff).first();
+    if ((r ? r.n : 0) > 0) { triggered = true; body = `Timer rodando há mais de ${threshold}h.`; }
+  } else if (rule.trigger_type === 'weekly_hours_low') {
+    const monday = mondayOf(today);
+    const weekStartTs = Math.floor(new Date(`${monday}T00:00:00Z`).getTime() / 1000);
+    const r = await env.DB.prepare('SELECT COALESCE(SUM(duration_seconds),0) AS s FROM time_entries WHERE started_at >= ?').bind(weekStartTs).first();
+    const hours = (r ? r.s : 0) / 3600;
+    if (hours < threshold) { triggered = true; body = `Apenas ${hours.toFixed(1)}h registradas esta semana (mínimo ${threshold}h).`; }
+  } else if (rule.trigger_type === 'custom_day') {
+    const dow = new Date().getUTCDay() === 0 ? 7 : new Date().getUTCDay();
+    if (Number(config.day) === dow) triggered = true;
+  }
+
+  if (force) triggered = true;
+  if (!triggered) return false;
+
+  const roleUsers = await getRoleUsers(env);
+  for (const uid of targetUserIds(rule.target_user, roleUsers)) {
+    await deliverAlert(env, uid, 'alert', rule.name, body, rule.channel || 'both');
+  }
+  if (!force) await env.AIDE_SYNC.put(dedupKey, '1', { expirationTtl: 86400 });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Payment
+// ---------------------------------------------------------------------------
+
+function resolveRateFromRow(e, defaultRate) {
+  if (e.t_rate_type && e.t_rate_type !== 'inherit') return { type: e.t_rate_type, value: e.t_rate_value || 0 };
+  if (e.p_rate_type && e.p_rate_type !== 'inherit') return { type: e.p_rate_type, value: e.p_rate_value || 0 };
+  return { type: 'hourly', value: defaultRate || 0 };
+}
+
+function monthRange(month) {
+  const [y, m] = month.split('-').map(Number);
+  const start = Math.floor(Date.UTC(y, m - 1, 1) / 1000);
+  const end = Math.floor(Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1) / 1000);
+  return { start, end };
+}
+
+async function computePaymentSummary(env, month) {
+  const { start, end } = monthRange(month);
+  const { assistantId } = await getRoleUsers(env);
+  const { results } = await env.DB.prepare(
+    `SELECT e.*, t.title AS task_title, t.project_id, t.rate_type AS t_rate_type, t.rate_value AS t_rate_value,
+            p.name AS project_name, p.rate_type AS p_rate_type, p.rate_value AS p_rate_value
+     FROM time_entries e
+     LEFT JOIN tasks t ON e.task_id = t.id
+     LEFT JOIN projects p ON t.project_id = p.id
+     WHERE e.user_id = ? AND e.started_at >= ? AND e.started_at < ?
+     ORDER BY e.started_at`
+  ).bind(assistantId, start, end).all();
+
+  const avail = await env.DB.prepare('SELECT hourly_rate FROM availability WHERE user_id = ?').bind(assistantId).first();
+  const defaultRate = avail ? avail.hourly_rate || 0 : 0;
+
+  const fixedSeen = new Set();
+  const entries = [];
+  let totalHours = 0;
+  let totalDue = 0;
+  let totalPaid = 0;
+
+  for (const e of results || []) {
+    const rate = resolveRateFromRow(e, defaultRate);
+    const hours = (e.duration_seconds || 0) / 3600;
+    let amount;
+    if (rate.type === 'fixed') {
+      if (e.task_id && fixedSeen.has(e.task_id)) {
+        amount = 0;
+      } else {
+        amount = rate.value;
+        if (e.task_id) fixedSeen.add(e.task_id);
+      }
+    } else {
+      amount = hours * rate.value;
+    }
+    totalHours += hours;
+    totalDue += amount;
+    if (e.paid) totalPaid += amount;
+    entries.push({
+      id: e.id,
+      taskId: e.task_id,
+      taskTitle: e.task_title || '—',
+      projectName: e.project_name || null,
+      rateType: rate.type,
+      rateValue: rate.value,
+      hours: Math.round(hours * 100) / 100,
+      amount: Math.round(amount * 100) / 100,
+      paid: !!e.paid
+    });
+  }
+
+  const pd = await env.DB.prepare('SELECT pix_key, pix_key_type, bank_name FROM user_profile_data WHERE user_id = ?').bind(assistantId).first();
+
+  return {
+    month,
+    totalHours: Math.round(totalHours * 100) / 100,
+    totalDue: Math.round(totalDue * 100) / 100,
+    totalPaid: Math.round(totalPaid * 100) / 100,
+    balance: Math.round((totalDue - totalPaid) * 100) / 100,
+    entries,
+    alicePixKey: pd ? pd.pix_key || '' : '',
+    alicePixKeyType: pd ? pd.pix_key_type || '' : '',
+    aliceBankName: pd ? pd.bank_name || '' : ''
+  };
+}
+
+async function handlePaymentSummary(request, env, user) {
+  const month = new URL(request.url).searchParams.get('month') || new Date().toISOString().slice(0, 7);
+  return json(await computePaymentSummary(env, month));
+}
+
+async function handlePaymentEntryPaid(request, env, user, id) {
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  const body = (await readJson(request)) || {};
+  const paid = body.paid ? 1 : 0;
+  const paidAt = paid ? (body.paid_at ? Math.floor(new Date(body.paid_at).getTime() / 1000) : Math.floor(Date.now() / 1000)) : null;
+  await env.DB.prepare('UPDATE time_entries SET paid = ?, paid_at = ? WHERE id = ?').bind(paid, paidAt, id).run();
+  return json({ ok: true, paid: !!paid });
+}
+
+// ---------------------------------------------------------------------------
+// Personal data
+// ---------------------------------------------------------------------------
+
+function shapePersonal(row, userId) {
+  if (!row) {
+    return { user_id: userId, phone: '', pix_key: '', pix_key_type: '', bank_name: '', extra_info: {} };
+  }
+  let extra = {};
+  try {
+    extra = JSON.parse(row.extra_info || '{}');
+  } catch {
+    extra = {};
+  }
+  return {
+    user_id: row.user_id,
+    phone: row.phone || '',
+    pix_key: row.pix_key || '',
+    pix_key_type: row.pix_key_type || '',
+    bank_name: row.bank_name || '',
+    extra_info: extra,
+    updated_at: row.updated_at
+  };
+}
+
+async function handlePersonalData(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const row = await env.DB.prepare('SELECT * FROM user_profile_data WHERE user_id = ?').bind(user.id).first();
+      return json(shapePersonal(row, user.id));
+    } catch {
+      return json(shapePersonal(null, user.id));
+    }
+  }
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO user_profile_data (user_id, phone, pix_key, pix_key_type, bank_name, extra_info, updated_at)
+       VALUES (?,?,?,?,?,?,?)
+       ON CONFLICT(user_id) DO UPDATE SET phone=excluded.phone, pix_key=excluded.pix_key,
+         pix_key_type=excluded.pix_key_type, bank_name=excluded.bank_name, extra_info=excluded.extra_info, updated_at=excluded.updated_at`
+    ).bind(
+      user.id, body.phone || '', body.pix_key || '', body.pix_key_type || '',
+      body.bank_name || '', JSON.stringify(body.extra_info || {}), now
+    ).run();
+    const row = await env.DB.prepare('SELECT * FROM user_profile_data WHERE user_id = ?').bind(user.id).first();
+    return json(shapePersonal(row, user.id));
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handlePersonalDataByUser(request, env, user, userId) {
+  if (user.role !== 'owner') return json({ error: 'Não autorizado' }, 403);
+  const row = await env.DB.prepare('SELECT * FROM user_profile_data WHERE user_id = ?').bind(userId).first();
+  return json(shapePersonal(row, userId));
+}
+
+// ---------------------------------------------------------------------------
+// Monthly report
+// ---------------------------------------------------------------------------
+
+async function handleMonthlyReport(request, env, user) {
+  const month = new URL(request.url).searchParams.get('month') || new Date().toISOString().slice(0, 7);
+  const summary = await computePaymentSummary(env, month);
+  const { start, end } = monthRange(month);
+  const { results } = await env.DB.prepare(
+    `${TASK_SELECT} WHERE t.status = 'done' AND t.updated_at >= ? AND t.updated_at < ? ORDER BY t.updated_at DESC`
+  ).bind(start, end).all();
+  const completedTasks = (results || []).map(shapeTask);
+
+  const report = { ...summary, completedTasks, generatedAt: Math.floor(Date.now() / 1000) };
+
+  const existing = await env.DB.prepare('SELECT id FROM monthly_reports WHERE month = ?').bind(month).first();
+  const now = Math.floor(Date.now() / 1000);
+  if (existing) {
+    await env.DB.prepare(
+      `UPDATE monthly_reports SET generated_at=?, generated_by=?, total_hours=?, total_due=?, total_paid=?, tasks_completed=?, report_data=? WHERE id=?`
+    ).bind(now, user.id, summary.totalHours, summary.totalDue, summary.totalPaid, completedTasks.length, JSON.stringify(report), existing.id).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO monthly_reports (id, month, generated_at, generated_by, total_hours, total_due, total_paid, tasks_completed, report_data)
+       VALUES (?,?,?,?,?,?,?,?,?)`
+    ).bind(crypto.randomUUID(), month, now, user.id, summary.totalHours, summary.totalDue, summary.totalPaid, completedTasks.length, JSON.stringify(report)).run();
+  }
+  return json(report);
+}
+
+async function handleReportsList(env) {
+  const { results } = await env.DB.prepare(
+    'SELECT id, month, generated_at, total_hours, total_due, total_paid, tasks_completed FROM monthly_reports ORDER BY month DESC'
+  ).all();
+  return json(results || []);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+async function handleAliceTimer(env, user) {
+  const { assistantId } = await getRoleUsers(env);
+  if (!assistantId) return json({ active: false });
+  const row = await env.DB.prepare(
+    `${ENTRY_SELECT} WHERE e.user_id = ? AND e.ended_at IS NULL`
+  ).bind(assistantId).first();
+  if (!row) return json({ active: false });
+  return json({
+    active: true,
+    taskTitle: row.task_title || 'Sem tarefa',
+    startedAt: row.started_at,
+    elapsedSeconds: Math.max(0, Math.floor(Date.now() / 1000) - row.started_at)
+  });
 }
 
 // ---------------------------------------------------------------------------

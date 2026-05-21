@@ -8,7 +8,7 @@ export default function Login() {
       <div className="w-full max-w-sm rounded-2xl border border-line bg-surface p-8 shadow-soft">
         <div className="mb-8 text-center">
           <h1 className="text-4xl font-bold tracking-tight text-ink">Aide</h1>
-          <p className="mt-2 text-sm text-ink2">Seu trabalho, juntos.</p>
+          <p className="mt-2 text-sm text-ink2">Suporte Executivo</p>
         </div>
 
         <button
@@ -25,7 +25,7 @@ export default function Login() {
         </button>
 
         <p className="mt-6 text-center text-xs text-muted">
-          Acesso restrito à equipe.
+          Trabalho em equipe para alcançar o sucesso
         </p>
       </div>
     </div>

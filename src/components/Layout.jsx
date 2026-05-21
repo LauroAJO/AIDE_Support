@@ -6,8 +6,7 @@ import {
   Timer,
   Calendar,
   HardDrive,
-  StickyNote,
-  Bell,
+  FileText,
   Search,
 } from 'lucide-react';
 import { useStore } from '../store';
@@ -15,6 +14,7 @@ import { clearToken } from '../lib/auth';
 import { APP_VERSION } from '../version';
 import Avatar from './shared/Avatar';
 import TimerIndicator from './timer/TimerIndicator';
+import NotificationBell from './notifications/NotificationBell';
 
 const NAV_ITEMS = [
   { to: '/tasks', label: 'Tarefas', icon: CheckSquare },
@@ -22,7 +22,7 @@ const NAV_ITEMS = [
   { to: '/timer', label: 'Timer', icon: Timer },
   { to: '/calendar', label: 'Calendário', icon: Calendar },
   { to: '/drive', label: 'Drive', icon: HardDrive },
-  { to: '/notes', label: 'Notas', icon: StickyNote },
+  { to: '/notes', label: 'Notas', icon: FileText },
 ];
 
 const navClass = ({ isActive }) =>
@@ -38,9 +38,7 @@ export default function Layout({ children }) {
   const navigate = useNavigate();
 
   const [menuOpen, setMenuOpen] = useState(false);
-  const [notifOpen, setNotifOpen] = useState(false);
   const menuRef = useRef(null);
-  const notifRef = useRef(null);
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
 
@@ -60,7 +58,6 @@ export default function Layout({ children }) {
   useEffect(() => {
     function onDocClick(e) {
       if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
-      if (notifRef.current && !notifRef.current.contains(e.target)) setNotifOpen(false);
     }
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
@@ -102,21 +99,7 @@ export default function Layout({ children }) {
         {/* RIGHT — bell, avatar/name, sair */}
         <div className="flex items-center gap-3">
           {/* Notification bell */}
-          <div ref={notifRef} className="relative">
-            <button
-              type="button"
-              onClick={() => setNotifOpen((v) => !v)}
-              className="flex items-center rounded-md p-1.5 text-ink2 transition hover:bg-surface2 hover:text-ink"
-              aria-label="Notificações"
-            >
-              <Bell className="h-5 w-5" />
-            </button>
-            {notifOpen && (
-              <div className="absolute right-0 top-12 w-56 rounded-lg border border-line bg-surface p-4 text-center text-sm text-ink2 shadow-soft">
-                Sem notificações
-              </div>
-            )}
-          </div>
+          <NotificationBell />
 
           {/* Avatar + first name + profile dropdown */}
           <div ref={menuRef} className="relative">

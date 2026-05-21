@@ -10,6 +10,8 @@ export default defineConfig({
       manifest: false,
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        // Inject our push/notificationclick listeners into the generated SW.
+        importScripts: ['/push-sw.js'],
         navigateFallback: 'index.html',
         // Never answer API routes from the cached SPA shell. OAuth navigations
         // (/api/auth/google, /api/auth/callback) must reach the Cloudflare

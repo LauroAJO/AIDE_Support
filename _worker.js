@@ -31,6 +31,7 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/auth/google') return handleGoogleAuth(request, env);
   if (path === '/api/auth/callback') return handleCallback(request, env);
   if (path === '/api/auth/logout') return handleLogout(request, env);
+  if (path === '/api/push/vapid-key') return json({ publicKey: env.VAPID_PUBLIC_KEY || null });
 
   // Protected routes — require valid session token
   const user = await getUserFromRequest(request, env);
@@ -40,8 +41,8 @@ async function handleAPI(request, env, ctx) {
 
   if (path === '/api/users') return handleUsers(env);
 
-  if (path === '/api/tasks') return handleTasksCollection(request, env, user);
-  if (path.startsWith('/api/tasks/')) return handleTaskItem(request, env, user, path.split('/')[3]);
+  if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
+  if (path.startsWith('/api/tasks/')) return handleTaskItem(request, env, user, path.split('/')[3], ctx);
 
   if (path === '/api/projects') return handleProjectsCollection(request, env, user);
   if (path.startsWith('/api/projects/')) return handleProjectItem(request, env, user, path.split('/')[3]);
@@ -71,6 +72,25 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/drive/favorites') return handleDriveFavorites(request, env, user);
   if (path.startsWith('/api/drive/favorites/')) return handleDriveFavoriteToggle(request, env, user, path.split('/')[4]);
   if (path === '/api/drive/sort') return handleDriveSort(request, env, user);
+
+  // Notes
+  if (path === '/api/notes') return handleNotes(request, env, user);
+  if (path.startsWith('/api/notes/')) return handleNoteItem(request, env, user, path.split('/')[3]);
+
+  // Notifications
+  if (path === '/api/notifications') return handleNotifications(request, env, user, ctx);
+  if (path === '/api/notifications/read-all') return handleNotificationsReadAll(request, env, user);
+  if (path.startsWith('/api/notifications/') && path.endsWith('/read')) {
+    return handleNotificationRead(request, env, user, path.split('/')[3]);
+  }
+  if (path.startsWith('/api/notifications/')) return handleNotificationItem(request, env, user, path.split('/')[3]);
+
+  // Push subscriptions
+  if (path === '/api/push/subscribe') return handlePushSubscribe(request, env, user);
+
+  // Month planning
+  if (path === '/api/planning/month') return handleMonthPlanGet(request, env, user);
+  if (path.startsWith('/api/planning/month/')) return handleMonthPlanUpdate(request, env, user, path.split('/')[4]);
 
   return json({ error: 'Rota não encontrada' }, 404);
 }
@@ -351,7 +371,7 @@ async function handleUsers(env) {
   return json(results || []);
 }
 
-async function handleTasksCollection(request, env, user) {
+async function handleTasksCollection(request, env, user, ctx) {
   if (request.method === 'GET') {
     const { results } = await env.DB.prepare(
       `${TASK_SELECT} ORDER BY (t.urgency + t.importance) DESC, t.created_at DESC`
@@ -395,13 +415,18 @@ async function handleTasksCollection(request, env, user) {
       now
     ).run();
     const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(id).first();
-    return json(shapeTask(row), 201);
+    const shaped = shapeTask(row);
+    if (shaped.assigned_to && shaped.assigned_to !== user.id) {
+      await notifyTaskAssignment(env, ctx, user, shaped);
+    }
+    await notifyTaskDue(env, ctx, shaped);
+    return json(shaped, 201);
   }
 
   return json({ error: 'Método não permitido' }, 405);
 }
 
-async function handleTaskItem(request, env, user, taskId) {
+async function handleTaskItem(request, env, user, taskId, ctx) {
   if (!taskId) return json({ error: 'ID ausente' }, 400);
 
   if (request.method === 'GET') {
@@ -454,7 +479,14 @@ async function handleTaskItem(request, env, user, taskId) {
       merged.subtasks, merged.time_entries, now, taskId
     ).run();
     const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(taskId).first();
-    return json(shapeTask(row));
+    const shaped = shapeTask(row);
+    const assigneeChanged = (existing.assigned_to || null) !== (merged.assigned_to || null);
+    if (assigneeChanged && shaped.assigned_to && shaped.assigned_to !== user.id) {
+      await notifyTaskAssignment(env, ctx, user, shaped);
+    }
+    const dueChanged = (existing.due_date || null) !== (merged.due_date || null);
+    if (dueChanged) await notifyTaskDue(env, ctx, shaped);
+    return json(shaped);
   }
 
   if (request.method === 'DELETE') {
@@ -1148,6 +1180,465 @@ async function handleDriveSort(request, env, user) {
     ).bind(it.sort_order || 0, it.googleFileId, user.id).run();
   }
   return json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Notes
+// ---------------------------------------------------------------------------
+
+const NOTE_SELECT =
+  'SELECT n.*, p.name AS project_name, ' +
+  'cu.id AS cu_id, cu.name AS cu_name, cu.avatar AS cu_avatar, ' +
+  'uu.id AS uu_id, uu.name AS uu_name, uu.avatar AS uu_avatar ' +
+  'FROM notes n ' +
+  'LEFT JOIN projects p ON n.project_id = p.id ' +
+  'LEFT JOIN users cu ON n.created_by = cu.id ' +
+  'LEFT JOIN users uu ON n.updated_by = uu.id';
+
+function shapeNote(row) {
+  return {
+    id: row.id,
+    title: row.title || '',
+    body: row.body || '',
+    tags: parseJsonArray(row.tags),
+    project_id: row.project_id || null,
+    projectName: row.project_name || null,
+    createdBy: row.cu_id ? { id: row.cu_id, name: row.cu_name, avatar: row.cu_avatar } : null,
+    updatedBy: row.uu_id ? { id: row.uu_id, name: row.uu_name, avatar: row.uu_avatar } : null,
+    pinned: !!row.pinned,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+async function handleNotes(request, env, user) {
+  if (request.method === 'GET') {
+    const url = new URL(request.url);
+    const search = url.searchParams.get('search');
+    const projectId = url.searchParams.get('project_id');
+    const tag = url.searchParams.get('tag');
+    const where = [];
+    const binds = [];
+    if (search) {
+      where.push('(n.title LIKE ? OR n.body LIKE ?)');
+      binds.push(`%${search}%`, `%${search}%`);
+    }
+    if (projectId) {
+      where.push('n.project_id = ?');
+      binds.push(projectId);
+    }
+    if (tag) {
+      where.push('n.tags LIKE ?');
+      binds.push(`%"${tag}"%`);
+    }
+    const sql = `${NOTE_SELECT}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY n.pinned DESC, n.updated_at DESC`;
+    const { results } = await env.DB.prepare(sql).bind(...binds).all();
+    return json((results || []).map(shapeNote));
+  }
+
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO notes (id, title, body, tags, project_id, created_by, updated_by, pinned, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      id, body.title || '', body.body || '', JSON.stringify(body.tags || []),
+      body.project_id || null, user.id, user.id, body.pinned ? 1 : 0, now, now
+    ).run();
+    const row = await env.DB.prepare(`${NOTE_SELECT} WHERE n.id = ?`).bind(id).first();
+    return json(shapeNote(row), 201);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleNoteItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+
+  if (request.method === 'GET') {
+    const row = await env.DB.prepare(`${NOTE_SELECT} WHERE n.id = ?`).bind(id).first();
+    if (!row) return json({ error: 'Nota não encontrada' }, 404);
+    return json(shapeNote(row));
+  }
+
+  if (request.method === 'PUT') {
+    const existing = await env.DB.prepare('SELECT * FROM notes WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Nota não encontrada' }, 404);
+    const body = (await readJson(request)) || {};
+    const title = body.title !== undefined ? body.title : existing.title;
+    const noteBody = body.body !== undefined ? body.body : existing.body;
+    const tags = body.tags !== undefined ? JSON.stringify(body.tags || []) : existing.tags;
+    const projectId = body.project_id !== undefined ? (body.project_id || null) : existing.project_id;
+    const pinned = body.pinned !== undefined ? (body.pinned ? 1 : 0) : existing.pinned;
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      'UPDATE notes SET title=?, body=?, tags=?, project_id=?, pinned=?, updated_by=?, updated_at=? WHERE id=?'
+    ).bind(title, noteBody, tags, projectId, pinned, user.id, now, id).run();
+    const row = await env.DB.prepare(`${NOTE_SELECT} WHERE n.id = ?`).bind(id).first();
+    return json(shapeNote(row));
+  }
+
+  if (request.method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM notes WHERE id = ?').bind(id).run();
+    return json({ ok: true });
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (+ auto-triggers)
+// ---------------------------------------------------------------------------
+
+const NOTIF_SELECT =
+  'SELECT n.*, fu.name AS from_name, fu.avatar AS from_avatar ' +
+  'FROM notifications n LEFT JOIN users fu ON n.from_user_id = fu.id';
+
+function shapeNotif(row) {
+  return {
+    id: row.id,
+    type: row.type,
+    title: row.title,
+    body: row.body || '',
+    task_id: row.task_id || null,
+    note_id: row.note_id || null,
+    read: !!row.read,
+    created_at: row.created_at,
+    fromUser: row.from_user_id
+      ? { id: row.from_user_id, name: row.from_name, avatar: row.from_avatar }
+      : null
+  };
+}
+
+async function createNotification(env, ctx, n) {
+  const id = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(
+    `INSERT INTO notifications (id, from_user_id, to_user_id, type, title, body, task_id, note_id, read, created_at)
+     VALUES (?,?,?,?,?,?,?,?,0,?)`
+  ).bind(
+    id, n.from_user_id || null, n.to_user_id, n.type, n.title, n.body || '',
+    n.task_id || null, n.note_id || null, now
+  ).run();
+
+  const job = pushToUser(env, n.to_user_id, {
+    title: n.title,
+    body: n.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    data: { notificationId: id, taskId: n.task_id || null, noteId: n.note_id || null, url: '/' }
+  });
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job);
+  else await job.catch(() => {});
+  return id;
+}
+
+async function notifyTaskAssignment(env, ctx, assigner, task) {
+  await createNotification(env, ctx, {
+    from_user_id: assigner.id,
+    to_user_id: task.assigned_to,
+    type: 'task_assigned',
+    title: `${assigner.name || 'Alguém'} atribuiu uma tarefa a você`,
+    body: task.title,
+    task_id: task.id
+  });
+}
+
+async function notifyTaskDue(env, ctx, task) {
+  if (!task.assigned_to || task.status === 'done' || !task.due_date) return;
+  const now = Date.now();
+  const endOfDue = new Date(`${task.due_date}T23:59:59`).getTime();
+  const startOfDue = new Date(`${task.due_date}T00:00:00`).getTime();
+  if (Number.isNaN(endOfDue)) return;
+  const prettyDate = task.due_date.split('-').reverse().join('/');
+  if (endOfDue < now) {
+    await createNotification(env, ctx, {
+      to_user_id: task.assigned_to,
+      type: 'task_overdue',
+      title: 'Tarefa em atraso',
+      body: task.title,
+      task_id: task.id
+    });
+  } else if (startOfDue - now <= 24 * 3600 * 1000) {
+    await createNotification(env, ctx, {
+      to_user_id: task.assigned_to,
+      type: 'task_due_soon',
+      title: 'Tarefa com prazo próximo',
+      body: `${task.title} — vence em ${prettyDate}`,
+      task_id: task.id
+    });
+  }
+}
+
+async function handleNotifications(request, env, user, ctx) {
+  if (request.method === 'GET') {
+    const { results } = await env.DB.prepare(
+      `${NOTIF_SELECT} WHERE n.to_user_id = ? ORDER BY n.read ASC, n.created_at DESC LIMIT 50`
+    ).bind(user.id).all();
+    return json((results || []).map(shapeNotif));
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.to_user_id || !body.type || !body.title) {
+      return json({ error: 'Campos obrigatórios ausentes' }, 400);
+    }
+    const id = await createNotification(env, ctx, {
+      from_user_id: user.id,
+      to_user_id: body.to_user_id,
+      type: body.type,
+      title: body.title,
+      body: body.body || '',
+      task_id: body.task_id || null,
+      note_id: body.note_id || null
+    });
+    const row = await env.DB.prepare(`${NOTIF_SELECT} WHERE n.id = ?`).bind(id).first();
+    return json(shapeNotif(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleNotificationsReadAll(request, env, user) {
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  await env.DB.prepare('UPDATE notifications SET read = 1 WHERE to_user_id = ?').bind(user.id).run();
+  return json({ ok: true });
+}
+
+async function handleNotificationRead(request, env, user, id) {
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  await env.DB.prepare('UPDATE notifications SET read = 1 WHERE id = ? AND to_user_id = ?').bind(id, user.id).run();
+  return json({ ok: true });
+}
+
+async function handleNotificationItem(request, env, user, id) {
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  await env.DB.prepare('DELETE FROM notifications WHERE id = ? AND to_user_id = ?').bind(id, user.id).run();
+  return json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Push subscriptions + Web Push (VAPID, manual aes128gcm per RFC 8291/8188)
+// ---------------------------------------------------------------------------
+
+async function handlePushSubscribe(request, env, user) {
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.endpoint || !body.p256dh || !body.auth) {
+      return json({ error: 'Subscription inválida' }, 400);
+    }
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, created_at)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id, p256dh=excluded.p256dh, auth=excluded.auth`
+    ).bind(crypto.randomUUID(), user.id, body.endpoint, body.p256dh, body.auth, now).run();
+    return json({ ok: true });
+  }
+  if (request.method === 'DELETE') {
+    const body = (await readJson(request)) || {};
+    if (body.endpoint) {
+      await env.DB.prepare('DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?').bind(body.endpoint, user.id).run();
+    } else {
+      await env.DB.prepare('DELETE FROM push_subscriptions WHERE user_id = ?').bind(user.id).run();
+    }
+    return json({ ok: true });
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// --- base64url / byte helpers ---
+function b64urlToBytes(b64url) {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : '';
+  const bin = atob(b64 + pad);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+function bytesToB64url(input) {
+  const bytes = new Uint8Array(input);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function strBytes(s) {
+  return new TextEncoder().encode(s);
+}
+function concatBytes(...arrays) {
+  const total = arrays.reduce((n, a) => n + a.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) {
+    out.set(a, off);
+    off += a.length;
+  }
+  return out;
+}
+
+async function hkdf(salt, ikm, info, length) {
+  const key = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt, info },
+    key,
+    length * 8
+  );
+  return new Uint8Array(bits);
+}
+
+// VAPID JWT (ES256) → Authorization header value.
+async function vapidAuthHeader(endpoint, env) {
+  const url = new URL(endpoint);
+  const aud = `${url.protocol}//${url.host}`;
+  const pubBytes = b64urlToBytes(env.VAPID_PUBLIC_KEY);
+  const jwk = {
+    kty: 'EC',
+    crv: 'P-256',
+    x: bytesToB64url(pubBytes.slice(1, 33)),
+    y: bytesToB64url(pubBytes.slice(33, 65)),
+    d: env.VAPID_PRIVATE_KEY
+  };
+  const key = await crypto.subtle.importKey(
+    'jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']
+  );
+  const header = bytesToB64url(strBytes(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const payload = bytesToB64url(
+    strBytes(JSON.stringify({
+      aud,
+      exp: Math.floor(Date.now() / 1000) + 43200,
+      sub: env.VAPID_SUBJECT || 'mailto:lauro.ajo@gmail.com'
+    }))
+  );
+  const signingInput = `${header}.${payload}`;
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, strBytes(signingInput));
+  return `vapid t=${signingInput}.${bytesToB64url(sig)}, k=${env.VAPID_PUBLIC_KEY}`;
+}
+
+// Encrypt payload with aes128gcm content encoding (RFC 8188 + RFC 8291).
+async function encryptPushPayload(plaintext, p256dhB64, authB64) {
+  const uaPublic = b64urlToBytes(p256dhB64);
+  const authSecret = b64urlToBytes(authB64);
+  const asPair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPublic = new Uint8Array(await crypto.subtle.exportKey('raw', asPair.publicKey));
+  const uaKey = await crypto.subtle.importKey('raw', uaPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const ecdh = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, asPair.privateKey, 256));
+
+  const ikm = await hkdf(
+    authSecret, ecdh, concatBytes(strBytes('WebPush: info\0'), uaPublic, asPublic), 32
+  );
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, strBytes('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(salt, ikm, strBytes('Content-Encoding: nonce\0'), 12);
+
+  const aesKey = await crypto.subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, ['encrypt']);
+  const record = concatBytes(plaintext, new Uint8Array([0x02]));
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aesKey, record));
+
+  const header = new Uint8Array(16 + 4 + 1 + asPublic.length);
+  header.set(salt, 0);
+  new DataView(header.buffer).setUint32(16, 4096, false); // record size
+  header[20] = asPublic.length; // 65
+  header.set(asPublic, 21);
+  return concatBytes(header, ciphertext);
+}
+
+async function sendPushNotification(subscription, payload, env) {
+  if (!env.VAPID_PUBLIC_KEY || !env.VAPID_PRIVATE_KEY) return;
+  try {
+    const body = await encryptPushPayload(strBytes(JSON.stringify(payload)), subscription.p256dh, subscription.auth);
+    const authorization = await vapidAuthHeader(subscription.endpoint, env);
+    const resp = await fetch(subscription.endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Encoding': 'aes128gcm',
+        'Content-Type': 'application/octet-stream',
+        TTL: '86400'
+      },
+      body
+    });
+    if (resp.status === 404 || resp.status === 410) {
+      await env.DB.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').bind(subscription.endpoint).run();
+    }
+  } catch {
+    /* fire-and-forget */
+  }
+}
+
+async function pushToUser(env, userId, payload) {
+  if (!env.VAPID_PUBLIC_KEY || !env.VAPID_PRIVATE_KEY) return;
+  const subs = await env.DB.prepare(
+    'SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?'
+  ).bind(userId).all();
+  for (const sub of subs.results || []) {
+    await sendPushNotification(sub, payload, env);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Month planning
+// ---------------------------------------------------------------------------
+
+function monthStartOf(dateStr) {
+  const base = dateStr || new Date().toISOString().slice(0, 10);
+  return `${base.slice(0, 7)}-01`;
+}
+
+function shapeMonthPlan(row) {
+  let kr = [];
+  try {
+    kr = JSON.parse(row.key_results || '[]');
+  } catch {
+    kr = [];
+  }
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    month_start: row.month_start,
+    strategic_goal: row.strategic_goal || '',
+    key_results: Array.isArray(kr) ? kr : [],
+    notes: row.notes || '',
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+async function handleMonthPlanGet(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  const date = new URL(request.url).searchParams.get('date');
+  const monthStart = monthStartOf(date);
+  let row = await env.DB.prepare(
+    'SELECT * FROM month_plans WHERE user_id = ? AND month_start = ?'
+  ).bind(user.id, monthStart).first();
+  if (!row) {
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO month_plans (id, user_id, month_start, strategic_goal, key_results, notes, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(id, user.id, monthStart, '', '[]', '', now, now).run();
+    row = await env.DB.prepare('SELECT * FROM month_plans WHERE id = ?').bind(id).first();
+  }
+  return json(shapeMonthPlan(row));
+}
+
+async function handleMonthPlanUpdate(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  const existing = await env.DB.prepare(
+    'SELECT * FROM month_plans WHERE id = ? AND user_id = ?'
+  ).bind(id, user.id).first();
+  if (!existing) return json({ error: 'Plano não encontrado' }, 404);
+  const body = (await readJson(request)) || {};
+  const goal = body.strategic_goal !== undefined ? body.strategic_goal : existing.strategic_goal;
+  const kr = body.key_results !== undefined ? JSON.stringify(body.key_results || []) : existing.key_results;
+  const notes = body.notes !== undefined ? body.notes : existing.notes;
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(
+    'UPDATE month_plans SET strategic_goal=?, key_results=?, notes=?, updated_at=? WHERE id=?'
+  ).bind(goal, kr, notes, now, id).run();
+  const row = await env.DB.prepare('SELECT * FROM month_plans WHERE id = ?').bind(id).first();
+  return json(shapeMonthPlan(row));
 }
 
 // ---------------------------------------------------------------------------

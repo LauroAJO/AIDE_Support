@@ -28,6 +28,13 @@ export const useStore = create((set) => ({
   driveParent: null,
   driveSearch: '',
 
+  // Phase A+B — notes, notifications, month planning
+  notes: [],
+  selectedNote: null,
+  notifications: [],
+  unreadCount: 0,
+  monthPlan: null,
+
   setUser: (user) => set({ user }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
@@ -52,6 +59,12 @@ export const useStore = create((set) => ({
   setDriveFavorites: (driveFavorites) => set({ driveFavorites }),
   setDriveParent: (driveParent) => set({ driveParent }),
   setDriveSearch: (driveSearch) => set({ driveSearch }),
+
+  setNotes: (notes) => set({ notes }),
+  setSelectedNote: (selectedNote) => set({ selectedNote }),
+  setNotifications: (notifications) => set({ notifications }),
+  setUnreadCount: (unreadCount) => set({ unreadCount }),
+  setMonthPlan: (monthPlan) => set({ monthPlan }),
 }));
 
 // Derived: tasks filtered by the current taskFilter.

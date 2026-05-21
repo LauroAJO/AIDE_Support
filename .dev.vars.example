@@ -23,3 +23,9 @@ ALLOWED_EMAILS=lauro.ajo@gmail.com,alice@example.com
 
 # The owner email gets role 'owner'; everyone else gets 'assistant'.
 OWNER_EMAIL=lauro.ajo@gmail.com
+
+# Web Push (VAPID). Generate with: npx web-push generate-vapid-keys
+# VAPID_SUBJECT is also set in wrangler.toml [vars]; keys are secrets.
+VAPID_SUBJECT=mailto:lauro.ajo@gmail.com
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=

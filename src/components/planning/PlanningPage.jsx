@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Plus, X, ArrowUp, ArrowDown, Search } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronDown, Plus, X, ArrowUp, ArrowDown, Search, Target } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { mondayOf, weekDays, addDaysISO, formatDateBR, weekdayLabel, isTodayISO, toISODate } from '../../lib/week';
@@ -18,6 +18,8 @@ export default function PlanningPage() {
   const weekPlan = useStore((s) => s.weekPlan);
   const setWeekPlan = useStore((s) => s.setWeekPlan);
   const setSelectedTask = useStore((s) => s.setSelectedTask);
+  const monthPlan = useStore((s) => s.monthPlan);
+  const setMonthPlan = useStore((s) => s.setMonthPlan);
   const navigate = useNavigate();
 
   const [refDate, setRefDate] = useState(() => toISODate(new Date()));
@@ -29,6 +31,11 @@ export default function PlanningPage() {
   const [addFor, setAddFor] = useState(null); // dayIso or null
   const [search, setSearch] = useState('');
   const [strategic, setStrategic] = useState({ short_term: '', tactical: '', strategic: '' });
+  const [stratOpen, setStratOpen] = useState(false);
+  const [weekBlocks, setWeekBlocks] = useState([]);
+  const [monthGoal, setMonthGoal] = useState('');
+  const [keyResults, setKeyResults] = useState([]);
+  const [krInput, setKrInput] = useState('');
 
   const load = async (dateIso) => {
     setLoading(true);
@@ -59,6 +66,60 @@ export default function PlanningPage() {
     load(refDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refDate]);
+
+  const loadStrategic = async () => {
+    try {
+      const base = weekPlan?.week_start || mondayOf(refDate);
+      const mp = await apiFetch(`/api/planning/month?date=${base}`);
+      setMonthPlan(mp);
+      setMonthGoal(mp.strategic_goal || '');
+      setKeyResults(mp.key_results || []);
+      const starts = [0, 1, 2, 3].map((i) => addDaysISO(base, i * 7));
+      const plans = await Promise.all(starts.map((ws) => apiFetch(`/api/planning/week?date=${ws}`)));
+      setWeekBlocks(
+        plans.map((p, i) => {
+          const ids = new Set();
+          Object.values(p.day_plans || {}).forEach((arr) => (arr || []).forEach((id) => ids.add(id)));
+          return {
+            weekStart: starts[i],
+            range: `${formatDateBR(starts[i]).slice(0, 5)}–${formatDateBR(addDaysISO(starts[i], 6)).slice(0, 5)}`,
+            count: ids.size,
+            isCurrent: i === 0,
+          };
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+  };
+
+  useEffect(() => {
+    if (stratOpen) loadStrategic();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stratOpen, weekPlan?.week_start]);
+
+  const saveMonth = async (patch) => {
+    if (!monthPlan) return;
+    const updated = await apiFetch(`/api/planning/month/${monthPlan.id}`, {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    });
+    setMonthPlan(updated);
+  };
+
+  const addKeyResult = () => {
+    const v = krInput.trim();
+    if (!v || keyResults.length >= 5) return;
+    const next = [...keyResults, v];
+    setKeyResults(next);
+    setKrInput('');
+    saveMonth({ key_results: next });
+  };
+  const removeKeyResult = (idx) => {
+    const next = keyResults.filter((_, i) => i !== idx);
+    setKeyResults(next);
+    saveMonth({ key_results: next });
+  };
 
   const tasksById = useMemo(() => {
     const m = {};
@@ -159,6 +220,78 @@ export default function PlanningPage() {
             Hoje
           </button>
         </div>
+      </div>
+
+      {/* Strategic 4-week view (collapsible) */}
+      <div className="rounded-xl border border-line bg-surface">
+        <button
+          onClick={() => setStratOpen((v) => !v)}
+          className="flex w-full items-center justify-between px-4 py-3 text-sm font-bold text-ink"
+        >
+          <span className="flex items-center gap-2">
+            <Target className="h-4 w-4 text-accent" />
+            Visão Estratégica — 4 Semanas
+          </span>
+          <ChevronDown className={`h-4 w-4 transition ${stratOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        {stratOpen && (
+          <div className="space-y-4 border-t border-line px-4 py-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {weekBlocks.map((b) => (
+                <div
+                  key={b.weekStart}
+                  className={`rounded-lg border p-3 text-center ${
+                    b.isCurrent ? 'border-transparent bg-accent text-white' : 'border-line bg-base text-ink'
+                  }`}
+                >
+                  <div className="text-xs font-medium">{b.range}</div>
+                  <div className="mt-1 text-lg font-bold">{b.count}</div>
+                  <div className={`text-[10px] ${b.isCurrent ? 'text-white/80' : 'text-muted'}`}>tarefas</div>
+                </div>
+              ))}
+            </div>
+
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Meta Estratégica do Mês</span>
+              <textarea
+                rows={2}
+                value={monthGoal}
+                onChange={(e) => setMonthGoal(e.target.value)}
+                onBlur={() => monthGoal !== (monthPlan?.strategic_goal || '') && saveMonth({ strategic_goal: monthGoal })}
+                className="input resize-y"
+              />
+            </label>
+
+            <div>
+              <p className="mb-1 text-xs font-medium text-ink2">Resultados-chave (até 5)</p>
+              <ul className="space-y-1">
+                {keyResults.map((kr, idx) => (
+                  <li key={idx} className="flex items-center gap-2 rounded-lg bg-surface2 px-2 py-1.5 text-sm text-ink">
+                    <span className="flex-1">{kr}</span>
+                    <button onClick={() => removeKeyResult(idx)} className="text-muted hover:text-danger">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {keyResults.length < 5 && (
+                <div className="mt-1.5 flex gap-2">
+                  <input
+                    value={krInput}
+                    onChange={(e) => setKrInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addKeyResult())}
+                    placeholder="Adicionar resultado-chave"
+                    className="input flex-1"
+                  />
+                  <button onClick={addKeyResult} className="btn-icon">
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col gap-4 lg:flex-row">

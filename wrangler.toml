@@ -15,8 +15,11 @@ id = "7c9e215fee7e4b9fa97bb1def4536e8a"
 binding = "AIDE_SYNC"
 id = "5afa763feac346398319c34996a85d31"
 
-# Env vars and secrets are NOT defined here (this file is committed to a public
-# repo). Production values live in the Cloudflare Pages dashboard / `wrangler
-# pages secret put`; local values go in .dev.vars (git-ignored). See
-# .dev.vars.example. The worker derives GOOGLE_REDIRECT_URI from the request
-# origin when it isn't set, so production needs no redirect var at all.
+# Secrets (GOOGLE_CLIENT_ID/SECRET, ALLOWED_EMAILS, OWNER_EMAIL, VAPID_PUBLIC_KEY,
+# VAPID_PRIVATE_KEY) are NOT defined here (public repo). They live in the
+# Cloudflare Pages dashboard / `wrangler pages secret put`; local values go in
+# .dev.vars (git-ignored). GOOGLE_REDIRECT_URI is derived from the request
+# origin in production. Only non-sensitive vars belong below.
+
+[vars]
+VAPID_SUBJECT = "mailto:lauro.ajo@gmail.com"

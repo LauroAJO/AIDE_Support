@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useStore } from './store';
 import { getToken, setToken, authHeaders } from './lib/auth';
+import { registerPush } from './lib/push';
 import Layout from './components/Layout';
 import Login from './components/Login';
 import LoadingSpinner from './components/shared/LoadingSpinner';
@@ -13,6 +14,7 @@ import TimerPage from './components/timer/TimerPage';
 import PlanningPage from './components/planning/PlanningPage';
 import CalendarPage from './components/calendar/CalendarPage';
 import DrivePage from './components/drive/DrivePage';
+import NotesPage from './components/notes/NotesPage';
 
 function Placeholder({ title }) {
   return (
@@ -76,6 +78,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Register for push notifications once the user is authenticated.
+  useEffect(() => {
+    if (user) registerPush();
+  }, [user]);
+
   if (isLoading) {
     return (
       <div className="h-screen bg-base">
@@ -98,7 +105,7 @@ export default function App() {
         <Route path="/timer" element={<TimerPage />} />
         <Route path="/calendar" element={<CalendarPage />} />
         <Route path="/drive" element={<DrivePage />} />
-        <Route path="/notes" element={<Placeholder title="Notas" />} />
+        <Route path="/notes" element={<NotesPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="*" element={<Navigate to="/tasks" replace />} />

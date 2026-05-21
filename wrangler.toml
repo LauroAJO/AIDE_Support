@@ -15,5 +15,8 @@ id = "7c9e215fee7e4b9fa97bb1def4536e8a"
 binding = "AIDE_SYNC"
 id = "5afa763feac346398319c34996a85d31"
 
-[vars]
-GOOGLE_REDIRECT_URI = "http://localhost:5173/api/auth/callback"
+# Env vars and secrets are NOT defined here (this file is committed to a public
+# repo). Production values live in the Cloudflare Pages dashboard / `wrangler
+# pages secret put`; local values go in .dev.vars (git-ignored). See
+# .dev.vars.example. The worker derives GOOGLE_REDIRECT_URI from the request
+# origin when it isn't set, so production needs no redirect var at all.

@@ -1,4 +1,13 @@
+const ERROR_MESSAGES = {
+  acesso_negado: 'Acesso negado. Esta conta não está autorizada a usar o Aide.',
+};
+
 export default function Login() {
+  const errorCode = new URLSearchParams(window.location.search).get('error');
+  const errorMessage = errorCode
+    ? ERROR_MESSAGES[errorCode] || 'Não foi possível entrar. Tente novamente.'
+    : null;
+
   const handleLogin = () => {
     window.location.href = '/api/auth/google';
   };
@@ -10,6 +19,12 @@ export default function Login() {
           <h1 className="text-4xl font-bold tracking-tight text-ink">Aide</h1>
           <p className="mt-2 text-sm text-ink2">Suporte Executivo</p>
         </div>
+
+        {errorMessage && (
+          <div className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-center text-xs text-danger">
+            {errorMessage}
+          </div>
+        )}
 
         <button
           onClick={handleLogin}

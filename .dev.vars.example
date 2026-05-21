@@ -1,11 +1,25 @@
-# Local worker secrets for `npm run worker` (wrangler pages dev).
+# Local worker env for `npm run worker` (wrangler pages dev).
 # Copy this file to `.dev.vars` and fill in real values.
 # `.dev.vars` is git-ignored — never commit real credentials.
 #
-# These are read by _worker.js as env.GOOGLE_CLIENT_ID / env.GOOGLE_CLIENT_SECRET.
-# For production, set them with:
+# These are read by _worker.js via env.<NAME>.
+# In PRODUCTION, set the same values in the Cloudflare Pages project:
 #   npx wrangler pages secret put GOOGLE_CLIENT_ID --project-name aide-support
 #   npx wrangler pages secret put GOOGLE_CLIENT_SECRET --project-name aide-support
+#   (ALLOWED_EMAILS / OWNER_EMAIL can be plain vars in the dashboard, or secrets)
 
+# OAuth client credentials (from Google Cloud console)
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
+
+# Local only: Vite serves the app on :5173 and proxies /api to the worker,
+# so the redirect must point back at :5173. In production this is omitted and
+# the worker derives it from the request origin automatically.
+GOOGLE_REDIRECT_URI=http://localhost:5173/api/auth/callback
+
+# Access control: comma-separated allowlist of emails that may sign in.
+# Leave empty to allow anyone (only do that during early setup).
+ALLOWED_EMAILS=lauro.ajo@gmail.com,alice@example.com
+
+# The owner email gets role 'owner'; everyone else gets 'assistant'.
+OWNER_EMAIL=lauro.ajo@gmail.com

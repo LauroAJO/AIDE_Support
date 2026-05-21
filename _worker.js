@@ -56,10 +56,37 @@ const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo';
 const OAUTH_SCOPES = 'openid email profile';
 
+// Redirect URI: use the explicit env override when set (local dev needs
+// http://localhost:5173/... because Vite proxies /api to the worker on :8788),
+// otherwise derive it from the request origin so production "just works" on
+// whatever domain the worker is served from (aide-support.pages.dev or a
+// future custom domain). Whatever this returns must be registered in the
+// Google Cloud console as an Authorized redirect URI.
+function getRedirectUri(request, env) {
+  if (env.GOOGLE_REDIRECT_URI) return env.GOOGLE_REDIRECT_URI;
+  return `${new URL(request.url).origin}/api/auth/callback`;
+}
+
+// Access control. ALLOWED_EMAILS is a comma-separated list (kept out of the
+// repo — set as a Pages var/secret). If unset, everyone is allowed (useful
+// during initial setup); once set, only listed emails can sign in.
+function isEmailAllowed(email, env) {
+  const raw = (env.ALLOWED_EMAILS || '').trim();
+  if (!raw) return true;
+  const allow = raw.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  return allow.includes((email || '').toLowerCase());
+}
+
+// Role: OWNER_EMAIL becomes 'owner', everyone else 'assistant'.
+function roleForEmail(email, env) {
+  const owner = (env.OWNER_EMAIL || '').trim().toLowerCase();
+  return owner && (email || '').toLowerCase() === owner ? 'owner' : 'assistant';
+}
+
 function handleGoogleAuth(request, env) {
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
-    redirect_uri: env.GOOGLE_REDIRECT_URI,
+    redirect_uri: getRedirectUri(request, env),
     response_type: 'code',
     scope: OAUTH_SCOPES,
     access_type: 'offline',
@@ -85,7 +112,7 @@ async function handleCallback(request, env) {
       code,
       client_id: env.GOOGLE_CLIENT_ID,
       client_secret: env.GOOGLE_CLIENT_SECRET,
-      redirect_uri: env.GOOGLE_REDIRECT_URI,
+      redirect_uri: getRedirectUri(request, env),
       grant_type: 'authorization_code'
     })
   });
@@ -112,13 +139,20 @@ async function handleCallback(request, env) {
   const userId = profile.id;
   const now = Math.floor(Date.now() / 1000);
 
-  // 3. Upsert user in D1
+  // 2b. Access control — only allowed emails may sign in.
+  if (!isEmailAllowed(profile.email, env)) {
+    const dest = new URL('/', new URL(getRedirectUri(request, env)).origin);
+    dest.searchParams.set('error', 'acesso_negado');
+    return Response.redirect(dest.toString(), 302);
+  }
+
+  const role = roleForEmail(profile.email, env);
+
+  // 3. Upsert user in D1. Role is recomputed from OWNER_EMAIL on every login.
   await env.DB.prepare(
     `INSERT OR REPLACE INTO users
        (id, email, name, avatar, role, google_access_token, google_refresh_token, google_token_expires_at, created_at, last_seen_at)
-     VALUES (?, ?, ?, ?,
-       COALESCE((SELECT role FROM users WHERE id = ?), 'assistant'),
-       ?, ?, ?,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?,
        COALESCE((SELECT created_at FROM users WHERE id = ?), ?),
        ?)`
   ).bind(
@@ -126,7 +160,7 @@ async function handleCallback(request, env) {
     profile.email,
     profile.name || null,
     profile.picture || null,
-    userId,
+    role,
     access_token,
     refresh_token || null,
     expires_at,
@@ -151,7 +185,7 @@ async function handleCallback(request, env) {
   // 6. Return token + user.
   // The browser hit this URL directly via redirect, so bounce back to the
   // frontend with the token as a query param (frontend stores it).
-  const redirectBase = new URL(env.GOOGLE_REDIRECT_URI).origin;
+  const redirectBase = new URL(getRedirectUri(request, env)).origin;
   const dest = new URL('/', redirectBase);
   dest.searchParams.set('token', sessionToken);
   return Response.redirect(dest.toString(), 302);

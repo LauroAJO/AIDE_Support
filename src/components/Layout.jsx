@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
+import { APP_VERSION } from '../version';
 import Avatar from './shared/Avatar';
 
 const NAV_ITEMS = [
@@ -70,8 +71,11 @@ export default function Layout({ children }) {
     <div className="flex h-screen flex-col bg-base text-ink">
       {/* Header */}
       <header className="relative flex h-14 shrink-0 items-center justify-between border-b border-line bg-surface px-4">
-        {/* LEFT — app name */}
-        <span className="text-xl font-bold text-accent">Aide</span>
+        {/* LEFT — app name + version */}
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-xl font-bold text-accent">Aide</span>
+          <span className="text-[11px] font-medium text-muted">v{APP_VERSION}</span>
+        </div>
 
         {/* CENTER — search bar */}
         <div

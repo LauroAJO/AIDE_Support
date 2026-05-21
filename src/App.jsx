@@ -5,6 +5,7 @@ import { getToken, setToken, authHeaders } from './lib/auth';
 import Layout from './components/Layout';
 import Login from './components/Login';
 import LoadingSpinner from './components/shared/LoadingSpinner';
+import ErrorBoundary from './components/shared/ErrorBoundary';
 import SettingsPage from './components/SettingsPage';
 import ProfilePage from './components/ProfilePage';
 import TasksPage from './components/tasks/TasksPage';
@@ -89,7 +90,8 @@ export default function App() {
 
   return (
     <Layout>
-      <Routes>
+      <ErrorBoundary>
+        <Routes>
         <Route path="/" element={<Navigate to="/tasks" replace />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/planning" element={<PlanningPage />} />
@@ -100,7 +102,8 @@ export default function App() {
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="*" element={<Navigate to="/tasks" replace />} />
-      </Routes>
+        </Routes>
+      </ErrorBoundary>
     </Layout>
   );
 }

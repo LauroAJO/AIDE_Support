@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -29,7 +29,13 @@ export default function TasksPage() {
   const setSelectedTask = useStore((s) => s.setSelectedTask);
   const taskFilter = useStore((s) => s.taskFilter);
   const setTaskFilter = useStore((s) => s.setTaskFilter);
-  const filtered = useStore(selectFilteredTasks);
+  // Compute locally with useMemo. Subscribing via useStore(selectFilteredTasks)
+  // would return a new array every render → Zustand v5 + useSyncExternalStore
+  // treats that as a perpetual state change → React #185 (max update depth).
+  const filtered = useMemo(
+    () => selectFilteredTasks({ tasks, taskFilter, user }),
+    [tasks, taskFilter, user]
+  );
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

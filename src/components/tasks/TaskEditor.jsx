@@ -137,7 +137,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted })
   return (
     <div className="fixed inset-0 z-30 flex justify-end bg-black/20" onClick={onClose}>
       <div
-        className="flex h-full w-full max-w-md flex-col bg-surface shadow-soft"
+        className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-md"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

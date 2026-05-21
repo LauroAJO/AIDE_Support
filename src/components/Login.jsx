@@ -13,8 +13,14 @@ export default function Login() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-base px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-line bg-surface p-8 shadow-soft">
+    <div
+      className="flex min-h-screen items-center justify-center px-4"
+      style={{ background: 'radial-gradient(circle at 50% 30%, #EEF2FF, #FAF8F5)' }}
+    >
+      <div
+        className="w-full max-w-sm rounded-2xl border border-line bg-surface p-8"
+        style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.08)' }}
+      >
         <div className="mb-8 text-center">
           <h1 className="text-4xl font-bold tracking-tight text-ink">Aide</h1>
           <p className="mt-2 text-sm text-ink2">Suporte Executivo</p>

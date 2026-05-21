@@ -209,8 +209,13 @@ export default function NotesPage() {
       {/* RIGHT — editor */}
       <div className={`${selectedNote ? 'flex' : 'hidden md:flex'} min-h-0 w-full flex-col md:w-[65%]`}>
         {!selectedNote || !form ? (
-          <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-line bg-surface text-sm text-muted">
-            Selecione ou crie uma nota
+          <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-line bg-surface text-sm text-muted">
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#9E9890" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <path d="M14 2v6h6" />
+              <path d="M16 13H8M16 17H8M10 9H8" />
+            </svg>
+            Suas notas aparecem aqui
           </div>
         ) : (
           <div className="flex h-full flex-col rounded-xl border border-line bg-surface p-4">

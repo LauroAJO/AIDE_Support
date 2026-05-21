@@ -33,13 +33,25 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/auth/logout') return handleLogout(request, env);
   if (path === '/api/push/vapid-key') return json({ publicKey: env.VAPID_PUBLIC_KEY || null });
 
+  // Bridge — auth handled inside (AIDE session OR X-Bridge-Secret).
+  if (path.startsWith('/api/bridge/')) return handleBridge(request, env, ctx, path);
+
   // Protected routes — require valid session token
   const user = await getUserFromRequest(request, env);
   if (!user) return json({ error: 'Não autorizado' }, 401);
 
-  if (path === '/api/auth/me') return json(publicUser(user));
+  if (path === '/api/auth/me') {
+    await env.DB.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?')
+      .bind(Math.floor(Date.now() / 1000), user.id).run();
+    return json(publicUser(user));
+  }
 
   if (path === '/api/users') return handleUsers(env);
+  if (path === '/api/profile') return handleProfileUpdate(request, env, user);
+
+  // Exports
+  if (path === '/api/export/tasks') return handleExportTasks(env);
+  if (path === '/api/export/notes') return handleExportNotes(env);
 
   if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
   if (path.startsWith('/api/tasks/')) return handleTaskItem(request, env, user, path.split('/')[3], ctx);
@@ -366,9 +378,18 @@ async function readJson(request) {
 
 async function handleUsers(env) {
   const { results } = await env.DB.prepare(
-    'SELECT id, email, name, avatar, role FROM users ORDER BY role DESC, name'
+    'SELECT id, email, name, avatar, role, last_seen_at FROM users ORDER BY role DESC, name'
   ).all();
   return json(results || []);
+}
+
+async function handleProfileUpdate(request, env, user) {
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  const body = (await readJson(request)) || {};
+  const name = body.name !== undefined ? String(body.name).trim() : user.name;
+  await env.DB.prepare('UPDATE users SET name = ? WHERE id = ?').bind(name || null, user.id).run();
+  const updated = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first();
+  return json(publicUser(updated));
 }
 
 async function handleTasksCollection(request, env, user, ctx) {
@@ -1639,6 +1660,206 @@ async function handleMonthPlanUpdate(request, env, user, id) {
   ).bind(goal, kr, notes, now, id).run();
   const row = await env.DB.prepare('SELECT * FROM month_plans WHERE id = ?').bind(id).first();
   return json(shapeMonthPlan(row));
+}
+
+// ---------------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------------
+
+function downloadJson(data, filename) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Access-Control-Allow-Origin': '*'
+    }
+  });
+}
+
+async function handleExportTasks(env) {
+  const { results } = await env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC`).all();
+  return downloadJson((results || []).map(shapeTask), 'aide-tasks.json');
+}
+
+async function handleExportNotes(env) {
+  const { results } = await env.DB.prepare(`${NOTE_SELECT} ORDER BY n.updated_at DESC`).all();
+  return downloadJson((results || []).map(shapeNote), 'aide-notes.json');
+}
+
+// ---------------------------------------------------------------------------
+// Lifegame bridge
+// ---------------------------------------------------------------------------
+
+async function getBridgeConfig(env) {
+  let row = await env.DB.prepare("SELECT * FROM bridge_config WHERE id = 'singleton'").first();
+  if (!row) {
+    await env.DB.prepare(
+      "INSERT INTO bridge_config (id, lifegame_url, bridge_secret, sync_enabled, updated_at) VALUES ('singleton','','',0,?)"
+    ).bind(Math.floor(Date.now() / 1000)).run();
+    row = await env.DB.prepare("SELECT * FROM bridge_config WHERE id = 'singleton'").first();
+  }
+  return row;
+}
+
+function maskBridgeConfig(config) {
+  return {
+    lifegame_url: config.lifegame_url || '',
+    sync_enabled: !!config.sync_enabled,
+    has_secret: !!config.bridge_secret,
+    bridge_secret: config.bridge_secret ? '••••••••' : '',
+    last_sync_at: config.last_sync_at || null,
+    updated_at: config.updated_at
+  };
+}
+
+async function logBridge(env, entry) {
+  try {
+    await env.DB.prepare(
+      'INSERT INTO bridge_sync_log (id, direction, entity_type, entity_id, status, payload, error, synced_at) VALUES (?,?,?,?,?,?,?,?)'
+    ).bind(
+      crypto.randomUUID(), entry.direction, entry.entity_type, entry.entity_id || null,
+      entry.status || 'pending', entry.payload || null, entry.error || null, Math.floor(Date.now() / 1000)
+    ).run();
+  } catch {
+    /* logging is best-effort */
+  }
+}
+
+async function handleBridge(request, env, ctx, path) {
+  const method = request.method;
+  const secret = request.headers.get('X-Bridge-Secret');
+  const config = await getBridgeConfig(env);
+  const hasSecret = !!(secret && config.bridge_secret && secret === config.bridge_secret);
+  const user = hasSecret ? null : await getUserFromRequest(request, env);
+  if (!hasSecret && !user) return json({ error: 'Não autorizado' }, 401);
+
+  if (path === '/api/bridge/config') {
+    if (method === 'GET') return json(maskBridgeConfig(config));
+    if (method === 'PUT') return handleBridgeConfigUpdate(request, env, config);
+    return json({ error: 'Método não permitido' }, 405);
+  }
+  if (path === '/api/bridge/log') return handleBridgeLog(env);
+  if (path === '/api/bridge/push/tasks') return handleBridgePushTasks(env, config);
+  if (path === '/api/bridge/push/time-entries') return handleBridgePushTimeEntries(env, config);
+  if (path === '/api/bridge/receive/sprints') return handleBridgeReceiveSprints(request, env);
+  if (path === '/api/bridge/receive/xp') return handleBridgeReceiveXp(request, env);
+  return json({ error: 'Rota não encontrada' }, 404);
+}
+
+async function handleBridgeConfigUpdate(request, env, existing) {
+  const body = (await readJson(request)) || {};
+  const url = body.lifegame_url !== undefined ? body.lifegame_url : existing.lifegame_url;
+  // Only overwrite the secret if a real (non-masked, non-empty) value is sent.
+  let secret = existing.bridge_secret;
+  if (body.bridge_secret !== undefined && body.bridge_secret && !body.bridge_secret.startsWith('•')) {
+    secret = body.bridge_secret;
+  }
+  const enabled = body.sync_enabled !== undefined ? (body.sync_enabled ? 1 : 0) : existing.sync_enabled;
+  await env.DB.prepare(
+    "UPDATE bridge_config SET lifegame_url=?, bridge_secret=?, sync_enabled=?, updated_at=? WHERE id='singleton'"
+  ).bind(url, secret, enabled, Math.floor(Date.now() / 1000)).run();
+  return json(maskBridgeConfig(await getBridgeConfig(env)));
+}
+
+async function handleBridgeLog(env) {
+  const { results } = await env.DB.prepare(
+    'SELECT id, direction, entity_type, entity_id, status, error, synced_at FROM bridge_sync_log ORDER BY synced_at DESC LIMIT 50'
+  ).all();
+  return json(results || []);
+}
+
+async function handleBridgePushTasks(env, config) {
+  if (!config.lifegame_url || !config.bridge_secret) return json({ error: 'Bridge não configurada' }, 400);
+  const { results } = await env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC`).all();
+  const tasks = (results || []).map(shapeTask);
+  const errors = [];
+  try {
+    const resp = await fetch(`${config.lifegame_url.replace(/\/$/, '')}/api/bridge/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': config.bridge_secret },
+      body: JSON.stringify({ tasks })
+    });
+    await logBridge(env, {
+      direction: 'outbound', entity_type: 'tasks', status: resp.ok ? 'success' : 'error',
+      payload: `${tasks.length} tarefas`, error: resp.ok ? null : `HTTP ${resp.status}`
+    });
+    if (!resp.ok) errors.push(`HTTP ${resp.status}`);
+    await env.DB.prepare("UPDATE bridge_config SET last_sync_at=? WHERE id='singleton'").bind(Math.floor(Date.now() / 1000)).run();
+  } catch (e) {
+    await logBridge(env, { direction: 'outbound', entity_type: 'tasks', status: 'error', error: String(e) });
+    errors.push(String(e));
+  }
+  return json({ pushed: errors.length ? 0 : tasks.length, errors });
+}
+
+async function handleBridgePushTimeEntries(env, config) {
+  if (!config.lifegame_url || !config.bridge_secret) return json({ error: 'Bridge não configurada' }, 400);
+  const { results } = await env.DB.prepare('SELECT * FROM time_entries ORDER BY started_at DESC').all();
+  const entries = results || [];
+  const errors = [];
+  try {
+    const resp = await fetch(`${config.lifegame_url.replace(/\/$/, '')}/api/bridge/time-entries`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': config.bridge_secret },
+      body: JSON.stringify({ time_entries: entries })
+    });
+    await logBridge(env, {
+      direction: 'outbound', entity_type: 'time_entries', status: resp.ok ? 'success' : 'error',
+      payload: `${entries.length} registros`, error: resp.ok ? null : `HTTP ${resp.status}`
+    });
+    if (!resp.ok) errors.push(`HTTP ${resp.status}`);
+  } catch (e) {
+    await logBridge(env, { direction: 'outbound', entity_type: 'time_entries', status: 'error', error: String(e) });
+    errors.push(String(e));
+  }
+  return json({ pushed: errors.length ? 0 : entries.length, errors });
+}
+
+async function handleBridgeReceiveSprints(request, env) {
+  const body = (await readJson(request)) || {};
+  const sprints = Array.isArray(body.sprints) ? body.sprints : [];
+  await logBridge(env, {
+    direction: 'inbound', entity_type: 'sprints', status: 'success',
+    payload: JSON.stringify(sprints).slice(0, 500)
+  });
+  const titles = [];
+  for (const sp of sprints) {
+    if (Array.isArray(sp.tasks)) sp.tasks.forEach((t) => titles.push(typeof t === 'string' ? t : t.title));
+    else if (sp.title) titles.push(sp.title);
+  }
+  const now = Math.floor(Date.now() / 1000);
+  for (const title of titles.filter(Boolean)) {
+    await env.DB.prepare("UPDATE tasks SET status='doing', updated_at=? WHERE title = ? AND status != 'done'")
+      .bind(now, title).run();
+  }
+  return json({ received: sprints.length });
+}
+
+async function handleBridgeReceiveXp(request, env) {
+  const body = (await readJson(request)) || {};
+  await logBridge(env, {
+    direction: 'inbound', entity_type: 'xp', entity_id: body.taskId || null,
+    status: 'success', payload: JSON.stringify(body).slice(0, 500)
+  });
+  if (body.taskId) {
+    const task = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(body.taskId).first();
+    if (task) {
+      let comments = [];
+      try {
+        comments = JSON.parse(task.comments || '[]');
+      } catch {
+        comments = [];
+      }
+      comments.push({
+        id: crypto.randomUUID(), author: 'Lifegame',
+        text: `⚡ ${body.xp || 0} XP earned in Lifegame`, at: Date.now()
+      });
+      await env.DB.prepare('UPDATE tasks SET comments=?, updated_at=? WHERE id=?')
+        .bind(JSON.stringify(comments), Math.floor(Date.now() / 1000), body.taskId).run();
+    }
+  }
+  return json({ ok: true });
 }
 
 // ---------------------------------------------------------------------------

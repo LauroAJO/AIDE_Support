@@ -17,7 +17,8 @@ export default function TaskCard({ task, selected, onClick }) {
     <button
       type="button"
       onClick={onClick}
-      className={`w-full rounded-lg border bg-surface p-3 text-left transition hover:border-accent ${
+      style={{ borderLeftWidth: 4, borderLeftColor: scoreColor(task.score) }}
+      className={`w-full rounded-lg border bg-surface p-3 text-left transition hover:-translate-y-px hover:shadow-soft ${
         selected ? 'border-accent ring-1 ring-accent' : 'border-line'
       }`}
     >

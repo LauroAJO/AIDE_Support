@@ -1,0 +1,19 @@
+name = "aide-support"
+pages_build_output_dir = "dist"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "aide-db"
+database_id = "71f9338d-8664-4df1-8384-86ba8c256de9"
+
+[[kv_namespaces]]
+binding = "AIDE_TOKENS"
+id = "7c9e215fee7e4b9fa97bb1def4536e8a"
+
+[[kv_namespaces]]
+binding = "AIDE_SYNC"
+id = "5afa763feac346398319c34996a85d31"
+
+[vars]
+GOOGLE_REDIRECT_URI = "http://localhost:5173/api/auth/callback"

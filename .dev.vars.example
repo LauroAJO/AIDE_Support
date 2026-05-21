@@ -1,0 +1,11 @@
+# Local worker secrets for `npm run worker` (wrangler pages dev).
+# Copy this file to `.dev.vars` and fill in real values.
+# `.dev.vars` is git-ignored — never commit real credentials.
+#
+# These are read by _worker.js as env.GOOGLE_CLIENT_ID / env.GOOGLE_CLIENT_SECRET.
+# For production, set them with:
+#   npx wrangler pages secret put GOOGLE_CLIENT_ID --project-name aide-support
+#   npx wrangler pages secret put GOOGLE_CLIENT_SECRET --project-name aide-support
+
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=

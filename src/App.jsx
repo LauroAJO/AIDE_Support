@@ -10,6 +10,8 @@ import ProfilePage from './components/ProfilePage';
 import TasksPage from './components/tasks/TasksPage';
 import TimerPage from './components/timer/TimerPage';
 import PlanningPage from './components/planning/PlanningPage';
+import CalendarPage from './components/calendar/CalendarPage';
+import DrivePage from './components/drive/DrivePage';
 
 function Placeholder({ title }) {
   return (
@@ -92,8 +94,8 @@ export default function App() {
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/planning" element={<PlanningPage />} />
         <Route path="/timer" element={<TimerPage />} />
-        <Route path="/calendar" element={<Placeholder title="Calendário" />} />
-        <Route path="/drive" element={<Placeholder title="Drive" />} />
+        <Route path="/calendar" element={<CalendarPage />} />
+        <Route path="/drive" element={<DrivePage />} />
         <Route path="/notes" element={<Placeholder title="Notas" />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/profile" element={<ProfilePage />} />

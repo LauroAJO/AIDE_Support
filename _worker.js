@@ -60,6 +60,18 @@ async function handleAPI(request, env, ctx) {
   // Availability
   if (path === '/api/availability') return handleAvailability(request, env, user);
 
+  // Calendar
+  if (path === '/api/calendar/events') return handleCalendarEvents(request, env, user);
+  if (path.startsWith('/api/calendar/events/')) return handleCalendarEventItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/calendar/sync') return handleCalendarSync(request, env, user);
+  if (path === '/api/calendar/list') return handleCalendarList(request, env, user);
+
+  // Drive
+  if (path === '/api/drive/files') return handleDriveFiles(request, env, user);
+  if (path === '/api/drive/favorites') return handleDriveFavorites(request, env, user);
+  if (path.startsWith('/api/drive/favorites/')) return handleDriveFavoriteToggle(request, env, user, path.split('/')[4]);
+  if (path === '/api/drive/sort') return handleDriveSort(request, env, user);
+
   return json({ error: 'Rota não encontrada' }, 404);
 }
 
@@ -73,7 +85,14 @@ async function handleAPI(request, env, ctx) {
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo';
-const OAUTH_SCOPES = 'openid email profile';
+const OAUTH_SCOPES = [
+  'openid',
+  'email',
+  'profile',
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.metadata.readonly'
+].join(' ');
 
 // Redirect URI: use the explicit env override when set (local dev needs
 // http://localhost:5173/... because Vite proxies /api to the worker on :8788),
@@ -754,6 +773,381 @@ async function handleAvailability(request, env, user) {
   }
 
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---------------------------------------------------------------------------
+// Google API access (token refresh + authed fetch)
+// ---------------------------------------------------------------------------
+
+// Returns a valid access token for the user, refreshing via the stored
+// refresh_token when expired (5-min buffer). `force` refreshes regardless of
+// expiry (used after a 401). Returns null if the grant was revoked.
+async function refreshGoogleToken(userId, env, force = false) {
+  const raw = await env.AIDE_TOKENS.get(`token:${userId}`);
+  if (!raw) return null;
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (!force && data.access_token && data.expires_at && data.expires_at > now + 300) {
+    return data.access_token;
+  }
+  if (!data.refresh_token) return data.access_token || null;
+
+  const resp = await fetch(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId(env),
+      client_secret: clientSecret(env),
+      refresh_token: data.refresh_token,
+      grant_type: 'refresh_token'
+    })
+  });
+  if (!resp.ok) return null;
+  const t = await resp.json();
+  const next = {
+    access_token: t.access_token,
+    refresh_token: t.refresh_token || data.refresh_token,
+    expires_at: now + (t.expires_in || 3600)
+  };
+  await env.AIDE_TOKENS.put(`token:${userId}`, JSON.stringify(next));
+  return next.access_token;
+}
+
+// Authed fetch against a Google API. Returns the Response, or null if there's
+// no usable token. Retries once with a forced refresh on 401.
+async function googleFetch(url, userId, env, options = {}) {
+  let token = await refreshGoogleToken(userId, env);
+  if (!token) return null;
+  const doFetch = (tok) =>
+    fetch(url, { ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${tok}` } });
+  let resp = await doFetch(token);
+  if (resp.status === 401) {
+    token = await refreshGoogleToken(userId, env, true);
+    if (!token) return null;
+    resp = await doFetch(token);
+  }
+  return resp;
+}
+
+// Standard guards for a Google response: null token → reauth, 403 → missing
+// scope. Returns a Response to send back, or null if the response is usable.
+function googleGuard(resp) {
+  if (!resp) return json({ error: 'reauth_required' }, 401);
+  if (resp.status === 403) return json({ error: 'scope_required' }, 403);
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Calendar
+// ---------------------------------------------------------------------------
+
+function shapeGoogleEvent(ev, calendarId) {
+  const allDay = !!(ev.start && ev.start.date);
+  return {
+    id: ev.id,
+    googleEventId: ev.id,
+    title: ev.summary || '(sem título)',
+    description: ev.description || '',
+    startDatetime: ev.start ? ev.start.dateTime || ev.start.date : null,
+    endDatetime: ev.end ? ev.end.dateTime || ev.end.date : null,
+    allDay,
+    location: ev.location || '',
+    color: ev.colorId || null,
+    calendarId
+  };
+}
+
+function buildGoogleEventBody(body) {
+  const allDay = !!(body.all_day || body.allDay);
+  const g = {
+    summary: body.title || body.summary || '(sem título)',
+    description: body.description || '',
+    location: body.location || ''
+  };
+  g.start = allDay ? { date: body.start } : { dateTime: body.start };
+  g.end = allDay ? { date: body.end } : { dateTime: body.end };
+  return g;
+}
+
+async function cacheEvent(env, userId, shaped, raw) {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO calendar_events_cache
+        (id, google_event_id, user_id, calendar_id, title, description, start_datetime, end_datetime, all_day, location, attendees, color, synced_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(google_event_id) DO UPDATE SET
+         calendar_id=excluded.calendar_id, title=excluded.title, description=excluded.description,
+         start_datetime=excluded.start_datetime, end_datetime=excluded.end_datetime, all_day=excluded.all_day,
+         location=excluded.location, attendees=excluded.attendees, color=excluded.color, synced_at=excluded.synced_at`
+    ).bind(
+      crypto.randomUUID(), shaped.googleEventId, userId, shaped.calendarId, shaped.title,
+      shaped.description, shaped.startDatetime, shaped.endDatetime, shaped.allDay ? 1 : 0,
+      shaped.location, JSON.stringify((raw && raw.attendees) || []), shaped.color, Math.floor(Date.now() / 1000)
+    ).run();
+  } catch {
+    /* cache is best-effort */
+  }
+}
+
+async function handleCalendarEvents(request, env, user) {
+  if (request.method === 'GET') {
+    const url = new URL(request.url);
+    const timeMin = url.searchParams.get('start') || new Date().toISOString();
+    const timeMax = url.searchParams.get('end') || new Date(Date.now() + 30 * 86400000).toISOString();
+    const calsParam = url.searchParams.get('calendars');
+    const calendars = calsParam ? calsParam.split(',').filter(Boolean) : ['primary'];
+    const all = [];
+    for (const cal of calendars) {
+      const api =
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events?` +
+        new URLSearchParams({ timeMin, timeMax, singleEvents: 'true', orderBy: 'startTime', maxResults: '100' });
+      const resp = await googleFetch(api, user.id, env);
+      const guard = googleGuard(resp);
+      if (guard) return guard;
+      if (!resp.ok) continue; // skip a calendar that errors individually
+      const data = await resp.json();
+      for (const ev of data.items || []) {
+        const shaped = shapeGoogleEvent(ev, cal);
+        all.push(shaped);
+        await cacheEvent(env, user.id, shaped, ev);
+      }
+    }
+    return json(all);
+  }
+
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    const cal = body.calendar_id || 'primary';
+    const resp = await googleFetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events`,
+      user.id, env,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildGoogleEventBody(body)) }
+    );
+    const guard = googleGuard(resp);
+    if (guard) return guard;
+    if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
+    const ev = await resp.json();
+    const shaped = shapeGoogleEvent(ev, cal);
+    await cacheEvent(env, user.id, shaped, ev);
+    return json(shaped, 201);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleCalendarEventItem(request, env, user, eventId) {
+  if (!eventId) return json({ error: 'ID ausente' }, 400);
+  const url = new URL(request.url);
+
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const cal = body.calendar_id || 'primary';
+    const resp = await googleFetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${encodeURIComponent(eventId)}`,
+      user.id, env,
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildGoogleEventBody(body)) }
+    );
+    const guard = googleGuard(resp);
+    if (guard) return guard;
+    if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
+    const ev = await resp.json();
+    const shaped = shapeGoogleEvent(ev, cal);
+    await cacheEvent(env, user.id, shaped, ev);
+    return json(shaped);
+  }
+
+  if (request.method === 'DELETE') {
+    const cal = url.searchParams.get('calendarId') || 'primary';
+    const resp = await googleFetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${encodeURIComponent(eventId)}`,
+      user.id, env, { method: 'DELETE' }
+    );
+    const guard = googleGuard(resp);
+    if (guard) return guard;
+    if (!resp.ok && resp.status !== 410) return json({ error: 'google_error', detail: await resp.text() }, 502);
+    await env.DB.prepare('DELETE FROM calendar_events_cache WHERE google_event_id = ?').bind(eventId).run();
+    return json({ ok: true });
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleCalendarSync(request, env, user) {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 2, 0, 23, 59, 59);
+  const api =
+    'https://www.googleapis.com/calendar/v3/calendars/primary/events?' +
+    new URLSearchParams({
+      timeMin: start.toISOString(),
+      timeMax: end.toISOString(),
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: '250'
+    });
+  const resp = await googleFetch(api, user.id, env);
+  const guard = googleGuard(resp);
+  if (guard) return guard;
+  if (!resp.ok) return json({ error: 'google_error' }, 502);
+  const data = await resp.json();
+  let synced = 0;
+  for (const ev of data.items || []) {
+    await cacheEvent(env, user.id, shapeGoogleEvent(ev, 'primary'), ev);
+    synced += 1;
+  }
+  return json({ synced });
+}
+
+async function handleCalendarList(request, env, user) {
+  const resp = await googleFetch(
+    'https://www.googleapis.com/calendar/v3/users/me/calendarList',
+    user.id, env
+  );
+  const guard = googleGuard(resp);
+  if (guard) return guard;
+  if (!resp.ok) return json({ error: 'google_error' }, 502);
+  const data = await resp.json();
+  return json(
+    (data.items || []).map((c) => ({
+      id: c.id,
+      summary: c.summary,
+      backgroundColor: c.backgroundColor || null,
+      primary: !!c.primary
+    }))
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Drive
+// ---------------------------------------------------------------------------
+
+function shapeDriveRow(r) {
+  return {
+    id: r.google_file_id,
+    googleFileId: r.google_file_id,
+    name: r.name,
+    mimeType: r.mime_type,
+    webViewLink: r.web_view_link || null,
+    iconLink: r.icon_link || null,
+    modifiedTime: r.modified_time || null,
+    size: r.size || null,
+    isFavorite: !!r.is_favorite,
+    sortOrder: r.sort_order || 0
+  };
+}
+
+async function cacheDriveItem(env, userId, f) {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO drive_items_cache
+        (id, google_file_id, user_id, name, mime_type, web_view_link, icon_link, modified_time, size, parent_id, synced_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(google_file_id) DO UPDATE SET
+         name=excluded.name, mime_type=excluded.mime_type, web_view_link=excluded.web_view_link,
+         icon_link=excluded.icon_link, modified_time=excluded.modified_time, size=excluded.size,
+         parent_id=excluded.parent_id, synced_at=excluded.synced_at`
+    ).bind(
+      crypto.randomUUID(), f.id, userId, f.name, f.mimeType, f.webViewLink || null,
+      f.iconLink || null, f.modifiedTime || null, f.size || null, (f.parents && f.parents[0]) || null,
+      Math.floor(Date.now() / 1000)
+    ).run();
+  } catch {
+    /* best-effort */
+  }
+}
+
+async function handleDriveFiles(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  const url = new URL(request.url);
+  const parent = url.searchParams.get('parent');
+  const search = url.searchParams.get('search');
+  const esc = (s) => s.replace(/'/g, "\\'");
+  let q;
+  if (search) q = `name contains '${esc(search)}' and trashed = false`;
+  else if (parent) q = `'${esc(parent)}' in parents and trashed = false`;
+  else q = `'root' in parents and trashed = false`;
+
+  const api =
+    'https://www.googleapis.com/drive/v3/files?' +
+    new URLSearchParams({
+      q,
+      pageSize: '50',
+      orderBy: 'folder,name',
+      fields: 'files(id,name,mimeType,webViewLink,iconLink,modifiedTime,size,parents)'
+    });
+  const resp = await googleFetch(api, user.id, env);
+  const guard = googleGuard(resp);
+  if (guard) return guard;
+  if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
+  const data = await resp.json();
+
+  const favs = await env.DB.prepare(
+    'SELECT google_file_id FROM drive_items_cache WHERE user_id = ? AND is_favorite = 1'
+  ).bind(user.id).all();
+  const favSet = new Set((favs.results || []).map((r) => r.google_file_id));
+
+  const files = [];
+  for (const f of data.files || []) {
+    await cacheDriveItem(env, user.id, f);
+    files.push({
+      id: f.id,
+      googleFileId: f.id,
+      name: f.name,
+      mimeType: f.mimeType,
+      webViewLink: f.webViewLink || null,
+      iconLink: f.iconLink || null,
+      modifiedTime: f.modifiedTime || null,
+      size: f.size || null,
+      parents: f.parents || [],
+      isFavorite: favSet.has(f.id)
+    });
+  }
+  return json(files);
+}
+
+async function handleDriveFavorites(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM drive_items_cache WHERE user_id = ? AND is_favorite = 1 ORDER BY sort_order, name'
+  ).bind(user.id).all();
+  return json((results || []).map(shapeDriveRow));
+}
+
+async function handleDriveFavoriteToggle(request, env, user, fileId) {
+  if (!fileId) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  const body = (await readJson(request)) || {};
+  const fav = body.is_favorite ? 1 : 0;
+  await env.DB.prepare(
+    `INSERT INTO drive_items_cache
+      (id, google_file_id, user_id, name, mime_type, web_view_link, icon_link, modified_time, is_favorite, sort_order, synced_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(google_file_id) DO UPDATE SET
+       name=excluded.name, mime_type=excluded.mime_type, web_view_link=excluded.web_view_link,
+       icon_link=excluded.icon_link, modified_time=excluded.modified_time,
+       is_favorite=excluded.is_favorite, sort_order=excluded.sort_order, synced_at=excluded.synced_at`
+  ).bind(
+    crypto.randomUUID(), fileId, user.id, body.name || '', body.mimeType || '',
+    body.webViewLink || null, body.iconLink || null, body.modifiedTime || null,
+    fav, body.sort_order || 0, Math.floor(Date.now() / 1000)
+  ).run();
+  return json({ ok: true, is_favorite: !!fav });
+}
+
+async function handleDriveSort(request, env, user) {
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  const body = (await readJson(request)) || {};
+  for (const it of body.items || []) {
+    await env.DB.prepare(
+      'UPDATE drive_items_cache SET sort_order = ? WHERE google_file_id = ? AND user_id = ?'
+    ).bind(it.sort_order || 0, it.googleFileId, user.id).run();
+  }
+  return json({ ok: true });
 }
 
 // ---------------------------------------------------------------------------

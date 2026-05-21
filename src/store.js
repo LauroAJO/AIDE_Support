@@ -19,6 +19,15 @@ export const useStore = create((set) => ({
   weekPlan: null,
   availability: null,
 
+  // Phase 3 — calendar & drive
+  calendarEvents: [],
+  calendarView: 'month',
+  calendarDate: new Date().toISOString(),
+  driveFiles: [],
+  driveFavorites: [],
+  driveParent: null,
+  driveSearch: '',
+
   setUser: (user) => set({ user }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
@@ -35,6 +44,14 @@ export const useStore = create((set) => ({
   setTimeEntries: (timeEntries) => set({ timeEntries }),
   setWeekPlan: (weekPlan) => set({ weekPlan }),
   setAvailability: (availability) => set({ availability }),
+
+  setCalendarEvents: (calendarEvents) => set({ calendarEvents }),
+  setCalendarView: (calendarView) => set({ calendarView }),
+  setCalendarDate: (calendarDate) => set({ calendarDate }),
+  setDriveFiles: (driveFiles) => set({ driveFiles }),
+  setDriveFavorites: (driveFavorites) => set({ driveFavorites }),
+  setDriveParent: (driveParent) => set({ driveParent }),
+  setDriveSearch: (driveSearch) => set({ driveSearch }),
 }));
 
 // Derived: tasks filtered by the current taskFilter.

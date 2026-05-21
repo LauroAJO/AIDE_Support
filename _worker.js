@@ -31,7 +31,6 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/auth/google') return handleGoogleAuth(request, env);
   if (path === '/api/auth/callback') return handleCallback(request, env);
   if (path === '/api/auth/logout') return handleLogout(request, env);
-  if (path === '/api/auth/debug') return handleAuthDebug(request, env); // TEMP — remove after fix
 
   // Protected routes — require valid session token
   const user = await getUserFromRequest(request, env);
@@ -94,28 +93,6 @@ function isEmailAllowed(email, env) {
 function roleForEmail(email, env) {
   const owner = (env.OWNER_EMAIL || '').trim().toLowerCase();
   return owner && (email || '').toLowerCase() === owner ? 'owner' : 'assistant';
-}
-
-// TEMP diagnostic — reveals what the worker actually has, to pinpoint
-// invalid_client. client_id is public (it appears in the OAuth URL), so it's
-// safe to return; client_secret is reported only as present/length, never its
-// value. REMOVE this route once login is confirmed working.
-function handleAuthDebug(request, env) {
-  const id = clientId(env);
-  const secret = clientSecret(env);
-  return json({
-    requestOrigin: new URL(request.url).origin,
-    redirectUri: getRedirectUri(request, env),
-    googleClientId: id || null,
-    clientIdEndsCorrectly: /\.apps\.googleusercontent\.com$/.test(id),
-    clientIdLength: id.length,
-    clientIdHadWhitespace: (env.GOOGLE_CLIENT_ID || '') !== id,
-    hasClientSecret: secret.length > 0,
-    clientSecretLength: secret.length,
-    clientSecretHadWhitespace: (env.GOOGLE_CLIENT_SECRET || '') !== secret,
-    allowedEmailsSet: !!(env.ALLOWED_EMAILS && env.ALLOWED_EMAILS.trim()),
-    ownerEmailSet: !!(env.OWNER_EMAIL && env.OWNER_EMAIL.trim())
-  });
 }
 
 function handleGoogleAuth(request, env) {

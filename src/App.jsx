@@ -29,14 +29,10 @@ export default function App() {
     let cancelled = false;
 
     async function bootstrap() {
-      // TEMP DEBUG (remove once auth flow is confirmed in production)
-      console.log('[auth] mount URL:', window.location.href);
-
       // 1. Capture ?token= returned from the OAuth callback redirect.
       const params = new URLSearchParams(window.location.search);
       const urlToken = params.get('token');
       if (urlToken) {
-        console.log('[auth] token found in URL:', urlToken);
         setToken(urlToken);
         // Clean the token out of the URL without a reload.
         params.delete('token');
@@ -46,7 +42,6 @@ export default function App() {
 
       // 2. No token at all → straight to login.
       if (!getToken()) {
-        console.log('[auth] no token present → showing Login');
         if (!cancelled) setLoading(false);
         return;
       }
@@ -54,7 +49,6 @@ export default function App() {
       // 3. Validate the session.
       try {
         const res = await fetch('/api/auth/me', { headers: authHeaders() });
-        console.log('[auth] /api/auth/me status:', res.status);
         if (!cancelled) {
           if (res.ok) {
             setUser(await res.json());

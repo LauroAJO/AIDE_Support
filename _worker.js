@@ -393,6 +393,9 @@ function shapeTask(row) {
     comments: parseJsonArray(row.comments),
     subtasks: parseJsonArray(row.subtasks),
     time_entries: parseJsonArray(row.time_entries),
+    favorited: row.favorited ? 1 : 0,
+    google_event_id: row.google_event_id || null,
+    drive_attachments: parseJsonArray(row.drive_attachments),
     created_at: row.created_at,
     updated_at: row.updated_at,
     score: calcScore(row.urgency, row.importance),
@@ -439,8 +442,10 @@ async function handleTasksCollection(request, env, user, ctx) {
       ).bind(midnight).all();
       return json((results || []).map(shapeTask));
     }
+    const onlyFav = new URL(request.url).searchParams.get('favorited') === 'true';
+    const where = onlyFav ? 'WHERE t.favorited = 1 ' : '';
     const { results } = await env.DB.prepare(
-      `${TASK_SELECT} ORDER BY (t.urgency + t.importance) DESC, t.created_at DESC`
+      `${TASK_SELECT} ${where}ORDER BY (t.urgency + t.importance) DESC, t.created_at DESC`
     ).all();
     return json((results || []).map(shapeTask));
   }
@@ -458,8 +463,9 @@ async function handleTasksCollection(request, env, user, ctx) {
       `INSERT INTO tasks
         (id, title, description, project_id, assigned_to, created_by,
          urgency, importance, energy, status, due_date, delivery_date,
-         tags, comments, subtasks, time_entries, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         tags, comments, subtasks, time_entries, favorited, drive_attachments,
+         created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(
       id,
       String(body.title).trim(),
@@ -477,6 +483,8 @@ async function handleTasksCollection(request, env, user, ctx) {
       JSON.stringify(body.comments || []),
       JSON.stringify(body.subtasks || []),
       JSON.stringify(body.time_entries || []),
+      body.favorited ? 1 : 0,
+      JSON.stringify(body.drive_attachments || []),
       now,
       now
     ).run();
@@ -486,6 +494,7 @@ async function handleTasksCollection(request, env, user, ctx) {
       await notifyTaskAssignment(env, ctx, user, shaped);
     }
     await notifyTaskDue(env, ctx, shaped);
+    syncTaskToCalendar(env, ctx, shaped);
     return json(shaped, 201);
   }
 
@@ -530,19 +539,23 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
       tags: body.tags !== undefined ? JSON.stringify(body.tags || []) : existing.tags,
       comments: body.comments !== undefined ? JSON.stringify(body.comments || []) : existing.comments,
       subtasks: body.subtasks !== undefined ? JSON.stringify(body.subtasks || []) : existing.subtasks,
-      time_entries: body.time_entries !== undefined ? JSON.stringify(body.time_entries || []) : existing.time_entries
+      time_entries: body.time_entries !== undefined ? JSON.stringify(body.time_entries || []) : existing.time_entries,
+      favorited: body.favorited !== undefined ? (body.favorited ? 1 : 0) : (existing.favorited ? 1 : 0),
+      drive_attachments: body.drive_attachments !== undefined
+        ? JSON.stringify(body.drive_attachments || [])
+        : (existing.drive_attachments || '[]')
     };
     const now = Math.floor(Date.now() / 1000);
     await env.DB.prepare(
       `UPDATE tasks SET title=?, description=?, project_id=?, assigned_to=?,
         urgency=?, importance=?, energy=?, status=?, due_date=?, delivery_date=?,
-        tags=?, comments=?, subtasks=?, time_entries=?, updated_at=?
+        tags=?, comments=?, subtasks=?, time_entries=?, favorited=?, drive_attachments=?, updated_at=?
        WHERE id=?`
     ).bind(
       merged.title, merged.description, merged.project_id, merged.assigned_to,
       merged.urgency, merged.importance, merged.energy, merged.status,
       merged.due_date, merged.delivery_date, merged.tags, merged.comments,
-      merged.subtasks, merged.time_entries, now, taskId
+      merged.subtasks, merged.time_entries, merged.favorited, merged.drive_attachments, now, taskId
     ).run();
     const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(taskId).first();
     const shaped = shapeTask(row);
@@ -552,6 +565,11 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
     }
     const dueChanged = (existing.due_date || null) !== (merged.due_date || null);
     if (dueChanged) await notifyTaskDue(env, ctx, shaped);
+    // @-mention notifications for newly added comments
+    if (body.comments !== undefined) {
+      await notifyCommentMentions(env, ctx, user, shaped, parseJsonArray(existing.comments), shaped.comments);
+    }
+    syncTaskToCalendar(env, ctx, shaped);
     return json(shaped);
   }
 
@@ -1413,6 +1431,97 @@ async function notifyTaskAssignment(env, ctx, assigner, task) {
     body: task.title,
     task_id: task.id
   });
+}
+
+// Notify users mentioned in newly added comments (compares old vs new by id).
+async function notifyCommentMentions(env, ctx, author, task, oldComments, newComments) {
+  const oldIds = new Set((oldComments || []).map((c) => c && c.id).filter(Boolean));
+  const authorName = author.name || 'Alguém';
+  for (const c of newComments || []) {
+    if (!c || (c.id && oldIds.has(c.id))) continue; // only freshly added comments
+    const mentions = Array.isArray(c.mentions) ? [...new Set(c.mentions)] : [];
+    const text = String(c.text || '');
+    const snippet = text.length > 100 ? `${text.slice(0, 100)}…` : text;
+    for (const uid of mentions) {
+      if (!uid || uid === author.id) continue; // don't notify the author
+      await createNotification(env, ctx, {
+        from_user_id: author.id,
+        to_user_id: uid,
+        type: 'mention',
+        title: `${authorName} mencionou você em uma tarefa`,
+        body: `${task.title}: ${snippet}`,
+        task_id: task.id
+      });
+    }
+  }
+}
+
+// All-day Google Calendar events use an EXCLUSIVE end date, so end = due_date + 1.
+function nextDayISO(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + 1);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+}
+
+// Mirror a task to the assigned user's Google Calendar as an all-day event.
+// Non-blocking: scheduled via ctx.waitUntil so it never delays the save response.
+function syncTaskToCalendar(env, ctx, task) {
+  const job = (async () => {
+    try {
+      const userId = task.assigned_to;
+      if (!userId) return;
+      const cal = 'primary';
+      const base = `https://www.googleapis.com/calendar/v3/calendars/${cal}/events`;
+
+      // Completed task: remove its event if one exists.
+      if (task.status === 'done') {
+        if (task.google_event_id) {
+          await googleFetch(`${base}/${encodeURIComponent(task.google_event_id)}`, userId, env, { method: 'DELETE' });
+          await env.DB.prepare('UPDATE tasks SET google_event_id = NULL WHERE id = ?').bind(task.id).run();
+        }
+        return;
+      }
+      if (!task.due_date) return; // nothing to schedule
+
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const colorId = task.due_date < todayStr ? '11' : '5'; // red overdue / blue normal
+      const payload = {
+        summary: task.title,
+        description: 'Tarefa AIDE: ' + (task.description || ''),
+        start: { date: task.due_date },
+        end: { date: nextDayISO(task.due_date) },
+        colorId
+      };
+      const headers = { 'Content-Type': 'application/json' };
+
+      if (task.google_event_id) {
+        const resp = await googleFetch(
+          `${base}/${encodeURIComponent(task.google_event_id)}`,
+          userId, env,
+          { method: 'PATCH', headers, body: JSON.stringify(payload) }
+        );
+        if (resp && resp.status === 404) {
+          // Event was deleted upstream — recreate below.
+          task.google_event_id = null;
+        } else {
+          return;
+        }
+      }
+      const resp = await googleFetch(base, userId, env, {
+        method: 'POST', headers, body: JSON.stringify(payload)
+      });
+      if (!resp || !resp.ok) return;
+      const ev = await resp.json();
+      if (ev && ev.id) {
+        await env.DB.prepare('UPDATE tasks SET google_event_id = ? WHERE id = ?').bind(ev.id, task.id).run();
+      }
+    } catch (_) {
+      // Calendar sync is best-effort; never surface errors to the task save.
+    }
+  })();
+  if (ctx && ctx.waitUntil) ctx.waitUntil(job);
+  else job.catch(() => {});
 }
 
 async function notifyTaskDue(env, ctx, task) {

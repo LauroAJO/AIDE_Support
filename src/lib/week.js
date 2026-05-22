@@ -32,11 +32,20 @@ export function addDaysISO(iso, days) {
   return toISODate(d);
 }
 
-// ISO date → DD/MM/YYYY.
+// Parse a 'YYYY-MM-DD' string as a LOCAL date (local midnight), never UTC.
+// Using new Date('YYYY-MM-DD') would parse as UTC midnight and shift the day
+// back in positive-offset timezones (e.g. UTC+2).
+export function parseDateLocal(dateStr) {
+  if (!dateStr) return null;
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d); // local midnight
+}
+
+// ISO date → DD/MM/YYYY (parsed as local date).
 export function formatDateBR(iso) {
-  if (!iso) return '';
-  const [y, m, d] = iso.split('-');
-  return `${d}/${m}/${y}`;
+  const d = parseDateLocal(iso);
+  if (!d) return '';
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
 }
 
 // ISO date → short weekday + day, e.g. "Seg 21".

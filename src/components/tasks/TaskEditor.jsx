@@ -1,8 +1,10 @@
-import { useState } from 'react';
-import { X, Plus, Trash2 } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { X, Plus, Trash2, Paperclip, Search, ExternalLink } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
 import { STATUSES, STATUS_LABELS, calcScore, scoreColor } from '../../lib/tasks';
+import Avatar from '../shared/Avatar';
+import MentionText from './MentionText';
 
 const EMPTY = {
   title: '',
@@ -17,10 +19,11 @@ const EMPTY = {
   tags: [],
   subtasks: [],
   comments: [],
+  drive_attachments: [],
 };
 
-function fromTask(task) {
-  if (!task) return { ...EMPTY };
+function fromTask(task, initialStatus) {
+  if (!task) return { ...EMPTY, status: initialStatus || EMPTY.status };
   return {
     title: task.title || '',
     description: task.description || '',
@@ -34,6 +37,7 @@ function fromTask(task) {
     tags: task.tags || [],
     subtasks: task.subtasks || [],
     comments: task.comments || [],
+    drive_attachments: task.drive_attachments || [],
   };
 }
 
@@ -56,18 +60,55 @@ function Slider({ label, value, onChange }) {
   );
 }
 
-export default function TaskEditor({ task, users, onClose, onSaved, onDeleted }) {
+export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, initialStatus }) {
   const currentUser = useStore((s) => s.user);
   const isEdit = !!task;
-  const [form, setForm] = useState(() => fromTask(task));
+  const [form, setForm] = useState(() => fromTask(task, initialStatus));
   const [tagInput, setTagInput] = useState('');
   const [subInput, setSubInput] = useState('');
   const [commentInput, setCommentInput] = useState('');
+  const [commentMentions, setCommentMentions] = useState([]);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [showDrivePicker, setShowDrivePicker] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const commentRef = useRef(null);
 
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
   const score = calcScore(form.urgency, form.importance);
+
+  const mentionCandidates = mentionQuery
+    ? users.filter((u) => (u.name || u.email || '').toLowerCase().includes(mentionQuery.toLowerCase()))
+    : users;
+
+  // Detect an active "@token" immediately before the caret to drive the dropdown.
+  const onCommentChange = (e) => {
+    const val = e.target.value;
+    setCommentInput(val);
+    const caret = e.target.selectionStart ?? val.length;
+    const before = val.slice(0, caret);
+    const m = before.match(/@([A-Za-zÀ-ÿ0-9_]*)$/);
+    if (m) {
+      setMentionOpen(true);
+      setMentionQuery(m[1]);
+    } else {
+      setMentionOpen(false);
+      setMentionQuery('');
+    }
+  };
+
+  const pickMention = (u) => {
+    const caret = commentRef.current?.selectionStart ?? commentInput.length;
+    const before = commentInput.slice(0, caret).replace(/@([A-Za-zÀ-ÿ0-9_]*)$/, '');
+    const after = commentInput.slice(caret);
+    const token = `@${(u.name || u.email || '').split(' ')[0]}`;
+    setCommentInput(`${before}${token} ${after}`);
+    setCommentMentions((prev) => (prev.includes(u.id) ? prev : [...prev, u.id]));
+    setMentionOpen(false);
+    setMentionQuery('');
+    setTimeout(() => commentRef.current?.focus(), 0);
+  };
 
   const addTag = () => {
     const v = tagInput.trim();
@@ -88,14 +129,51 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted })
   const addComment = () => {
     const v = commentInput.trim();
     if (!v) return;
+    const now = Date.now();
+    const name = currentUser?.name || 'Você';
+    // Keep only mentions whose token is still present in the final text.
+    const mentions = commentMentions.filter((uid) => {
+      const u = users.find((x) => x.id === uid);
+      const tok = u ? `@${(u.name || u.email || '').split(' ')[0]}` : null;
+      return tok && v.includes(tok);
+    });
     set({
       comments: [
         ...form.comments,
-        { id: crypto.randomUUID(), author: currentUser?.name || 'Você', text: v, at: Date.now() },
+        {
+          id: crypto.randomUUID(),
+          authorId: currentUser?.id || null,
+          authorName: name,
+          author: name, // back-compat with older comment rendering
+          text: v,
+          mentions,
+          createdAt: now,
+          at: now,
+        },
       ],
     });
     setCommentInput('');
+    setCommentMentions([]);
+    setMentionOpen(false);
   };
+
+  const addAttachment = (file) => {
+    if (form.drive_attachments.some((a) => a.googleFileId === file.googleFileId)) return;
+    set({
+      drive_attachments: [
+        ...form.drive_attachments,
+        {
+          googleFileId: file.googleFileId,
+          name: file.name,
+          mimeType: file.mimeType,
+          webViewLink: file.webViewLink,
+          iconLink: file.iconLink,
+        },
+      ],
+    });
+  };
+  const removeAttachment = (id) =>
+    set({ drive_attachments: form.drive_attachments.filter((a) => a.googleFileId !== id) });
 
   const handleSave = async () => {
     if (!form.title.trim()) {
@@ -135,6 +213,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted })
   };
 
   return (
+    <>
     <div className="fixed inset-0 z-30 flex justify-end bg-black/20" onClick={onClose}>
       <div
         className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-md"
@@ -179,6 +258,53 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted })
               onChange={(e) => set({ description: e.target.value })}
               className="input resize-y"
             />
+          </Field>
+
+          {/* Drive attachments */}
+          <Field label="Anexos do Drive">
+            <button
+              type="button"
+              onClick={() => setShowDrivePicker(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+            >
+              <Paperclip className="h-4 w-4" />
+              Anexar arquivo do Drive
+            </button>
+            {form.drive_attachments.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {form.drive_attachments.map((a) => (
+                  <span
+                    key={a.googleFileId}
+                    className="flex items-center gap-1.5 rounded-full bg-surface2 px-2 py-1 text-[11px] text-ink2"
+                  >
+                    {a.iconLink ? (
+                      <img src={a.iconLink} alt="" className="h-3.5 w-3.5" />
+                    ) : (
+                      <Paperclip className="h-3.5 w-3.5" />
+                    )}
+                    <span className="max-w-[120px] truncate" title={a.name}>
+                      {a.name}
+                    </span>
+                    {a.webViewLink && (
+                      <button
+                        type="button"
+                        onClick={() => window.open(a.webViewLink, '_blank')}
+                        className="font-medium text-accent hover:underline"
+                      >
+                        Abrir
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(a.googleFileId)}
+                      className="text-muted hover:text-danger"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
           </Field>
 
           <div className="grid grid-cols-2 gap-3">
@@ -324,33 +450,62 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted })
 
           {/* Comments */}
           <Field label="Comentários">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={commentInput}
-                onChange={(e) => setCommentInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    addComment();
-                  }
-                }}
-                placeholder="Escrever comentário"
-                className="input flex-1"
-              />
-              <button type="button" onClick={addComment} className="btn-icon">
-                <Plus className="h-4 w-4" />
-              </button>
+            <div className="relative">
+              <div className="flex gap-2">
+                <textarea
+                  ref={commentRef}
+                  rows={2}
+                  value={commentInput}
+                  onChange={onCommentChange}
+                  onKeyDown={(e) => {
+                    if (mentionOpen && mentionCandidates.length && e.key === 'Enter') {
+                      e.preventDefault();
+                      pickMention(mentionCandidates[0]);
+                    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      addComment();
+                    } else if (e.key === 'Escape') {
+                      setMentionOpen(false);
+                    }
+                  }}
+                  placeholder="Escrever comentário (use @ para mencionar). Ctrl+Enter envia."
+                  className="input flex-1 resize-y"
+                />
+                <button type="button" onClick={addComment} className="btn-icon self-start">
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
+              {mentionOpen && mentionCandidates.length > 0 && (
+                <div className="absolute left-0 right-10 z-10 mt-1 max-h-44 overflow-y-auto rounded-lg border border-line bg-surface shadow-soft">
+                  {mentionCandidates.map((u) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onClick={() => pickMention(u)}
+                      className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-ink transition hover:bg-surface2"
+                    >
+                      <Avatar user={u} size={18} />
+                      <span>{u.name || u.email}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             {form.comments.length > 0 && (
               <ul className="mt-2 space-y-2">
                 {form.comments.map((c) => (
                   <li key={c.id} className="rounded-lg bg-surface2 p-2 text-xs">
                     <div className="flex justify-between text-[10px] text-muted">
-                      <span>{c.author}</span>
-                      <span>{c.at ? new Date(c.at).toLocaleString('pt-BR') : ''}</span>
+                      <span>{c.authorName || c.author}</span>
+                      <span>
+                        {c.createdAt || c.at
+                          ? new Date(c.createdAt || c.at).toLocaleString('pt-BR')
+                          : ''}
+                      </span>
                     </div>
-                    <p className="mt-0.5 text-ink">{c.text}</p>
+                    <p className="mt-0.5 whitespace-pre-wrap text-ink">
+                      <MentionText text={c.text} />
+                    </p>
                   </li>
                 ))}
               </ul>
@@ -382,6 +537,11 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted })
         </div>
       </div>
     </div>
+
+    {showDrivePicker && (
+      <DrivePicker onClose={() => setShowDrivePicker(false)} onPick={addAttachment} />
+    )}
+    </>
   );
 }
 
@@ -391,5 +551,107 @@ function Field({ label, children }) {
       <span className="mb-1 block text-xs font-medium text-ink2">{label}</span>
       {children}
     </label>
+  );
+}
+
+// Modal to search Google Drive and attach a file to the task.
+function DrivePicker({ onClose, onPick }) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const search = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const q = query.trim();
+      const data = await apiFetch(`/api/drive/files${q ? `?search=${encodeURIComponent(q)}` : ''}`);
+      setResults(Array.isArray(data) ? data : []);
+    } catch {
+      setError('Falha ao buscar no Drive. Verifique a conexão com o Google.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
+      <div
+        className="flex max-h-[80vh] w-full max-w-md flex-col rounded-xl bg-surface shadow-soft"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-line px-4 py-3">
+          <h3 className="text-base font-bold text-ink">Anexar do Drive</h3>
+          <button type="button" onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="border-b border-line px-4 py-3">
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && search()}
+                placeholder="Buscar no Drive..."
+                className="input pl-8"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={search}
+              className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
+            >
+              Buscar
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 py-2">
+          {loading && <p className="px-2 py-3 text-center text-sm text-muted">Buscando...</p>}
+          {error && <p className="px-2 py-3 text-center text-sm text-danger">{error}</p>}
+          {!loading && !error && results.length === 0 && (
+            <p className="px-2 py-3 text-center text-sm text-muted">Nenhum arquivo. Faça uma busca.</p>
+          )}
+          {results.map((f) => (
+            <div key={f.googleFileId} className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-surface2">
+              {f.iconLink ? (
+                <img src={f.iconLink} alt="" className="h-4 w-4 shrink-0" />
+              ) : (
+                <Paperclip className="h-4 w-4 shrink-0 text-muted" />
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm text-ink" title={f.name}>{f.name}</p>
+                {f.modifiedTime && (
+                  <p className="text-[10px] text-muted">
+                    {new Date(f.modifiedTime).toLocaleDateString('pt-BR')}
+                  </p>
+                )}
+              </div>
+              {f.webViewLink && (
+                <a
+                  href={f.webViewLink}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-ink2 hover:text-accent"
+                  title="Abrir no Drive"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={() => { onPick(f); onClose(); }}
+                className="shrink-0 rounded-md bg-accent px-2 py-1 text-xs font-medium text-white transition hover:bg-accent-hover"
+              >
+                Anexar
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }

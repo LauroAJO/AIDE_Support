@@ -1,5 +1,6 @@
-import { Pencil } from 'lucide-react';
+import { Pencil, Paperclip, ExternalLink } from 'lucide-react';
 import Avatar from '../shared/Avatar';
+import MentionText from './MentionText';
 import {
   scoreColor,
   STATUS_LABELS,
@@ -93,6 +94,32 @@ export default function TaskDetail({ task, onEdit }) {
         </div>
       )}
 
+      {task.drive_attachments?.length > 0 && (
+        <div className="mt-3">
+          <p className="mb-1 text-xs font-medium text-muted">Anexos do Drive</p>
+          <div className="flex flex-wrap gap-1.5">
+            {task.drive_attachments.map((a) => (
+              <a
+                key={a.googleFileId}
+                href={a.webViewLink || '#'}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 rounded-full bg-surface2 px-2 py-1 text-[11px] text-ink2 transition hover:text-accent"
+                title={a.name}
+              >
+                {a.iconLink ? (
+                  <img src={a.iconLink} alt="" className="h-3.5 w-3.5" />
+                ) : (
+                  <Paperclip className="h-3.5 w-3.5" />
+                )}
+                <span className="max-w-[140px] truncate">{a.name}</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
       {task.comments?.length > 0 && (
         <div className="mt-3">
           <p className="mb-1 text-xs font-medium text-muted">Comentários</p>
@@ -100,10 +127,16 @@ export default function TaskDetail({ task, onEdit }) {
             {task.comments.map((c) => (
               <li key={c.id} className="rounded-lg bg-surface2 p-2 text-xs">
                 <div className="flex justify-between text-[10px] text-muted">
-                  <span>{c.author}</span>
-                  <span>{c.at ? new Date(c.at).toLocaleString('pt-BR') : ''}</span>
+                  <span>{c.authorName || c.author}</span>
+                  <span>
+                    {c.createdAt || c.at
+                      ? new Date(c.createdAt || c.at).toLocaleString('pt-BR')
+                      : ''}
+                  </span>
                 </div>
-                <p className="mt-0.5 text-ink">{c.text}</p>
+                <p className="mt-0.5 whitespace-pre-wrap text-ink">
+                  <MentionText text={c.text} />
+                </p>
               </li>
             ))}
           </ul>

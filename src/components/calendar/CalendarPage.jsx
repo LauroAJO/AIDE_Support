@@ -18,6 +18,21 @@ import ScopeBanner, { isAuthScopeError } from '../shared/ScopeBanner';
 import EventEditor from './EventEditor';
 
 const CAL_STORAGE_KEY = 'aide_selected_calendars';
+
+// Events synced from AIDE tasks carry this description prefix (see worker
+// syncTaskToCalendar). Used to show a small "AIDE" badge in the calendar.
+const isAideTask = (ev) => (ev?.description || '').startsWith('Tarefa AIDE:');
+
+function AideBadge() {
+  return (
+    <span
+      className="shrink-0 rounded px-1 text-[8px] font-bold uppercase leading-tight text-white"
+      style={{ background: '#6366f1' }}
+    >
+      AIDE
+    </span>
+  );
+}
 const HOUR_PX = 44;
 
 export default function CalendarPage() {
@@ -242,7 +257,10 @@ export default function CalendarPage() {
                         onClick={() => setEditor(ev)}
                         className="block w-full rounded-lg border border-line bg-base px-2 py-1.5 text-left hover:border-accent"
                       >
-                        <div className="truncate text-xs font-medium text-ink">{ev.title}</div>
+                        <div className="flex items-center gap-1">
+                          <span className="truncate text-xs font-medium text-ink">{ev.title}</span>
+                          {isAideTask(ev) && <AideBadge />}
+                        </div>
                         <div className="text-[10px] text-ink2">
                           {ev.allDay ? 'Dia inteiro' : `${eventTime(ev.startDatetime)} – ${eventTime(ev.endDatetime)}`}
                         </div>
@@ -312,6 +330,7 @@ function MonthView({ date, grouped, selectedDay, onSelectDay }) {
                   <div key={ev.id} className="flex items-center gap-1 truncate text-[10px] text-ink2">
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
                     <span className="truncate">{ev.title}</span>
+                    {isAideTask(ev) && <AideBadge />}
                   </div>
                 ))}
                 {evts.length > 3 && (

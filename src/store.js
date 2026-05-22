@@ -11,6 +11,7 @@ export const useStore = create((set) => ({
   users: [],
   selectedTask: null,
   taskFilter: { status: 'all', search: '', assignedTo: 'all' },
+  kanbanView: false,
 
   // Phase 2 — timer & planning
   activeEntry: null,
@@ -51,6 +52,7 @@ export const useStore = create((set) => ({
   setSelectedTask: (selectedTask) => set({ selectedTask }),
   setTaskFilter: (patch) =>
     set((state) => ({ taskFilter: { ...state.taskFilter, ...patch } })),
+  setKanbanView: (kanbanView) => set({ kanbanView }),
 
   setActiveEntry: (activeEntry) => set({ activeEntry }),
   setElapsedSeconds: (elapsedSeconds) => set({ elapsedSeconds }),
@@ -84,7 +86,11 @@ export const selectFilteredTasks = (state) => {
   const { tasks, taskFilter, user } = state;
   const q = taskFilter.search.trim().toLowerCase();
   return tasks.filter((t) => {
-    if (taskFilter.status !== 'all' && t.status !== taskFilter.status) return false;
+    if (taskFilter.status === 'favorites') {
+      if (!t.favorited) return false;
+    } else if (taskFilter.status !== 'all' && t.status !== taskFilter.status) {
+      return false;
+    }
     if (q && !t.title.toLowerCase().includes(q)) return false;
     if (taskFilter.assignedTo === 'me' && t.assigned_to !== user?.id) return false;
     if (taskFilter.assignedTo === 'other' && (!t.assigned_to || t.assigned_to === user?.id)) {

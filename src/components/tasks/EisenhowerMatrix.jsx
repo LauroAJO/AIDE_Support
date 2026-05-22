@@ -13,7 +13,13 @@ function computeLayout(tasks) {
   }
   const placed = [];
   for (const key of Object.keys(quads)) {
-    const arr = quads[key].slice().sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    // Favorited tasks first, then by score DESC.
+    const arr = quads[key]
+      .slice()
+      .sort(
+        (a, b) =>
+          (b.favorited ? 1 : 0) - (a.favorited ? 1 : 0) || (b.score ?? 0) - (a.score ?? 0)
+      );
     const bandTop = key === 'q1' || key === 'q2' ? 0 : 50;
     arr.forEach((t, idx) => {
       placed.push({

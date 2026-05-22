@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search } from 'lucide-react';
+import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { needsDate } from '../../lib/tasks';
@@ -9,9 +9,11 @@ import EisenhowerMatrix from './EisenhowerMatrix';
 import TaskEditor from './TaskEditor';
 import TaskDetail from './TaskDetail';
 import ImportModal from './ImportModal';
+import KanbanBoard from './KanbanBoard';
 
 const STATUS_TABS = [
   ['all', 'Todas'],
+  ['favorites', '⭐ Favoritas'],
   ['backlog', 'Backlog'],
   ['todo', 'A Fazer'],
   ['doing', 'Fazendo'],
@@ -29,6 +31,8 @@ export default function TasksPage() {
   const setSelectedTask = useStore((s) => s.setSelectedTask);
   const taskFilter = useStore((s) => s.taskFilter);
   const setTaskFilter = useStore((s) => s.setTaskFilter);
+  const kanbanView = useStore((s) => s.kanbanView);
+  const setKanbanView = useStore((s) => s.setKanbanView);
   // Compute locally with useMemo. Subscribing via useStore(selectFilteredTasks)
   // would return a new array every render → Zustand v5 + useSyncExternalStore
   // treats that as a perpetual state change → React #185 (max update depth).
@@ -41,6 +45,7 @@ export default function TasksPage() {
   const [error, setError] = useState('');
   // editorTask: undefined = closed, null = new, object = edit
   const [editorTask, setEditorTask] = useState(undefined);
+  const [editorStatus, setEditorStatus] = useState(undefined); // preset status for new task
   const [showImport, setShowImport] = useState(false);
   const [showMatrixMobile, setShowMatrixMobile] = useState(false);
   const [alertDismissed, setAlertDismissed] = useState(false);
@@ -75,17 +80,37 @@ export default function TasksPage() {
 
   const onSaved = (saved) => {
     setEditorTask(undefined);
+    setEditorStatus(undefined);
     setSelectedTask(saved);
     loadAll();
   };
   const onDeleted = (id) => {
     setEditorTask(undefined);
+    setEditorStatus(undefined);
     if (selectedTask?.id === id) setSelectedTask(null);
     loadAll();
   };
   const onImported = () => {
     setShowImport(false);
     loadAll();
+  };
+
+  // Optimistic single-field update (favorite, status drag). Reverts on failure.
+  const persistTask = async (task, patch) => {
+    const next = { ...task, ...patch };
+    setTasks(tasks.map((t) => (t.id === task.id ? next : t)));
+    if (selectedTask?.id === task.id) setSelectedTask(next);
+    try {
+      await apiFetch(`/api/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify(patch) });
+    } catch {
+      loadAll();
+    }
+  };
+  const toggleFavorite = (task) => persistTask(task, { favorited: task.favorited ? 0 : 1 });
+  const changeStatus = (task, status) => persistTask(task, { status });
+  const addInColumn = (status) => {
+    setEditorStatus(status);
+    setEditorTask(null);
   };
 
   if (loading) {
@@ -104,6 +129,28 @@ export default function TasksPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-2xl font-bold text-ink">Tarefas</h1>
           <div className="flex flex-wrap gap-2">
+            <div className="flex overflow-hidden rounded-lg border border-line">
+              <button
+                type="button"
+                onClick={() => setKanbanView(false)}
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition ${
+                  !kanbanView ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+                }`}
+              >
+                <List className="h-4 w-4" />
+                Lista
+              </button>
+              <button
+                type="button"
+                onClick={() => setKanbanView(true)}
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition ${
+                  kanbanView ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+                }`}
+              >
+                <Columns className="h-4 w-4" />
+                Kanban
+              </button>
+            </div>
             <button
               type="button"
               onClick={() => setShowMatrixMobile((v) => !v)}
@@ -201,19 +248,31 @@ export default function TasksPage() {
 
         {error && <p className="mt-3 text-sm text-danger">{error}</p>}
 
-        {/* Task list */}
-        <div className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pb-2">
-          {filtered.length === 0 ? (
+        {/* Task list / Kanban */}
+        <div className="mt-3 min-h-0 flex-1 overflow-y-auto pb-2">
+          {kanbanView ? (
+            <KanbanBoard
+              tasks={filtered}
+              selectedTask={selectedTask}
+              onSelect={setSelectedTask}
+              onToggleFavorite={toggleFavorite}
+              onStatusChange={changeStatus}
+              onAddTask={addInColumn}
+            />
+          ) : filtered.length === 0 ? (
             <p className="mt-8 text-center text-sm text-muted">Nenhuma tarefa encontrada.</p>
           ) : (
-            filtered.map((t) => (
-              <TaskCard
-                key={t.id}
-                task={t}
-                selected={selectedTask?.id === t.id}
-                onClick={() => setSelectedTask(t)}
-              />
-            ))
+            <div className="space-y-2">
+              {filtered.map((t) => (
+                <TaskCard
+                  key={t.id}
+                  task={t}
+                  selected={selectedTask?.id === t.id}
+                  onClick={() => setSelectedTask(t)}
+                  onToggleFavorite={toggleFavorite}
+                />
+              ))}
+            </div>
           )}
         </div>
       </div>
@@ -235,7 +294,11 @@ export default function TasksPage() {
         <TaskEditor
           task={editorTask}
           users={users}
-          onClose={() => setEditorTask(undefined)}
+          initialStatus={editorStatus}
+          onClose={() => {
+            setEditorTask(undefined);
+            setEditorStatus(undefined);
+          }}
           onSaved={onSaved}
           onDeleted={onDeleted}
         />

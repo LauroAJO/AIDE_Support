@@ -1,4 +1,5 @@
-import { AlertTriangle, Star } from 'lucide-react';
+import { useState } from 'react';
+import { AlertTriangle, Star, ChevronRight, ChevronDown } from 'lucide-react';
 import Avatar from '../shared/Avatar';
 import {
   scoreColor,
@@ -9,10 +10,12 @@ import {
   needsDate,
 } from '../../lib/tasks';
 
-export default function TaskCard({ task, selected, onClick, onToggleFavorite }) {
+export default function TaskCard({ task, selected, onClick, onToggleFavorite, onToggleSubtask }) {
   const overdue = isOverdue(task.due_date);
   const warn = needsDate(task);
   const fav = !!task.favorited;
+  const subs = task.subtasks || [];
+  const [expanded, setExpanded] = useState(false);
 
   return (
     // role=button (not a real <button>) so the favorite <button> can nest validly.
@@ -89,6 +92,41 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite }) 
         <div className="mt-2 flex items-center gap-1.5">
           <Avatar user={task.assignedUser} size={18} />
           <span className="text-[11px] text-ink2">{task.assignedUser.name}</span>
+        </div>
+      )}
+
+      {subs.length > 0 && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+            className="flex items-center gap-1 text-[11px] font-medium text-ink2 hover:text-ink"
+          >
+            {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+            {subs.length} subtarefa{subs.length > 1 ? 's' : ''}
+          </button>
+          {expanded && (
+            <ul className="mt-1 space-y-1">
+              {subs.map((s) => (
+                <li key={s.id} className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={!!s.done}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      onToggleSubtask?.(task, s.id);
+                    }}
+                    className="accent-[#6366f1]"
+                  />
+                  <span className={s.done ? 'text-muted line-through' : 'text-ink'}>{s.text}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </div>

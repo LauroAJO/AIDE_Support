@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Star, Plus } from 'lucide-react';
+import { Star, Plus, ChevronRight, ChevronDown } from 'lucide-react';
 import Avatar from '../shared/Avatar';
 import {
   STATUSES,
@@ -18,9 +18,11 @@ export default function KanbanBoard({
   onToggleFavorite,
   onStatusChange,
   onAddTask,
+  onToggleSubtask,
 }) {
   const [draggingId, setDraggingId] = useState(null);
   const [overCol, setOverCol] = useState(null);
+  const [expanded, setExpanded] = useState({});
 
   const byStatus = (s) =>
     tasks
@@ -131,6 +133,40 @@ export default function KanbanBoard({
                       )}
                       {t.assignedUser && <Avatar user={t.assignedUser} size={18} />}
                     </div>
+                    {(t.subtasks || []).length > 0 && (
+                      <div className="mt-1.5">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpanded((m) => ({ ...m, [t.id]: !m[t.id] }));
+                          }}
+                          className="flex items-center gap-1 text-[10px] font-medium text-ink2 hover:text-ink"
+                        >
+                          {expanded[t.id] ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                          {t.subtasks.length} subtarefa{t.subtasks.length > 1 ? 's' : ''}
+                        </button>
+                        {expanded[t.id] && (
+                          <ul className="mt-1 space-y-1">
+                            {t.subtasks.map((s) => (
+                              <li key={s.id} className="flex items-center gap-1.5 text-[11px]">
+                                <input
+                                  type="checkbox"
+                                  checked={!!s.done}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onChange={(e) => {
+                                    e.stopPropagation();
+                                    onToggleSubtask?.(t, s.id);
+                                  }}
+                                  className="accent-[#6366f1]"
+                                />
+                                <span className={s.done ? 'text-muted line-through' : 'text-ink'}>{s.text}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}

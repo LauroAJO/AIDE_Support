@@ -96,6 +96,12 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/calendar/sync') return handleCalendarSync(request, env, user);
   if (path === '/api/calendar/list') return handleCalendarList(request, env, user);
 
+  // Access control
+  if (path === '/api/access/drive') return handleAccessDrive(request, env, user);
+  if (path.startsWith('/api/access/drive/')) return handleAccessDriveItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/access/calendar') return handleAccessCalendar(request, env, user);
+  if (path.startsWith('/api/access/calendar/')) return handleAccessCalendarItem(request, env, user, path.split('/')[4]);
+
   // Drive
   if (path === '/api/drive/files') return handleDriveFiles(request, env, user);
   if (path === '/api/drive/favorites') return handleDriveFavorites(request, env, user);
@@ -1013,13 +1019,107 @@ async function cacheEvent(env, userId, shaped, raw) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Access control (owner manages Alice's Drive/Calendar visibility)
+// ---------------------------------------------------------------------------
+
+// Returns a Set of allowed google_file_ids for a restricted (assistant) user,
+// or null when there's no restriction (owner, or no allow rules = open).
+async function allowedDriveIds(env, user) {
+  if (!user || user.role === 'owner') return null;
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT google_file_id FROM drive_access_rules WHERE access_type = 'allow' AND applies_to = 'alice'"
+    ).all();
+    const ids = (results || []).map((r) => r.google_file_id);
+    return ids.length ? new Set(ids) : null;
+  } catch {
+    return null; // table not migrated → open by default
+  }
+}
+
+async function allowedCalendarIds(env, user) {
+  if (!user || user.role === 'owner') return null;
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT google_calendar_id FROM calendar_access_rules WHERE access_type = 'allow' AND applies_to = 'alice'"
+    ).all();
+    const ids = (results || []).map((r) => r.google_calendar_id);
+    return ids.length ? new Set(ids) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function handleAccessDrive(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare('SELECT * FROM drive_access_rules ORDER BY created_at DESC').all();
+      return json(results || []);
+    } catch {
+      return json([]);
+    }
+  }
+  if (request.method === 'POST') {
+    if (user.role !== 'owner') return json({ error: 'Não autorizado' }, 403);
+    const body = (await readJson(request)) || {};
+    if (!body.google_file_id || !body.file_name) return json({ error: 'Campos obrigatórios ausentes' }, 400);
+    const id = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO drive_access_rules (id, created_by, google_file_id, file_name, mime_type, access_type, applies_to, created_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(id, user.id, body.google_file_id, body.file_name, body.mime_type || '', body.access_type || 'allow', body.applies_to || 'alice', Math.floor(Date.now() / 1000)).run();
+    return json({ ok: true, id }, 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleAccessDriveItem(request, env, user, id) {
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  if (user.role !== 'owner') return json({ error: 'Não autorizado' }, 403);
+  await env.DB.prepare('DELETE FROM drive_access_rules WHERE id = ?').bind(id).run();
+  return json({ ok: true });
+}
+
+async function handleAccessCalendar(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare('SELECT * FROM calendar_access_rules ORDER BY created_at DESC').all();
+      return json(results || []);
+    } catch {
+      return json([]);
+    }
+  }
+  if (request.method === 'POST') {
+    if (user.role !== 'owner') return json({ error: 'Não autorizado' }, 403);
+    const body = (await readJson(request)) || {};
+    if (!body.google_calendar_id || !body.calendar_name) return json({ error: 'Campos obrigatórios ausentes' }, 400);
+    const id = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO calendar_access_rules (id, created_by, google_calendar_id, calendar_name, color, access_type, applies_to, created_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(id, user.id, body.google_calendar_id, body.calendar_name, body.color || '#6366f1', body.access_type || 'allow', body.applies_to || 'alice', Math.floor(Date.now() / 1000)).run();
+    return json({ ok: true, id }, 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleAccessCalendarItem(request, env, user, id) {
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  if (user.role !== 'owner') return json({ error: 'Não autorizado' }, 403);
+  await env.DB.prepare('DELETE FROM calendar_access_rules WHERE id = ?').bind(id).run();
+  return json({ ok: true });
+}
+
 async function handleCalendarEvents(request, env, user) {
   if (request.method === 'GET') {
     const url = new URL(request.url);
     const timeMin = url.searchParams.get('start') || new Date().toISOString();
     const timeMax = url.searchParams.get('end') || new Date(Date.now() + 30 * 86400000).toISOString();
     const calsParam = url.searchParams.get('calendars');
-    const calendars = calsParam ? calsParam.split(',').filter(Boolean) : ['primary'];
+    let calendars = calsParam ? calsParam.split(',').filter(Boolean) : ['primary'];
+    const allowedCals = await allowedCalendarIds(env, user);
+    if (allowedCals) calendars = calendars.filter((c) => allowedCals.has(c));
     const all = [];
     for (const cal of calendars) {
       const api =
@@ -1131,14 +1231,15 @@ async function handleCalendarList(request, env, user) {
   if (guard) return guard;
   if (!resp.ok) return json({ error: 'google_error' }, 502);
   const data = await resp.json();
-  return json(
-    (data.items || []).map((c) => ({
-      id: c.id,
-      summary: c.summary,
-      backgroundColor: c.backgroundColor || null,
-      primary: !!c.primary
-    }))
-  );
+  let list = (data.items || []).map((c) => ({
+    id: c.id,
+    summary: c.summary,
+    backgroundColor: c.backgroundColor || null,
+    primary: !!c.primary
+  }));
+  const allowedCals = await allowedCalendarIds(env, user);
+  if (allowedCals) list = list.filter((c) => allowedCals.has(c.id));
+  return json(list);
 }
 
 // ---------------------------------------------------------------------------
@@ -1225,6 +1326,14 @@ async function handleDriveFiles(request, env, user) {
       parents: f.parents || [],
       isFavorite: favSet.has(f.id)
     });
+  }
+
+  // Access control for the assistant: if allow rules exist, only show allowed
+  // items — unless we're browsing inside an explicitly-allowed folder, in
+  // which case its contents are shown freely.
+  const allowed = await allowedDriveIds(env, user);
+  if (allowed && !(parent && allowed.has(parent))) {
+    return json(files.filter((f) => allowed.has(f.googleFileId)));
   }
   return json(files);
 }

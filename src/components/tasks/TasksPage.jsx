@@ -7,7 +7,7 @@ import LoadingSpinner from '../shared/LoadingSpinner';
 import TaskCard from './TaskCard';
 import EisenhowerMatrix from './EisenhowerMatrix';
 import TaskEditor from './TaskEditor';
-import TaskDetail from './TaskDetail';
+import TaskModal from './TaskModal';
 import ImportModal from './ImportModal';
 import KanbanBoard from './KanbanBoard';
 
@@ -47,7 +47,7 @@ export default function TasksPage() {
   const [editorTask, setEditorTask] = useState(undefined);
   const [editorStatus, setEditorStatus] = useState(undefined); // preset status for new task
   const [showImport, setShowImport] = useState(false);
-  const [showMatrixMobile, setShowMatrixMobile] = useState(false);
+  const [showMatrix, setShowMatrix] = useState(false);
   const [alertDismissed, setAlertDismissed] = useState(false);
 
   const loadAll = async () => {
@@ -108,6 +108,10 @@ export default function TasksPage() {
   };
   const toggleFavorite = (task) => persistTask(task, { favorited: task.favorited ? 0 : 1 });
   const changeStatus = (task, status) => persistTask(task, { status });
+  const toggleSubtask = (task, subId) =>
+    persistTask(task, {
+      subtasks: (task.subtasks || []).map((s) => (s.id === subId ? { ...s, done: !s.done } : s)),
+    });
   const addInColumn = (status) => {
     setEditorStatus(status);
     setEditorTask(null);
@@ -122,64 +126,62 @@ export default function TasksPage() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-4 md:flex-row">
-      {/* LEFT PANEL */}
-      <div className="flex min-h-0 flex-1 flex-col md:w-3/5">
-        {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h1 className="text-2xl font-bold text-ink">Tarefas</h1>
-          <div className="flex flex-wrap gap-2">
-            <div className="flex overflow-hidden rounded-lg border border-line">
-              <button
-                type="button"
-                onClick={() => setKanbanView(false)}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition ${
-                  !kanbanView ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
-                }`}
-              >
-                <List className="h-4 w-4" />
-                Lista
-              </button>
-              <button
-                type="button"
-                onClick={() => setKanbanView(true)}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition ${
-                  kanbanView ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
-                }`}
-              >
-                <Columns className="h-4 w-4" />
-                Kanban
-              </button>
-            </div>
+    <div className="flex h-full flex-col">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-2xl font-bold text-ink">Tarefas</h1>
+        <div className="flex flex-wrap gap-2">
+          <div className="flex overflow-hidden rounded-lg border border-line">
             <button
               type="button"
-              onClick={() => setShowMatrixMobile((v) => !v)}
-              className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2 md:hidden"
+              onClick={() => setKanbanView(false)}
+              className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition ${
+                !kanbanView ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+              }`}
             >
-              <LayoutGrid className="h-4 w-4" />
-              {showMatrixMobile ? 'Ocultar Matriz' : 'Ver Matriz'}
+              <List className="h-4 w-4" />
+              Lista
             </button>
             <button
               type="button"
-              onClick={() => setShowImport(true)}
-              className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+              onClick={() => setKanbanView(true)}
+              className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition ${
+                kanbanView ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+              }`}
             >
-              <Upload className="h-4 w-4" />
-              Importar Lista
-            </button>
-            <button
-              type="button"
-              onClick={() => setEditorTask(null)}
-              className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
-            >
-              <Plus className="h-4 w-4" />
-              Nova Tarefa
+              <Columns className="h-4 w-4" />
+              Kanban
             </button>
           </div>
+          <button
+            type="button"
+            onClick={() => setShowMatrix((v) => !v)}
+            className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+          >
+            <LayoutGrid className="h-4 w-4" />
+            {showMatrix ? 'Ocultar Matriz' : 'Ver Matriz'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowImport(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+          >
+            <Upload className="h-4 w-4" />
+            Importar Lista
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditorTask(null)}
+            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
+          >
+            <Plus className="h-4 w-4" />
+            Nova Tarefa
+          </button>
         </div>
+      </div>
 
-        {/* Filters */}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+      {/* Filters */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
           <div className="flex flex-wrap gap-1">
             {STATUS_TABS.map(([value, label]) => (
               <button
@@ -258,6 +260,7 @@ export default function TasksPage() {
               onToggleFavorite={toggleFavorite}
               onStatusChange={changeStatus}
               onAddTask={addInColumn}
+              onToggleSubtask={toggleSubtask}
             />
           ) : filtered.length === 0 ? (
             <p className="mt-8 text-center text-sm text-muted">Nenhuma tarefa encontrada.</p>
@@ -270,24 +273,33 @@ export default function TasksPage() {
                   selected={selectedTask?.id === t.id}
                   onClick={() => setSelectedTask(t)}
                   onToggleFavorite={toggleFavorite}
+                  onToggleSubtask={toggleSubtask}
                 />
               ))}
             </div>
           )}
-        </div>
       </div>
 
-      {/* RIGHT PANEL */}
-      <div className={`md:w-2/5 ${showMatrixMobile ? 'block' : 'hidden'} md:block`}>
-        <EisenhowerMatrix tasks={filtered} selectedTask={selectedTask} onSelect={setSelectedTask} />
-        {selectedTask ? (
-          <TaskDetail task={selectedTask} onEdit={() => setEditorTask(selectedTask)} />
-        ) : (
-          <div className="mt-4 rounded-xl border border-dashed border-line bg-surface p-6 text-center text-sm text-muted">
-            Selecione uma tarefa para ver os detalhes.
-          </div>
-        )}
-      </div>
+      {/* Eisenhower Matrix — collapsible, below the list */}
+      {showMatrix && (
+        <div className="mt-4 shrink-0">
+          <EisenhowerMatrix tasks={filtered} selectedTask={selectedTask} onSelect={setSelectedTask} />
+        </div>
+      )}
+
+      {/* Task detail modal */}
+      {selectedTask && (
+        <TaskModal
+          task={selectedTask}
+          onClose={() => setSelectedTask(null)}
+          onEdit={(t) => {
+            setSelectedTask(null);
+            setEditorTask(t);
+          }}
+          onPersist={persistTask}
+          onDelete={onDeleted}
+        />
+      )}
 
       {/* Editor slide-in */}
       {editorTask !== undefined && (

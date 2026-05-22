@@ -6,6 +6,7 @@ import { getToken } from '../lib/auth';
 import { APP_VERSION } from '../version';
 import { isAuthScopeError } from './shared/ScopeBanner';
 import Avatar from './shared/Avatar';
+import AccessControl from './settings/AccessControl';
 
 const ROLE_LABELS = { owner: 'Proprietário', assistant: 'Assistente' };
 const GITHUB_URL = 'https://github.com/LauroAJO/AIDE_Support';
@@ -153,6 +154,9 @@ export default function SettingsPage() {
           <IntegrationCard label="Google Drive" status={driveStatus} />
         </div>
       </Section>
+
+      {/* Access control — owner manages Alice's visibility */}
+      {currentUser?.role === 'owner' && <AccessControl />}
 
       {/* Data */}
       <Section title="Dados">

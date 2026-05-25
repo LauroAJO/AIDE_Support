@@ -5,6 +5,7 @@ import { useStore } from '../../store';
 import { STATUSES, STATUS_LABELS, calcScore, scoreColor } from '../../lib/tasks';
 import Avatar from '../shared/Avatar';
 import MentionText from './MentionText';
+import DriveAttachmentZone from '../shared/DriveAttachmentZone';
 
 const EMPTY = {
   title: '',
@@ -294,7 +295,15 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
             />
           </Field>
 
-          {/* Drive attachments */}
+          {/* New: Drive attachment zone — drag&drop uploads + Drive linking.
+              Only available when editing an existing task (needs an id). */}
+          {isEdit && (
+            <Field label="Arquivos">
+              <DriveAttachmentZone entityType="task" entityId={task.id} />
+            </Field>
+          )}
+
+          {/* Legacy single-pick Drive attachments (kept for back-compat) */}
           <Field label="Anexos do Drive">
             <button
               type="button"

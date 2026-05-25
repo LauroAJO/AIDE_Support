@@ -71,6 +71,17 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/export/notes') return handleExportNotes(env);
 
   if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
+  // Task files — must match BEFORE the generic /api/tasks/:id route below.
+  if (path.match(/^\/api\/tasks\/[^/]+\/files\/link$/)) {
+    return handleAttachmentLink(request, env, user, 'task', path.split('/')[3]);
+  }
+  if (path.match(/^\/api\/tasks\/[^/]+\/files$/)) {
+    return handleAttachmentFiles(request, env, user, 'task', path.split('/')[3]);
+  }
+  if (path.match(/^\/api\/tasks\/[^/]+\/files\/[^/]+$/)) {
+    const parts = path.split('/');
+    return handleAttachmentItem(request, env, user, 'task', parts[3], parts[5]);
+  }
   if (path.startsWith('/api/tasks/')) return handleTaskItem(request, env, user, path.split('/')[3], ctx);
 
   if (path === '/api/projects') return handleProjectsCollection(request, env, user);
@@ -83,6 +94,7 @@ async function handleAPI(request, env, ctx) {
   if (path.startsWith('/api/fronts/')) return handleFrontItem(request, env, user, path.split('/')[3]);
 
   // Networking
+  if (path === '/api/network/routes') return handleNetworkRoutes(request, env, user);
   if (path === '/api/network/people') return handleNetworkPeople(request, env, user);
   if (path.startsWith('/api/network/people/')) return handleNetworkPersonItem(request, env, user, path.split('/')[4]);
   if (path === '/api/network/institutions') return handleNetworkInstitutions(request, env, user);
@@ -131,6 +143,17 @@ async function handleAPI(request, env, ctx) {
   if (path.match(/^\/api\/notes\/[^/]+\/images\/[^/]+$/)) {
     const parts = path.split('/');
     return handleNoteImageItem(request, env, user, parts[3], parts[5]);
+  }
+  // Note files (drag&drop + Drive link)
+  if (path.match(/^\/api\/notes\/[^/]+\/files\/link$/)) {
+    return handleAttachmentLink(request, env, user, 'note', path.split('/')[3]);
+  }
+  if (path.match(/^\/api\/notes\/[^/]+\/files$/)) {
+    return handleAttachmentFiles(request, env, user, 'note', path.split('/')[3]);
+  }
+  if (path.match(/^\/api\/notes\/[^/]+\/files\/[^/]+$/)) {
+    const parts = path.split('/');
+    return handleAttachmentItem(request, env, user, 'note', parts[3], parts[5]);
   }
   if (path.startsWith('/api/notes/')) return handleNoteItem(request, env, user, path.split('/')[3]);
 
@@ -3568,7 +3591,7 @@ async function handleNetworkPeople(request, env, user) {
   if (request.method === 'GET') {
     try {
       const { results } = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
-      return json((results || []).map(shapeNetworkPerson));
+      return json(await hydratePeople(env, results || []));
     } catch { return json([]); }
   }
   if (request.method === 'POST') {
@@ -3595,8 +3618,13 @@ async function handleNetworkPeople(request, env, user) {
     } catch (e) {
       return json({ error: 'Falha ao criar pessoa', detail: String(e) }, 500);
     }
+    if (Array.isArray(body.roles)) await persistPersonRoles(env, id, body.roles);
+    if (Array.isArray(body.entity_links)) {
+      await persistEntityLinks(env, { personId: id }, body.entity_links);
+    }
     const row = await env.DB.prepare('SELECT * FROM network_people WHERE id = ?').bind(id).first();
-    return json(shapeNetworkPerson(row), 201);
+    const [hydrated] = await hydratePeople(env, [row]);
+    return json(hydrated, 201);
   }
   return json({ error: 'Método não permitido' }, 405);
 }
@@ -3624,8 +3652,13 @@ async function handleNetworkPersonItem(request, env, user, id) {
       pick('dex_contact_id', existing.dex_contact_id),
       now, id
     ).run();
+    if (Array.isArray(body.roles)) await persistPersonRoles(env, id, body.roles);
+    if (Array.isArray(body.entity_links)) {
+      await persistEntityLinks(env, { personId: id }, body.entity_links);
+    }
     const row = await env.DB.prepare('SELECT * FROM network_people WHERE id = ?').bind(id).first();
-    return json(shapeNetworkPerson(row));
+    const [hydrated] = await hydratePeople(env, [row]);
+    return json(hydrated);
   }
   if (request.method === 'DELETE') {
     await env.DB.prepare('DELETE FROM network_people WHERE id = ?').bind(id).run();
@@ -3727,8 +3760,398 @@ async function handleNetworkConnectionItem(request, env, user, id) {
 }
 
 // ---------------------------------------------------------------------------
-// Response helpers
+// Drive-backed attachments for notes and tasks (drag&drop uploads + links to
+// existing files). Uploads land in AIDE_SUPPORT/NOTAS/<noteId>/ or
+// AIDE_SUPPORT/TAREFAS/<taskId>/. "Link" mode just stores a reference in the
+// {note,task}_drive_links table — no Drive upload happens.
 // ---------------------------------------------------------------------------
+
+const ATTACHMENT_FOLDERS = { note: 'NOTAS', task: 'TAREFAS' };
+const ATTACHMENT_TABLES = { note: 'note_drive_links', task: 'task_drive_links' };
+const ATTACHMENT_FK = { note: 'note_id', task: 'task_id' };
+
+async function entityFolderId(kind, entityId, ownerId, env) {
+  const root = await findOrCreateDriveFolder('AIDE_SUPPORT', 'root', ownerId, env);
+  const bucket = await findOrCreateDriveFolder(ATTACHMENT_FOLDERS[kind], root, ownerId, env);
+  return findOrCreateDriveFolder(entityId, bucket, ownerId, env);
+}
+
+function shapeAttachmentRow(r) {
+  return {
+    fileId: r.google_file_id,
+    id: r.google_file_id,
+    name: r.name,
+    mimeType: r.mime_type || '',
+    webViewLink: r.web_view_link || null,
+    iconLink: r.icon_link || null,
+    thumbnailLink: null, // links only carry the basics — frontend falls back to iconLink
+    isUpload: !!r.is_upload,
+    isLink: !r.is_upload,
+    linkId: r.id,
+    createdAt: r.created_at
+  };
+}
+
+async function handleAttachmentFiles(request, env, user, kind, entityId) {
+  if (!entityId) return json({ error: 'ID ausente' }, 400);
+  const table = ATTACHMENT_TABLES[kind];
+  const fk = ATTACHMENT_FK[kind];
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+
+  if (request.method === 'GET') {
+    // Drive-side files
+    let driveFiles = [];
+    try {
+      const folderId = await entityFolderId(kind, entityId, ownerId, env);
+      const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
+      const resp = await googleFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,webViewLink,thumbnailLink,iconLink,webContentLink,createdTime)&orderBy=createdTime desc`,
+        ownerId, env
+      );
+      if (resp && resp.ok) {
+        const data = await resp.json();
+        driveFiles = (data.files || []).map((f) => ({
+          fileId: f.id,
+          id: f.id,
+          name: f.name,
+          mimeType: f.mimeType,
+          webViewLink: f.webViewLink || null,
+          thumbnailLink: f.thumbnailLink || null,
+          iconLink: f.iconLink || null,
+          isUpload: true,
+          isLink: false,
+          linkId: null,
+          createdAt: f.createdTime ? Math.floor(new Date(f.createdTime).getTime() / 1000) : null
+        }));
+      }
+    } catch { /* folder doesn't exist yet → no uploads */ }
+
+    // Linked files
+    let links = [];
+    try {
+      const r = await env.DB.prepare(
+        `SELECT * FROM ${table} WHERE ${fk} = ? AND is_upload = 0 ORDER BY created_at DESC`
+      ).bind(entityId).all();
+      links = (r.results || []).map(shapeAttachmentRow);
+    } catch { /* table missing — skip */ }
+
+    return json([...driveFiles, ...links]);
+  }
+
+  if (request.method === 'POST') {
+    let form;
+    try {
+      form = await request.formData();
+    } catch {
+      return json({ error: 'Envie multipart/form-data com um campo "file"' }, 400);
+    }
+    const file = form.get('file');
+    if (!file || typeof file === 'string') {
+      return json({ error: 'Campo "file" ausente ou inválido' }, 400);
+    }
+    const folderId = await entityFolderId(kind, entityId, ownerId, env);
+    const buffer = await file.arrayBuffer();
+    const boundary = '----AIDEUpload' + crypto.randomUUID();
+    const metadata = {
+      name: file.name || `file-${Date.now()}`,
+      parents: [folderId],
+      mimeType: file.type || 'application/octet-stream'
+    };
+    const enc = new TextEncoder();
+    const head = enc.encode(
+      `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      JSON.stringify(metadata) + `\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: ${metadata.mimeType}\r\n\r\n`
+    );
+    const tail = enc.encode(`\r\n--${boundary}--`);
+    const body = new Uint8Array(head.byteLength + buffer.byteLength + tail.byteLength);
+    body.set(head, 0);
+    body.set(new Uint8Array(buffer), head.byteLength);
+    body.set(tail, head.byteLength + buffer.byteLength);
+
+    const resp = await googleFetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,webViewLink,thumbnailLink,iconLink,webContentLink',
+      ownerId, env,
+      { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body }
+    );
+    const guard = googleGuard(resp);
+    if (guard) return guard;
+    if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
+    const f = await resp.json();
+    return json({
+      fileId: f.id, id: f.id, name: f.name, mimeType: f.mimeType,
+      webViewLink: f.webViewLink || null, thumbnailLink: f.thumbnailLink || null,
+      iconLink: f.iconLink || null, isUpload: true, isLink: false
+    }, 201);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleAttachmentLink(request, env, user, kind, entityId) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!entityId) return json({ error: 'ID ausente' }, 400);
+  const body = (await readJson(request)) || {};
+  if (!body.googleFileId || !body.name) {
+    return json({ error: 'googleFileId e name são obrigatórios' }, 400);
+  }
+  const table = ATTACHMENT_TABLES[kind];
+  const fk = ATTACHMENT_FK[kind];
+  const id = crypto.randomUUID();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO ${table} (id, ${fk}, google_file_id, name, mime_type, web_view_link, icon_link, is_upload, created_by, created_at)
+       VALUES (?,?,?,?,?,?,?,0,?,?)`
+    ).bind(
+      id, entityId, body.googleFileId, body.name, body.mimeType || '',
+      body.webViewLink || '', body.iconLink || '', user.id, Math.floor(Date.now() / 1000)
+    ).run();
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/no such table/i.test(msg)) {
+      return json({ error: 'Migração 0016 não aplicada', detail: msg }, 503);
+    }
+    return json({ error: 'Falha ao vincular arquivo', detail: msg }, 500);
+  }
+  const row = await env.DB.prepare(`SELECT * FROM ${table} WHERE id = ?`).bind(id).first();
+  return json(shapeAttachmentRow(row), 201);
+}
+
+async function handleAttachmentItem(request, env, user, kind, entityId, fileId) {
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  if (!entityId || !fileId) return json({ error: 'IDs ausentes' }, 400);
+  const table = ATTACHMENT_TABLES[kind];
+  const fk = ATTACHMENT_FK[kind];
+
+  // If this fileId is a link (not an upload), just remove the link.
+  let linkRow = null;
+  try {
+    linkRow = await env.DB.prepare(
+      `SELECT * FROM ${table} WHERE ${fk} = ? AND google_file_id = ? AND is_upload = 0`
+    ).bind(entityId, fileId).first();
+  } catch { /* table missing */ }
+  if (linkRow) {
+    await env.DB.prepare(`DELETE FROM ${table} WHERE id = ?`).bind(linkRow.id).run();
+    return json({ ok: true, removed: 'link' });
+  }
+
+  // Otherwise it's an uploaded file — delete from Drive.
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+  const resp = await googleFetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`,
+    ownerId, env, { method: 'DELETE' }
+  );
+  const guard = googleGuard(resp);
+  if (guard) return guard;
+  if (!resp.ok && resp.status !== 404 && resp.status !== 410) {
+    return json({ error: 'google_error', detail: await resp.text() }, 502);
+  }
+  return json({ ok: true, removed: 'upload' });
+}
+
+// ---------------------------------------------------------------------------
+// Networking v2 — multiple roles + AIDE entity links + full graph dump
+// ---------------------------------------------------------------------------
+
+async function fetchRolesForPeople(env, peopleIds) {
+  if (peopleIds.length === 0) return {};
+  let rows = [];
+  try {
+    const placeholders = peopleIds.map(() => '?').join(',');
+    const r = await env.DB.prepare(
+      `SELECT r.*, i.name AS institution_lookup_name
+       FROM person_roles r
+       LEFT JOIN network_institutions i ON r.institution_id = i.id
+       WHERE r.person_id IN (${placeholders})`
+    ).bind(...peopleIds).all();
+    rows = r.results || [];
+  } catch { return {}; }
+  const m = {};
+  for (const r of rows) {
+    if (!m[r.person_id]) m[r.person_id] = [];
+    m[r.person_id].push({
+      id: r.id,
+      role: r.role,
+      institution_id: r.institution_id || null,
+      institution_name: r.institution_lookup_name || r.institution_name || '',
+      start_date: r.start_date || '',
+      end_date: r.end_date || '',
+      current: !!r.current
+    });
+  }
+  return m;
+}
+
+async function fetchEntityLinksFor(env, peopleIds, institutionIds) {
+  let rows = [];
+  try {
+    const conds = [];
+    const binds = [];
+    if (peopleIds.length) {
+      conds.push(`network_person_id IN (${peopleIds.map(() => '?').join(',')})`);
+      binds.push(...peopleIds);
+    }
+    if (institutionIds.length) {
+      conds.push(`network_institution_id IN (${institutionIds.map(() => '?').join(',')})`);
+      binds.push(...institutionIds);
+    }
+    if (conds.length === 0) return { byPerson: {}, byInstitution: {} };
+    const r = await env.DB.prepare(
+      `SELECT * FROM network_entity_links WHERE ${conds.join(' OR ')}`
+    ).bind(...binds).all();
+    rows = r.results || [];
+  } catch { return { byPerson: {}, byInstitution: {} }; }
+  const byPerson = {};
+  const byInstitution = {};
+  for (const r of rows) {
+    const shaped = {
+      id: r.id,
+      entity_type: r.entity_type,
+      entity_id: r.entity_id,
+      entity_name: r.entity_name || '',
+      notes: r.notes || ''
+    };
+    if (r.network_person_id) {
+      if (!byPerson[r.network_person_id]) byPerson[r.network_person_id] = [];
+      byPerson[r.network_person_id].push(shaped);
+    }
+    if (r.network_institution_id) {
+      if (!byInstitution[r.network_institution_id]) byInstitution[r.network_institution_id] = [];
+      byInstitution[r.network_institution_id].push(shaped);
+    }
+  }
+  return { byPerson, byInstitution };
+}
+
+async function fetchConnectionsForPeople(env, peopleIds) {
+  if (peopleIds.length === 0) return {};
+  let rows = [];
+  try {
+    const placeholders = peopleIds.map(() => '?').join(',');
+    const r = await env.DB.prepare(
+      `SELECT c.*, pa.name AS person_a_name, pb.name AS person_b_name
+       FROM network_connections c
+       LEFT JOIN network_people pa ON c.person_a_id = pa.id
+       LEFT JOIN network_people pb ON c.person_b_id = pb.id
+       WHERE c.person_a_id IN (${placeholders}) OR c.person_b_id IN (${placeholders})`
+    ).bind(...peopleIds, ...peopleIds).all();
+    rows = r.results || [];
+  } catch { return {}; }
+  const m = {};
+  for (const r of rows) {
+    const fromA = (pid, otherId, otherName) => {
+      if (!m[pid]) m[pid] = [];
+      m[pid].push({
+        id: r.id,
+        other_id: otherId,
+        other_name: otherName,
+        connection_type: r.connection_type || '',
+        description: r.description || ''
+      });
+    };
+    fromA(r.person_a_id, r.person_b_id, r.person_b_name);
+    fromA(r.person_b_id, r.person_a_id, r.person_a_name);
+  }
+  return m;
+}
+
+// Hydrate the existing shapeNetworkPerson with roles/entity_links/connections.
+// Falls back to the bare shape if any auxiliary table is missing.
+async function hydratePeople(env, rows) {
+  const people = rows.map(shapeNetworkPerson);
+  const ids = people.map((p) => p.id);
+  const [rolesByPerson, linksMap, connsByPerson] = await Promise.all([
+    fetchRolesForPeople(env, ids),
+    fetchEntityLinksFor(env, ids, []),
+    fetchConnectionsForPeople(env, ids)
+  ]);
+  return people.map((p) => ({
+    ...p,
+    roles: rolesByPerson[p.id] || [],
+    entity_links: linksMap.byPerson[p.id] || [],
+    connections: connsByPerson[p.id] || []
+  }));
+}
+
+async function persistPersonRoles(env, personId, roles) {
+  await env.DB.prepare('DELETE FROM person_roles WHERE person_id = ?').bind(personId).run().catch(() => {});
+  for (const r of (roles || [])) {
+    if (!r || !r.role) continue;
+    try {
+      await env.DB.prepare(
+        `INSERT INTO person_roles (id, person_id, role, institution_id, institution_name, start_date, end_date, current, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        crypto.randomUUID(), personId, String(r.role).trim(),
+        r.institution_id || null, r.institution_name || '',
+        r.start_date || '', r.end_date || '',
+        r.current === false ? 0 : 1, Math.floor(Date.now() / 1000)
+      ).run();
+    } catch { /* table missing or row invalid — skip silently */ }
+  }
+}
+
+async function persistEntityLinks(env, { personId, institutionId }, links) {
+  if (personId) {
+    await env.DB.prepare('DELETE FROM network_entity_links WHERE network_person_id = ?').bind(personId).run().catch(() => {});
+  }
+  if (institutionId) {
+    await env.DB.prepare('DELETE FROM network_entity_links WHERE network_institution_id = ?').bind(institutionId).run().catch(() => {});
+  }
+  for (const l of (links || [])) {
+    if (!l || !l.entity_type || !l.entity_id) continue;
+    try {
+      await env.DB.prepare(
+        `INSERT INTO network_entity_links
+          (id, network_person_id, network_institution_id, entity_type, entity_id, entity_name, notes, created_at)
+         VALUES (?,?,?,?,?,?,?,?)`
+      ).bind(
+        crypto.randomUUID(), personId || null, institutionId || null,
+        l.entity_type, l.entity_id, l.entity_name || '', l.notes || '',
+        Math.floor(Date.now() / 1000)
+      ).run();
+    } catch { /* skip */ }
+  }
+}
+
+async function handleNetworkRoutes(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  let peopleRows = [];
+  let institutions = [];
+  let connections = [];
+  try {
+    const r = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
+    peopleRows = r.results || [];
+  } catch { /* missing table */ }
+  try {
+    const r = await env.DB.prepare('SELECT * FROM network_institutions ORDER BY name').all();
+    institutions = (r.results || []).map(shapeInstitution);
+  } catch { /* missing */ }
+  try {
+    const r = await env.DB.prepare('SELECT * FROM network_connections').all();
+    connections = r.results || [];
+  } catch { /* missing */ }
+  const people = await hydratePeople(env, peopleRows);
+  // Flatten roles for graph rendering
+  const person_roles = [];
+  for (const p of people) {
+    for (const r of p.roles || []) {
+      person_roles.push({
+        person_id: p.id,
+        person_name: p.name,
+        role: r.role,
+        institution_id: r.institution_id,
+        institution_name: r.institution_name,
+        current: r.current
+      });
+    }
+  }
+  return json({ people, institutions, connections, person_roles });
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {

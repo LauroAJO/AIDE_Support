@@ -3,6 +3,7 @@ import { X, Star, Pencil, CheckCircle2, Trash2, Paperclip, ExternalLink, Send } 
 import { useStore } from '../../store';
 import Avatar from '../shared/Avatar';
 import MentionText from './MentionText';
+import DriveAttachmentZone from '../shared/DriveAttachmentZone';
 import { scoreColor, STATUS_LABELS, STATUS_COLORS, formatDate, isOverdue } from '../../lib/tasks';
 
 // Centered modal: read-only view + quick actions. Editing the full task still
@@ -147,6 +148,12 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete }
               </div>
             </div>
           )}
+
+          {/* Drive attachments (read-only) */}
+          <div>
+            <p className="mb-1 text-xs font-medium text-ink2">Arquivos</p>
+            <DriveAttachmentZone entityType="task" entityId={task.id} readOnly />
+          </div>
 
           {/* Comments */}
           <div>

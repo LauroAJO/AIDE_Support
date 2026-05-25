@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Pin, PinOff, Trash2, ArrowLeft, Search, Image as ImageIcon, ExternalLink, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Plus, Pin, PinOff, Trash2, ArrowLeft, Search } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
-import { getToken } from '../../lib/auth';
 import { formatDate } from '../../lib/tasks';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import DriveAttachmentZone from '../shared/DriveAttachmentZone';
 
 function preview(note) {
   if (note.title) return note.title;
@@ -272,7 +272,9 @@ export default function NotesPage() {
               className="mt-3 min-h-0 flex-1 resize-none bg-transparent text-sm text-ink outline-none placeholder:text-muted"
             />
 
-            <NoteImages noteId={selectedNote.id} />
+            <div className="mt-3 border-t border-line pt-3">
+              <DriveAttachmentZone entityType="note" entityId={selectedNote.id} />
+            </div>
 
             <div className="mt-3 flex items-end justify-between border-t border-line pt-2">
               <div className="text-[10px] text-muted">
@@ -305,153 +307,5 @@ function Chip({ active, onClick, children }) {
     >
       {children}
     </button>
-  );
-}
-
-// Image upload + thumbnail grid. Images live in Google Drive at
-// AIDE_SUPPORT/NOTAS/<noteId>/ so no D1 storage is consumed.
-function NoteImages({ noteId }) {
-  const [images, setImages] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState('');
-  const fileInputRef = useRef(null);
-
-  const load = async () => {
-    setLoading(true);
-    try {
-      const data = await apiFetch(`/api/notes/${noteId}/images`);
-      setImages(Array.isArray(data) ? data : []);
-    } catch {
-      setImages([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [noteId]);
-
-  const upload = async (file) => {
-    if (!file) return;
-    setError('');
-    setUploading(true);
-    try {
-      const fd = new FormData();
-      fd.append('file', file);
-      // apiFetch sets a JSON Content-Type — use plain fetch so the browser
-      // generates the multipart boundary itself.
-      const res = await fetch(`/api/notes/${noteId}/images`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}` },
-        body: fd,
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || `HTTP ${res.status}`);
-      }
-      const saved = await res.json();
-      setImages((prev) => [...prev, saved]);
-    } catch (e) {
-      setError(String((e && e.message) || e).slice(0, 200));
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const remove = async (fileId) => {
-    if (!window.confirm('Remover esta imagem?')) return;
-    try {
-      await apiFetch(`/api/notes/${noteId}/images/${fileId}`, { method: 'DELETE' });
-      setImages((prev) => prev.filter((img) => img.fileId !== fileId));
-    } catch (e) {
-      setError(String((e && e.message) || e).slice(0, 200));
-    }
-  };
-
-  return (
-    <div className="mt-3 border-t border-line pt-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-ink2 transition hover:bg-surface2 disabled:opacity-60"
-          >
-            <ImageIcon className="h-3.5 w-3.5" />
-            {uploading ? 'Enviando...' : 'Inserir imagem'}
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files && e.target.files[0];
-              if (file) upload(file);
-              e.target.value = '';
-            }}
-          />
-          <span className="text-[10px] text-muted">Armazenadas no Google Drive</span>
-        </div>
-      </div>
-
-      {error && (
-        <div className="mb-2 rounded-lg border border-danger/30 bg-danger/10 px-2 py-1 text-[11px] text-danger">{error}</div>
-      )}
-
-      {loading ? (
-        <p className="text-[11px] text-muted">Carregando imagens...</p>
-      ) : images.length === 0 ? null : (
-        <div className="flex flex-wrap gap-2">
-          {images.map((img) => (
-            <div
-              key={img.fileId}
-              className="group relative h-[120px] w-[120px] overflow-hidden rounded-lg border border-line bg-surface2"
-            >
-              {img.thumbnailLink ? (
-                <img
-                  src={img.thumbnailLink}
-                  alt={img.name}
-                  className="h-full w-full cursor-pointer object-cover"
-                  onClick={() => window.open(img.webViewLink, '_blank', 'noopener,noreferrer')}
-                  referrerPolicy="no-referrer"
-                />
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => window.open(img.webViewLink, '_blank', 'noopener,noreferrer')}
-                  className="flex h-full w-full items-center justify-center text-ink2"
-                  title={img.name}
-                >
-                  <ImageIcon className="h-8 w-8" />
-                </button>
-              )}
-              <div className="pointer-events-none absolute inset-0 flex items-end justify-between gap-1 bg-black/50 p-1.5 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
-                <button
-                  type="button"
-                  onClick={() => window.open(img.webViewLink, '_blank', 'noopener,noreferrer')}
-                  className="rounded bg-white/90 px-1.5 py-0.5 text-[10px] font-medium text-ink hover:bg-white"
-                  title="Abrir no Drive"
-                >
-                  <ExternalLink className="inline h-3 w-3" /> Abrir
-                </button>
-                <button
-                  type="button"
-                  onClick={() => remove(img.fileId)}
-                  className="rounded bg-danger/90 px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-danger"
-                  title="Remover"
-                >
-                  <X className="inline h-3 w-3" />
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }

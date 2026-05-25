@@ -11,12 +11,14 @@ import {
   CreditCard,
   LayoutDashboard,
   Search,
+  Video,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
 import { APP_VERSION } from '../version';
 import Avatar from './shared/Avatar';
 import TimerIndicator from './timer/TimerIndicator';
+import TimerCheckMonitor from './timer/TimerCheckMonitor';
 import NotificationBell from './notifications/NotificationBell';
 
 const NAV_ITEMS = [
@@ -28,6 +30,7 @@ const NAV_ITEMS = [
   { to: '/notes', label: 'Notas', icon: FileText },
   { to: '/alerts', label: 'Avisos', icon: Bell },
   { to: '/payment', label: 'Pagamentos', icon: CreditCard },
+  { to: '/meeting', label: 'Reunião', icon: Video },
 ];
 
 const OWNER_NAV = [{ to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard }];
@@ -189,6 +192,10 @@ export default function Layout({ children }) {
           {children}
         </main>
       </div>
+
+      {/* Global modals — must live outside both TimerIndicator mounts so the
+          30-min check only fires once on desktop. */}
+      <TimerCheckMonitor />
 
       {/* Bottom nav (mobile) */}
       <nav className="fixed inset-x-0 bottom-0 z-10 flex h-16 items-stretch border-t border-line bg-surface md:hidden">

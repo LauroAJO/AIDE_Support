@@ -168,17 +168,37 @@ export default function ProfilePage() {
               <TimeField label="Almoço (início)" value={avail.lunch_start} onChange={(v) => setAvail({ ...avail, lunch_start: v })} />
               <TimeField label="Almoço (fim)" value={avail.lunch_end} onChange={(v) => setAvail({ ...avail, lunch_end: v })} />
             </div>
-            <label className="block max-w-[200px]">
-              <span className="mb-1 block text-xs font-medium text-ink2">Taxa padrão (€/h)</span>
-              <input
-                type="number"
-                min="0"
-                step="0.5"
-                value={avail.hourly_rate}
-                onChange={(e) => setAvail({ ...avail, hourly_rate: Number(e.target.value) || 0 })}
-                className="input"
-              />
-            </label>
+            {user.role === 'assistant' ? (
+              <label className="block max-w-[200px]">
+                <span className="mb-1 block text-xs font-medium text-ink2">Taxa horária (R$/h)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={avail.hourly_rate_brl ?? 0}
+                  onChange={(e) =>
+                    setAvail({
+                      ...avail,
+                      hourly_rate_brl: Number(e.target.value) || 0,
+                      currency: 'BRL',
+                    })
+                  }
+                  className="input"
+                />
+              </label>
+            ) : (
+              <label className="block max-w-[200px]">
+                <span className="mb-1 block text-xs font-medium text-ink2">Taxa padrão (€/h)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={avail.hourly_rate}
+                  onChange={(e) => setAvail({ ...avail, hourly_rate: Number(e.target.value) || 0 })}
+                  className="input"
+                />
+              </label>
+            )}
             <button
               onClick={saveAvail}
               disabled={savingAvail}

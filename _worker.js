@@ -115,6 +115,8 @@ async function handleAPI(request, env, ctx) {
   // Notifications
   if (path === '/api/notifications') return handleNotifications(request, env, user, ctx);
   if (path === '/api/notifications/read-all') return handleNotificationsReadAll(request, env, user);
+  if (path === '/api/notifications/scheduled') return handleScheduledNotifications(request, env, user, ctx);
+  if (path.startsWith('/api/notifications/scheduled/')) return handleScheduledNotificationItem(request, env, user, path.split('/')[4]);
   if (path.startsWith('/api/notifications/') && path.endsWith('/read')) {
     return handleNotificationRead(request, env, user, path.split('/')[3]);
   }
@@ -139,6 +141,14 @@ async function handleAPI(request, env, ctx) {
   if (path.startsWith('/api/payment/entries/') && path.endsWith('/paid')) {
     return handlePaymentEntryPaid(request, env, user, path.split('/')[4]);
   }
+
+  // Exchange (BRL → EUR), cached daily in D1.
+  if (path === '/api/exchange/rate') return handleExchangeRate(request, env);
+
+  // Meeting (wraps the standard timer with a fixed "Reunião AIDE" task).
+  if (path === '/api/meeting/start') return handleMeetingStart(request, env, user);
+  if (path === '/api/meeting/stop') return handleMeetingStop(request, env, user);
+  if (path === '/api/meeting/status') return handleMeetingStatus(request, env, user);
 
   // Personal data
   if (path === '/api/profile/personal') return handlePersonalData(request, env, user);
@@ -665,13 +675,35 @@ async function handleTimerStart(request, env, user) {
   const body = (await readJson(request)) || {};
   const now = Math.floor(Date.now() / 1000);
 
+  const avail = await env.DB.prepare(
+    'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
+  ).bind(user.id).first();
+  const defaultRate = (avail && (avail.hourly_rate_brl || avail.hourly_rate)) || 0;
+  const rate = body.hourly_rate != null ? Number(body.hourly_rate) || 0 : defaultRate;
+
+  // Manual entry — insert a completed entry directly, without touching the
+  // user's active timer.
+  if (body.manual) {
+    const startedAt = body.started_at ? Math.floor(new Date(body.started_at).getTime() / 1000) : null;
+    const endedAt = body.ended_at ? Math.floor(new Date(body.ended_at).getTime() / 1000) : null;
+    const duration = Number(body.duration_seconds) > 0
+      ? Math.floor(body.duration_seconds)
+      : (startedAt && endedAt ? Math.max(0, endedAt - startedAt) : 0);
+    if (!startedAt || !endedAt || endedAt <= startedAt) {
+      return json({ error: 'started_at e ended_at obrigatórios (ended_at > started_at)' }, 400);
+    }
+    const id = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO time_entries
+         (id, task_id, user_id, started_at, ended_at, duration_seconds, hourly_rate, paid, notes, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
+    ).bind(id, body.task_id || null, user.id, startedAt, endedAt, duration, rate, 0, body.notes || '', now).run();
+    const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
+    return json(shapeEntry(row), 201);
+  }
+
   // Only one active entry per user — stop the previous one first.
   await stopActiveEntry(env, user.id, now);
-
-  const avail = await env.DB.prepare(
-    'SELECT hourly_rate FROM availability WHERE user_id = ?'
-  ).bind(user.id).first();
-  const rate = body.hourly_rate != null ? Number(body.hourly_rate) || 0 : (avail?.hourly_rate || 0);
 
   const id = crypto.randomUUID();
   await env.DB.prepare(
@@ -840,6 +872,11 @@ function shapeAvailability(row) {
     lunch_start: row.lunch_start,
     lunch_end: row.lunch_end,
     hourly_rate: row.hourly_rate || 0,
+    // Payment v2: Alice's rate lives in BRL. `currency` carries which one is
+    // authoritative for the user; falls back to BRL when the migration hasn't
+    // landed (column will be undefined).
+    hourly_rate_brl: row.hourly_rate_brl || 0,
+    currency: row.currency || 'BRL',
     updated_at: row.updated_at
   };
 }
@@ -870,10 +907,14 @@ async function handleAvailability(request, env, user) {
       work_end: body.work_end || '18:00',
       lunch_start: body.lunch_start || '12:00',
       lunch_end: body.lunch_end || '13:00',
-      hourly_rate: Number(body.hourly_rate) || 0
+      hourly_rate: Number(body.hourly_rate) || 0,
+      hourly_rate_brl: Number(body.hourly_rate_brl) || 0,
+      currency: body.currency || 'BRL'
     };
     const existing = await env.DB.prepare('SELECT id FROM availability WHERE user_id = ?').bind(user.id).first();
     if (existing) {
+      // Update the v2 columns separately so a missing migration only loses
+      // those fields instead of failing the whole save.
       await env.DB.prepare(
         `UPDATE availability SET work_days=?, work_start=?, work_end=?, lunch_start=?, lunch_end=?, hourly_rate=?, updated_at=?
          WHERE user_id=?`
@@ -881,6 +922,11 @@ async function handleAvailability(request, env, user) {
         fields.work_days, fields.work_start, fields.work_end, fields.lunch_start,
         fields.lunch_end, fields.hourly_rate, now, user.id
       ).run();
+      try {
+        await env.DB.prepare(
+          'UPDATE availability SET hourly_rate_brl=?, currency=? WHERE user_id=?'
+        ).bind(fields.hourly_rate_brl, fields.currency, user.id).run();
+      } catch { /* migration 0014 not applied — silently skip BRL fields */ }
     } else {
       await env.DB.prepare(
         `INSERT INTO availability (id, user_id, work_days, work_start, work_end, lunch_start, lunch_end, hourly_rate, updated_at)
@@ -889,6 +935,11 @@ async function handleAvailability(request, env, user) {
         crypto.randomUUID(), user.id, fields.work_days, fields.work_start, fields.work_end,
         fields.lunch_start, fields.lunch_end, fields.hourly_rate, now
       ).run();
+      try {
+        await env.DB.prepare(
+          'UPDATE availability SET hourly_rate_brl=?, currency=? WHERE user_id=?'
+        ).bind(fields.hourly_rate_brl, fields.currency, user.id).run();
+      } catch { /* migration 0014 not applied */ }
     }
     const row = await env.DB.prepare('SELECT * FROM availability WHERE user_id = ?').bind(user.id).first();
     return json(shapeAvailability(row));
@@ -1112,6 +1163,11 @@ async function handleAccessCalendarItem(request, env, user, id) {
 }
 
 async function handleCalendarEvents(request, env, user) {
+  // The calendars belong to Lauro — always use the owner's token. Alice's
+  // visibility is constrained by calendar_access_rules.
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+
   if (request.method === 'GET') {
     const url = new URL(request.url);
     const timeMin = url.searchParams.get('start') || new Date().toISOString();
@@ -1125,7 +1181,7 @@ async function handleCalendarEvents(request, env, user) {
       const api =
         `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events?` +
         new URLSearchParams({ timeMin, timeMax, singleEvents: 'true', orderBy: 'startTime', maxResults: '100' });
-      const resp = await googleFetch(api, user.id, env);
+      const resp = await googleFetch(api, ownerId, env);
       const guard = googleGuard(resp);
       if (guard) return guard;
       if (!resp.ok) continue; // skip a calendar that errors individually
@@ -1133,7 +1189,7 @@ async function handleCalendarEvents(request, env, user) {
       for (const ev of data.items || []) {
         const shaped = shapeGoogleEvent(ev, cal);
         all.push(shaped);
-        await cacheEvent(env, user.id, shaped, ev);
+        await cacheEvent(env, ownerId, shaped, ev);
       }
     }
     return json(all);
@@ -1144,7 +1200,7 @@ async function handleCalendarEvents(request, env, user) {
     const cal = body.calendar_id || 'primary';
     const resp = await googleFetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events`,
-      user.id, env,
+      ownerId, env,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildGoogleEventBody(body)) }
     );
     const guard = googleGuard(resp);
@@ -1152,7 +1208,7 @@ async function handleCalendarEvents(request, env, user) {
     if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
     const ev = await resp.json();
     const shaped = shapeGoogleEvent(ev, cal);
-    await cacheEvent(env, user.id, shaped, ev);
+    await cacheEvent(env, ownerId, shaped, ev);
     return json(shaped, 201);
   }
 
@@ -1162,13 +1218,15 @@ async function handleCalendarEvents(request, env, user) {
 async function handleCalendarEventItem(request, env, user, eventId) {
   if (!eventId) return json({ error: 'ID ausente' }, 400);
   const url = new URL(request.url);
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
 
   if (request.method === 'PUT') {
     const body = (await readJson(request)) || {};
     const cal = body.calendar_id || 'primary';
     const resp = await googleFetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${encodeURIComponent(eventId)}`,
-      user.id, env,
+      ownerId, env,
       { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildGoogleEventBody(body)) }
     );
     const guard = googleGuard(resp);
@@ -1176,7 +1234,7 @@ async function handleCalendarEventItem(request, env, user, eventId) {
     if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
     const ev = await resp.json();
     const shaped = shapeGoogleEvent(ev, cal);
-    await cacheEvent(env, user.id, shaped, ev);
+    await cacheEvent(env, ownerId, shaped, ev);
     return json(shaped);
   }
 
@@ -1184,7 +1242,7 @@ async function handleCalendarEventItem(request, env, user, eventId) {
     const cal = url.searchParams.get('calendarId') || 'primary';
     const resp = await googleFetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${encodeURIComponent(eventId)}`,
-      user.id, env, { method: 'DELETE' }
+      ownerId, env, { method: 'DELETE' }
     );
     const guard = googleGuard(resp);
     if (guard) return guard;
@@ -1197,6 +1255,8 @@ async function handleCalendarEventItem(request, env, user, eventId) {
 }
 
 async function handleCalendarSync(request, env, user) {
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
   const end = new Date(now.getFullYear(), now.getMonth() + 2, 0, 23, 59, 59);
@@ -1209,23 +1269,25 @@ async function handleCalendarSync(request, env, user) {
       orderBy: 'startTime',
       maxResults: '250'
     });
-  const resp = await googleFetch(api, user.id, env);
+  const resp = await googleFetch(api, ownerId, env);
   const guard = googleGuard(resp);
   if (guard) return guard;
   if (!resp.ok) return json({ error: 'google_error' }, 502);
   const data = await resp.json();
   let synced = 0;
   for (const ev of data.items || []) {
-    await cacheEvent(env, user.id, shapeGoogleEvent(ev, 'primary'), ev);
+    await cacheEvent(env, ownerId, shapeGoogleEvent(ev, 'primary'), ev);
     synced += 1;
   }
   return json({ synced });
 }
 
 async function handleCalendarList(request, env, user) {
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
   const resp = await googleFetch(
     'https://www.googleapis.com/calendar/v3/users/me/calendarList',
-    user.id, env
+    ownerId, env
   );
   const guard = googleGuard(resp);
   if (guard) return guard;
@@ -1292,6 +1354,11 @@ async function handleDriveFiles(request, env, user) {
   else if (parent) q = `'${esc(parent)}' in parents and trashed = false`;
   else q = `'root' in parents and trashed = false`;
 
+  // The Drive belongs to Lauro — always fetch with the owner's token, then
+  // apply Alice's drive_access_rules below. (Alice's own Drive isn't used.)
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+
   const api =
     'https://www.googleapis.com/drive/v3/files?' +
     new URLSearchParams({
@@ -1300,12 +1367,14 @@ async function handleDriveFiles(request, env, user) {
       orderBy: 'folder,name',
       fields: 'files(id,name,mimeType,webViewLink,iconLink,modifiedTime,size,parents)'
     });
-  const resp = await googleFetch(api, user.id, env);
+  const resp = await googleFetch(api, ownerId, env);
   const guard = googleGuard(resp);
   if (guard) return guard;
   if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
   const data = await resp.json();
 
+  // Favorites are per-viewer (Alice may favorite different shared folders than
+  // Lauro). Cache rows are also keyed by owner so listings stay consistent.
   const favs = await env.DB.prepare(
     'SELECT google_file_id FROM drive_items_cache WHERE user_id = ? AND is_favorite = 1'
   ).bind(user.id).all();
@@ -1313,7 +1382,7 @@ async function handleDriveFiles(request, env, user) {
 
   const files = [];
   for (const f of data.files || []) {
-    await cacheDriveItem(env, user.id, f);
+    await cacheDriveItem(env, ownerId, f);
     files.push({
       id: f.id,
       googleFileId: f.id,
@@ -1578,7 +1647,11 @@ function nextDayISO(iso) {
 function syncTaskToCalendar(env, ctx, task) {
   const job = (async () => {
     try {
-      const userId = task.assigned_to;
+      if (!task.assigned_to) return;
+      // Calendar belongs to Lauro — write the event using the owner's token
+      // even when the task is assigned to Alice. (Alice has no calendar.)
+      const { ownerId } = await getRoleUsers(env);
+      const userId = ownerId;
       if (!userId) return;
       const cal = 'primary';
       const base = `https://www.googleapis.com/calendar/v3/calendars/${cal}/events`;
@@ -2160,7 +2233,119 @@ async function dedupSet(key, ttlSeconds, env) {
 // Reuses createNotification (which inserts the in-app row AND pushes via
 // pushToUser using the correct flat subscription shape). Dedupe per
 // user+task+day in D1 dedup_log (24h TTL) so re-runs don't double-notify.
+async function processScheduledNotifications(env) {
+  const now = Math.floor(Date.now() / 1000);
+  let pending = [];
+  try {
+    ({ results: pending } = await env.DB.prepare(
+      'SELECT * FROM scheduled_notifications WHERE sent = 0 AND send_at <= ?'
+    ).bind(now).all());
+  } catch {
+    return 0; // table not migrated yet
+  }
+  let sent = 0;
+  for (const sn of pending || []) {
+    await createNotification(env, null, {
+      from_user_id: sn.from_user_id,
+      to_user_id: sn.to_user_id,
+      type: 'scheduled_alert',
+      title: sn.title,
+      body: sn.body,
+      task_id: sn.task_id
+    });
+    await env.DB.prepare('UPDATE scheduled_notifications SET sent = 1, sent_at = ? WHERE id = ?').bind(now, sn.id).run();
+    sent += 1;
+  }
+  return sent;
+}
+
+function shapeScheduled(row) {
+  return {
+    id: row.id,
+    from_user_id: row.from_user_id,
+    to_user_id: row.to_user_id,
+    fromName: row.from_name || null,
+    toName: row.to_name || null,
+    title: row.title,
+    body: row.body || '',
+    task_id: row.task_id || null,
+    project_id: row.project_id || null,
+    send_at: row.send_at,
+    sent: !!row.sent,
+    sent_at: row.sent_at || null,
+    created_at: row.created_at
+  };
+}
+
+async function handleScheduledNotifications(request, env, user) {
+  if (request.method === 'GET') {
+    const weekAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
+    try {
+      const { results } = await env.DB.prepare(
+        `SELECT sn.*, fu.name AS from_name, tu.name AS to_name
+         FROM scheduled_notifications sn
+         LEFT JOIN users fu ON sn.from_user_id = fu.id
+         LEFT JOIN users tu ON sn.to_user_id = tu.id
+         WHERE (sn.from_user_id = ? OR sn.to_user_id = ?) AND (sn.sent = 0 OR sn.sent_at >= ?)
+         ORDER BY sn.send_at`
+      ).bind(user.id, user.id, weekAgo).all();
+      return json((results || []).map(shapeScheduled));
+    } catch {
+      return json([]);
+    }
+  }
+  if (request.method === 'POST') {
+    try {
+      const body = (await readJson(request)) || {};
+      if (!body.to_user_id || !body.title || !body.send_at) {
+        return json({ error: 'Campos obrigatórios ausentes: to_user_id, title, send_at' }, 400);
+      }
+      const sendAt = Math.floor(new Date(body.send_at).getTime() / 1000);
+      if (Number.isNaN(sendAt) || sendAt <= 0) {
+        return json({ error: 'send_at inválido (use ISO 8601)' }, 400);
+      }
+      // Confirm the recipient exists — otherwise the FK silently inserts NULL
+      // and the cron job later picks up a notification with no addressee.
+      const recipient = await env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(body.to_user_id).first();
+      if (!recipient) return json({ error: 'to_user_id não encontrado' }, 400);
+
+      const id = crypto.randomUUID();
+      const now = Math.floor(Date.now() / 1000);
+      try {
+        await env.DB.prepare(
+          `INSERT INTO scheduled_notifications (id, from_user_id, to_user_id, title, body, task_id, project_id, send_at, sent, created_at)
+           VALUES (?,?,?,?,?,?,?,?,0,?)`
+        ).bind(
+          id, user.id, body.to_user_id, body.title, body.body || '',
+          body.task_id || null, body.project_id || null, sendAt, now
+        ).run();
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        if (/no such table/i.test(msg)) {
+          return json({
+            error: 'Tabela scheduled_notifications não existe — aplique a migração 0013 (wrangler d1 execute aide-db --remote --file=migrations/0013_alerts_v2.sql)'
+          }, 503);
+        }
+        return json({ error: 'Falha ao inserir aviso agendado', detail: msg }, 500);
+      }
+      const row = await env.DB.prepare('SELECT * FROM scheduled_notifications WHERE id = ?').bind(id).first();
+      return json(shapeScheduled(row), 201);
+    } catch (e) {
+      return json({ error: 'Erro inesperado ao agendar aviso', detail: String((e && e.message) || e) }, 500);
+    }
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleScheduledNotificationItem(request, env, user, id) {
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  await env.DB.prepare('DELETE FROM scheduled_notifications WHERE id = ? AND from_user_id = ? AND sent = 0').bind(id, user.id).run();
+  return json({ ok: true });
+}
+
 async function runDailyNotifications(env) {
+  await processScheduledNotifications(env);
+
   const today = new Date().toISOString().split('T')[0];
   const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
 
@@ -2243,6 +2428,13 @@ function shapeRule(row) {
     target_user: row.target_user || 'both',
     channel: row.channel || 'both',
     active: !!row.active,
+    task_id: row.task_id || null,
+    project_id: row.project_id || null,
+    run_hour: row.run_hour ?? 8,
+    last_run_at: row.last_run_at || null,
+    last_result: row.last_result || '',
+    taskTitle: row.task_title || null,
+    projectName: row.project_name || null,
     created_at: row.created_at,
     updated_at: row.updated_at
   };
@@ -2251,7 +2443,13 @@ function shapeRule(row) {
 async function handleAlertRules(request, env, user) {
   if (request.method === 'GET') {
     try {
-      const { results } = await env.DB.prepare('SELECT * FROM alert_rules ORDER BY created_at DESC').all();
+      const { results } = await env.DB.prepare(
+        `SELECT ar.*, t.title AS task_title, p.name AS project_name
+         FROM alert_rules ar
+         LEFT JOIN tasks t ON ar.task_id = t.id
+         LEFT JOIN projects p ON ar.project_id = p.id
+         ORDER BY ar.created_at DESC`
+      ).all();
       return json((results || []).map(shapeRule));
     } catch {
       return json([]);
@@ -2263,12 +2461,14 @@ async function handleAlertRules(request, env, user) {
     const id = crypto.randomUUID();
     const now = Math.floor(Date.now() / 1000);
     await env.DB.prepare(
-      `INSERT INTO alert_rules (id, created_by, name, description, trigger_type, trigger_config, target_user, channel, active, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO alert_rules (id, created_by, name, description, trigger_type, trigger_config, target_user, channel, active, task_id, project_id, run_hour, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(
       id, user.id, body.name, body.description || '', body.trigger_type,
       JSON.stringify(body.trigger_config || {}), body.target_user || 'both',
-      body.channel || 'both', body.active === false ? 0 : 1, now, now
+      body.channel || 'both', body.active === false ? 0 : 1,
+      body.task_id || null, body.project_id || null, body.run_hour != null ? Number(body.run_hour) : 8,
+      now, now
     ).run();
     const row = await env.DB.prepare('SELECT * FROM alert_rules WHERE id = ?').bind(id).first();
     return json(shapeRule(row), 201);
@@ -2284,7 +2484,7 @@ async function handleAlertRuleItem(request, env, user, id) {
     const body = (await readJson(request)) || {};
     const now = Math.floor(Date.now() / 1000);
     await env.DB.prepare(
-      `UPDATE alert_rules SET name=?, description=?, trigger_type=?, trigger_config=?, target_user=?, channel=?, active=?, updated_at=? WHERE id=?`
+      `UPDATE alert_rules SET name=?, description=?, trigger_type=?, trigger_config=?, target_user=?, channel=?, active=?, task_id=?, project_id=?, run_hour=?, updated_at=? WHERE id=?`
     ).bind(
       body.name !== undefined ? body.name : existing.name,
       body.description !== undefined ? body.description : existing.description,
@@ -2293,6 +2493,9 @@ async function handleAlertRuleItem(request, env, user, id) {
       body.target_user !== undefined ? body.target_user : existing.target_user,
       body.channel !== undefined ? body.channel : existing.channel,
       body.active !== undefined ? (body.active ? 1 : 0) : existing.active,
+      body.task_id !== undefined ? (body.task_id || null) : existing.task_id,
+      body.project_id !== undefined ? (body.project_id || null) : existing.project_id,
+      body.run_hour !== undefined ? Number(body.run_hour) : existing.run_hour,
       now, id
     ).run();
     const row = await env.DB.prepare('SELECT * FROM alert_rules WHERE id = ?').bind(id).first();
@@ -2315,8 +2518,15 @@ async function handleAlertRuleTest(request, env, user, id) {
   } catch {
     config = {};
   }
-  const triggered = await evaluateRule(row, config, env, true);
-  return json({ ok: true, triggered });
+  const result = await evaluateRule(row, config, env, true);
+  return json({
+    ok: true,
+    triggered: result.triggered,
+    notificationsSent: result.sent,
+    message: result.triggered
+      ? `Regra disparada — ${result.sent} notificação(ões) enviada(s)`
+      : 'Condição não atendida no momento'
+  });
 }
 
 async function getRoleUsers(env) {
@@ -2372,27 +2582,40 @@ async function evaluateAlertRules(env) {
 async function evaluateRule(rule, config, env, force) {
   const today = new Date().toISOString().split('T')[0];
   const dedupKey = `alert:${rule.id}:${today}`;
-  if (!force && (await dedupCheck(dedupKey, env))) return false;
+  if (!force && (await dedupCheck(dedupKey, env))) return { triggered: false, sent: 0 };
 
   const threshold = Number(config.threshold) || 0;
   let triggered = false;
   let body = rule.description || '';
 
+  // Optional scope: a specific task or a project, for task-based triggers.
+  let scope = '';
+  const scopeBind = [];
+  if (rule.task_id) {
+    scope = ' AND id = ?';
+    scopeBind.push(rule.task_id);
+  } else if (rule.project_id) {
+    scope = ' AND project_id = ?';
+    scopeBind.push(rule.project_id);
+  }
+
   if (rule.trigger_type === 'task_overdue') {
     const cutoff = new Date(Date.now() - threshold * 86400000).toISOString().split('T')[0];
-    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND due_date IS NOT NULL AND due_date < ?").bind(cutoff).first();
+    const r = await env.DB.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND due_date IS NOT NULL AND due_date < ?${scope}`).bind(cutoff, ...scopeBind).first();
     if ((r ? r.n : 0) > 0) { triggered = true; body = `${r.n} tarefa(s) em atraso há mais de ${threshold} dia(s).`; }
   } else if (rule.trigger_type === 'task_no_date') {
     const cutoff = Math.floor((Date.now() - threshold * 86400000) / 1000);
-    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND (due_date IS NULL OR due_date = '') AND created_at < ?").bind(cutoff).first();
+    const r = await env.DB.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND (due_date IS NULL OR due_date = '') AND created_at < ?${scope}`).bind(cutoff, ...scopeBind).first();
     if ((r ? r.n : 0) > 0) { triggered = true; body = `${r.n} tarefa(s) sem data há mais de ${threshold} dia(s).`; }
   } else if (rule.trigger_type === 'task_no_update') {
     const cutoff = Math.floor((Date.now() - threshold * 86400000) / 1000);
-    const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND updated_at < ?").bind(cutoff).first();
+    const r = await env.DB.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE status != 'done' AND updated_at < ?${scope}`).bind(cutoff, ...scopeBind).first();
     if ((r ? r.n : 0) > 0) { triggered = true; body = `${r.n} tarefa(s) sem atualização há mais de ${threshold} dia(s).`; }
   } else if (rule.trigger_type === 'timer_running_long') {
     const cutoff = Math.floor(Date.now() / 1000) - threshold * 3600;
-    const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM time_entries WHERE ended_at IS NULL AND started_at < ?').bind(cutoff).first();
+    const taskScope = rule.task_id ? ' AND task_id = ?' : '';
+    const tb = rule.task_id ? [rule.task_id] : [];
+    const r = await env.DB.prepare(`SELECT COUNT(*) AS n FROM time_entries WHERE ended_at IS NULL AND started_at < ?${taskScope}`).bind(cutoff, ...tb).first();
     if ((r ? r.n : 0) > 0) { triggered = true; body = `Timer rodando há mais de ${threshold}h.`; }
   } else if (rule.trigger_type === 'weekly_hours_low') {
     const monday = mondayOf(today);
@@ -2406,14 +2629,23 @@ async function evaluateRule(rule, config, env, force) {
   }
 
   if (force) triggered = true;
-  if (!triggered) return false;
 
-  const roleUsers = await getRoleUsers(env);
-  for (const uid of targetUserIds(rule.target_user, roleUsers)) {
-    await deliverAlert(env, uid, 'alert', rule.name, body, rule.channel || 'both');
+  let sent = 0;
+  if (triggered) {
+    const roleUsers = await getRoleUsers(env);
+    for (const uid of targetUserIds(rule.target_user, roleUsers)) {
+      await deliverAlert(env, uid, 'alert', rule.name, body, rule.channel || 'both');
+      sent += 1;
+    }
+    if (!force) await dedupSet(dedupKey, 86400, env);
   }
-  if (!force) await dedupSet(dedupKey, 86400, env);
-  return true;
+
+  await env.DB.prepare('UPDATE alert_rules SET last_run_at = ?, last_result = ? WHERE id = ?')
+    .bind(Math.floor(Date.now() / 1000), triggered ? `Disparou — ${sent} envio(s)` : 'Condição não atendida', rule.id)
+    .run()
+    .catch(() => {});
+
+  return { triggered, sent };
 }
 
 // ---------------------------------------------------------------------------
@@ -2446,8 +2678,23 @@ async function computePaymentSummary(env, month) {
      ORDER BY e.started_at`
   ).bind(assistantId, start, end).all();
 
-  const avail = await env.DB.prepare('SELECT hourly_rate FROM availability WHERE user_id = ?').bind(assistantId).first();
-  const defaultRate = avail ? avail.hourly_rate || 0 : 0;
+  // Alice's default rate is BRL after Payment v2. Fall back to legacy
+  // `hourly_rate` so historical rows still resolve when the migration hasn't
+  // landed yet.
+  let availRow = null;
+  try {
+    availRow = await env.DB.prepare(
+      'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
+    ).bind(assistantId).first();
+  } catch {
+    availRow = await env.DB.prepare(
+      'SELECT hourly_rate FROM availability WHERE user_id = ?'
+    ).bind(assistantId).first();
+  }
+  const defaultRate = (availRow && (availRow.hourly_rate_brl || availRow.hourly_rate)) || 0;
+
+  const brl = await getBrlEurRate(env);
+  const brlRate = brl.rate;
 
   const fixedSeen = new Set();
   const entries = [];
@@ -2472,6 +2719,8 @@ async function computePaymentSummary(env, month) {
     totalHours += hours;
     totalDue += amount;
     if (e.paid) totalPaid += amount;
+    const amountBrl = amount;
+    const amountEur = amount * brlRate;
     entries.push({
       id: e.id,
       taskId: e.task_id,
@@ -2481,6 +2730,8 @@ async function computePaymentSummary(env, month) {
       rateValue: rate.value,
       hours: Math.round(hours * 100) / 100,
       amount: Math.round(amount * 100) / 100,
+      amountBrl: Math.round(amountBrl * 100) / 100,
+      amountEur: Math.round(amountEur * 100) / 100,
       paid: !!e.paid
     });
   }
@@ -2493,6 +2744,14 @@ async function computePaymentSummary(env, month) {
     totalDue: Math.round(totalDue * 100) / 100,
     totalPaid: Math.round(totalPaid * 100) / 100,
     balance: Math.round((totalDue - totalPaid) * 100) / 100,
+    totalDueBrl: Math.round(totalDue * 100) / 100,
+    totalPaidBrl: Math.round(totalPaid * 100) / 100,
+    balanceBrl: Math.round((totalDue - totalPaid) * 100) / 100,
+    totalDueEur: Math.round(totalDue * brlRate * 100) / 100,
+    totalPaidEur: Math.round(totalPaid * brlRate * 100) / 100,
+    balanceEur: Math.round((totalDue - totalPaid) * brlRate * 100) / 100,
+    brlRate,
+    brlRateUpdatedAt: brl.updated_at,
     entries,
     alicePixKey: pd ? pd.pix_key || '' : '',
     alicePixKeyType: pd ? pd.pix_key_type || '' : '',
@@ -2626,6 +2885,156 @@ async function handleAliceTimer(env, user) {
     taskTitle: row.task_title || 'Sem tarefa',
     startedAt: row.started_at,
     elapsedSeconds: Math.max(0, Math.floor(Date.now() / 1000) - row.started_at)
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Exchange rate (BRL → EUR), cached in D1 with a 1h TTL
+// ---------------------------------------------------------------------------
+
+const EXCHANGE_TTL_SECONDS = 3600;
+const EXCHANGE_FALLBACK = 0.16; // last-resort if no cache and the API is down
+
+async function getBrlEurRate(env) {
+  const now = Math.floor(Date.now() / 1000);
+  let cached = null;
+  try {
+    cached = await env.DB.prepare(
+      "SELECT rate, updated_at FROM exchange_rates WHERE id = 'brl_eur'"
+    ).first();
+  } catch {
+    // Table not migrated yet — fall through to the live fetch and keep going
+    // with the fallback if that also fails.
+  }
+  if (cached && cached.rate && (now - cached.updated_at) < EXCHANGE_TTL_SECONDS) {
+    return { rate: cached.rate, updated_at: cached.updated_at };
+  }
+  // Refresh from open.er-api.com (free, no key). On failure, keep using the
+  // stale cache rather than returning zero.
+  try {
+    const resp = await fetch('https://open.er-api.com/v6/latest/BRL');
+    if (resp.ok) {
+      const data = await resp.json();
+      const rate = data && data.rates && Number(data.rates.EUR);
+      if (rate && rate > 0) {
+        try {
+          await env.DB.prepare(
+            `INSERT INTO exchange_rates (id, rate, updated_at) VALUES ('brl_eur', ?, ?)
+             ON CONFLICT(id) DO UPDATE SET rate = excluded.rate, updated_at = excluded.updated_at`
+          ).bind(rate, now).run();
+        } catch { /* migration not applied — skip caching */ }
+        return { rate, updated_at: now };
+      }
+    }
+  } catch { /* network/parse failure → fall back */ }
+  if (cached && cached.rate) return { rate: cached.rate, updated_at: cached.updated_at };
+  return { rate: EXCHANGE_FALLBACK, updated_at: now };
+}
+
+async function handleExchangeRate(request, env) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  const r = await getBrlEurRate(env);
+  return json(r);
+}
+
+// ---------------------------------------------------------------------------
+// Meeting (wraps the global timer with a fixed "Reunião AIDE" task)
+// ---------------------------------------------------------------------------
+
+const MEETING_TASK_TITLE = 'Reunião AIDE';
+const MEETING_PROJECT_NAME = 'Reunião';
+
+async function findOrCreateMeetingTask(env, user) {
+  // Project — match by exact name (case-insensitive) or create it.
+  let project = await env.DB.prepare(
+    'SELECT id FROM projects WHERE LOWER(name) = LOWER(?) LIMIT 1'
+  ).bind(MEETING_PROJECT_NAME).first();
+  const now = Math.floor(Date.now() / 1000);
+  if (!project) {
+    const pid = crypto.randomUUID();
+    await env.DB.prepare(
+      'INSERT INTO projects (id, name, color, created_by, created_at) VALUES (?,?,?,?,?)'
+    ).bind(pid, MEETING_PROJECT_NAME, '#6366f1', user.id, now).run();
+    project = { id: pid };
+  }
+
+  const { assistantId } = await getRoleUsers(env);
+
+  // Task — reuse an existing non-done one, otherwise create a fresh task.
+  let task = await env.DB.prepare(
+    `SELECT id FROM tasks WHERE title = ? AND status != 'done' ORDER BY created_at DESC LIMIT 1`
+  ).bind(MEETING_TASK_TITLE).first();
+  if (!task) {
+    const tid = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO tasks
+        (id, title, description, project_id, assigned_to, created_by,
+         urgency, importance, energy, status, due_date, delivery_date,
+         tags, comments, subtasks, time_entries, favorited, drive_attachments,
+         created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      tid, MEETING_TASK_TITLE, 'Reunião recorrente entre Lauro e Alice.',
+      project.id, assistantId || null, user.id,
+      5, 5, 5, 'doing', null, null,
+      '[]', '[]', '[]', '[]', 0, '[]', now, now
+    ).run();
+    task = { id: tid };
+  }
+  return task.id;
+}
+
+async function handleMeetingStart(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const taskId = await findOrCreateMeetingTask(env, user);
+  const now = Math.floor(Date.now() / 1000);
+
+  await stopActiveEntry(env, user.id, now);
+  const avail = await env.DB.prepare(
+    'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
+  ).bind(user.id).first();
+  const rate = (avail && (avail.hourly_rate_brl || avail.hourly_rate)) || 0;
+
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO time_entries
+       (id, task_id, user_id, started_at, ended_at, duration_seconds, hourly_rate, paid, notes, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
+  ).bind(id, taskId, user.id, now, null, null, rate, 0, '', now).run();
+  const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
+  return json({ taskId, entryId: id, entry: shapeEntry(row) }, 201);
+}
+
+async function handleMeetingStop(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const now = Math.floor(Date.now() / 1000);
+  const active = await env.DB.prepare(
+    `${ENTRY_SELECT} WHERE e.user_id = ? AND e.ended_at IS NULL`
+  ).bind(user.id).first();
+  if (!active) return json({ error: 'Nenhuma reunião em andamento' }, 404);
+  if (active.task_title !== MEETING_TASK_TITLE) {
+    return json({ error: 'O timer ativo não é uma reunião' }, 400);
+  }
+  await env.DB.prepare(
+    'UPDATE time_entries SET ended_at = ?, duration_seconds = ? WHERE id = ?'
+  ).bind(now, now - active.started_at, active.id).run();
+  return json({ taskId: active.task_id, duration: now - active.started_at });
+}
+
+async function handleMeetingStatus(request, env, user) {
+  const row = await env.DB.prepare(
+    `${ENTRY_SELECT} WHERE e.user_id = ? AND e.ended_at IS NULL`
+  ).bind(user.id).first();
+  if (!row || row.task_title !== MEETING_TASK_TITLE) {
+    return json({ inMeeting: false });
+  }
+  const now = Math.floor(Date.now() / 1000);
+  return json({
+    inMeeting: true,
+    taskId: row.task_id,
+    entryId: row.id,
+    startedAt: row.started_at,
+    elapsedSeconds: Math.max(0, now - row.started_at)
   });
 }
 

@@ -18,6 +18,7 @@ import NotesPage from './components/notes/NotesPage';
 import AlertsPage from './components/alerts/AlertsPage';
 import PaymentPage from './components/payment/PaymentPage';
 import DashboardPage from './components/dashboard/DashboardPage';
+import MeetingPage from './components/meeting/MeetingPage';
 
 function Placeholder({ title }) {
   return (
@@ -110,6 +111,7 @@ export default function App() {
         <Route path="/drive" element={<DrivePage />} />
         <Route path="/notes" element={<NotesPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/meeting" element={<MeetingPage />} />
         <Route path="/payment" element={<PaymentPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/settings" element={<SettingsPage />} />

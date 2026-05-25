@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Bell, UserCheck, Clock, AlertTriangle, X, Send } from 'lucide-react';
+import { Bell, UserCheck, Clock, AlertTriangle, X, Send, CalendarClock } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import SendAlertModal from './SendAlertModal';
@@ -10,7 +10,13 @@ const TYPE_ICON = {
   task_due_soon: { Icon: Clock, color: '#F59E0B' },
   task_overdue: { Icon: AlertTriangle, color: '#EF4444' },
   alert: { Icon: Bell, color: '#6366f1' },
+  scheduled_alert: { Icon: CalendarClock, color: '#6366f1' },
 };
+
+function fmtSendAt(unix) {
+  const d = new Date(unix * 1000);
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 function timeAgo(unixSeconds) {
   const s = Math.floor(Date.now() / 1000) - unixSeconds;
@@ -34,6 +40,9 @@ export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [showAlert, setShowAlert] = useState(false);
   const [users, setUsers] = useState([]);
+  const [scheduled, setScheduled] = useState([]);
+  const [schedOpen, setSchedOpen] = useState(false);
+  const [toast, setToast] = useState('');
   const ref = useRef(null);
 
   const load = async () => {
@@ -44,6 +53,16 @@ export default function NotificationBell() {
     } catch {
       /* ignore */
     }
+    try {
+      setScheduled(await apiFetch('/api/notifications/scheduled'));
+    } catch {
+      setScheduled([]);
+    }
+  };
+
+  const cancelScheduled = async (id) => {
+    await apiFetch(`/api/notifications/scheduled/${id}`, { method: 'DELETE' });
+    setScheduled((s) => s.filter((x) => x.id !== id));
   };
 
   useEffect(() => {
@@ -113,8 +132,11 @@ export default function NotificationBell() {
 
       {open && (
         <div className="absolute right-0 top-12 z-30 w-80 overflow-hidden rounded-lg border border-line bg-surface shadow-soft">
-          <div className="flex items-center justify-between border-b border-line px-3 py-2">
-            <span className="text-sm font-bold text-ink">Notificações</span>
+          <div className="flex items-start justify-between border-b border-line px-3 py-2">
+            <div>
+              <span className="text-sm font-bold text-ink">Notificações</span>
+              <p className="text-[10px] text-muted">Avisos manuais chegam na hora. Regras automáticas rodam diariamente.</p>
+            </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => {
@@ -163,6 +185,35 @@ export default function NotificationBell() {
               })
             )}
           </div>
+
+          {scheduled.filter((s) => !s.sent).length > 0 && (
+            <div className="border-t border-line">
+              <button
+                onClick={() => setSchedOpen((v) => !v)}
+                className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-medium text-ink2 hover:bg-surface2"
+              >
+                Avisos agendados ({scheduled.filter((s) => !s.sent).length})
+                <span>{schedOpen ? '▲' : '▼'}</span>
+              </button>
+              {schedOpen && (
+                <div className="max-h-40 overflow-y-auto px-3 pb-2">
+                  {scheduled
+                    .filter((s) => !s.sent)
+                    .map((s) => (
+                      <div key={s.id} className="flex items-center gap-2 border-t border-line/40 py-1.5 text-[11px]">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-ink">{s.title}</div>
+                          <div className="text-[10px] text-muted">Para: {s.toName || '—'} · {fmtSendAt(s.send_at)}</div>
+                        </div>
+                        <button onClick={() => cancelScheduled(s.id)} className="text-muted hover:text-danger" title="Cancelar">
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -170,11 +221,21 @@ export default function NotificationBell() {
         <SendAlertModal
           otherUser={otherUser}
           onClose={() => setShowAlert(false)}
-          onSent={() => {
+          onSent={(msg) => {
             setShowAlert(false);
             load();
+            if (msg) {
+              setToast(msg);
+              setTimeout(() => setToast(''), 4000);
+            }
           }}
         />
+      )}
+
+      {toast && (
+        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-ink px-4 py-2 text-xs text-white shadow-soft">
+          {toast}
+        </div>
       )}
     </div>
   );

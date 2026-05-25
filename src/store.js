@@ -19,6 +19,9 @@ export const useStore = create((set) => ({
   timeEntries: [],
   weekPlan: null,
   availability: null,
+  // "Ainda está nessa tarefa?" check popup. Toggled by TimerCheckMonitor when
+  // the active entry crosses a 30-min boundary.
+  timerCheckPopup: false,
 
   // Phase 3 — calendar & drive
   calendarEvents: [],
@@ -56,6 +59,7 @@ export const useStore = create((set) => ({
 
   setActiveEntry: (activeEntry) => set({ activeEntry }),
   setElapsedSeconds: (elapsedSeconds) => set({ elapsedSeconds }),
+  setTimerCheckPopup: (timerCheckPopup) => set({ timerCheckPopup }),
   setTimeEntries: (timeEntries) => set({ timeEntries }),
   setWeekPlan: (weekPlan) => set({ weekPlan }),
   setAvailability: (availability) => set({ availability }),

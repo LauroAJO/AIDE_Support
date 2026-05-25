@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, FileText, Check, Clock, Pencil } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { ChevronLeft, ChevronRight, FileText, Check, Clock, Pencil, Plus, X } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
-import { formatEuro, formatDuration } from '../../lib/time';
+import { formatEuro, formatBrl } from '../../lib/time';
 import Avatar from '../shared/Avatar';
 import LoadingSpinner from '../shared/LoadingSpinner';
 
@@ -16,7 +16,18 @@ function shiftMonth(month, delta) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function formatRateTime(unix) {
+  if (!unix) return '';
+  return new Date(unix * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+
 export default function PaymentPage() {
+  const user = useStore((s) => s.user);
   const summary = useStore((s) => s.paymentSummary);
   const setSummary = useStore((s) => s.setPaymentSummary);
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
@@ -24,6 +35,9 @@ export default function PaymentPage() {
   const [alice, setAlice] = useState(null);
   const [lauro, setLauro] = useState(null);
   const [editRate, setEditRate] = useState(null); // { taskId, type, value }
+  const [showManual, setShowManual] = useState(false);
+
+  const isOwner = user?.role === 'owner';
 
   const load = async (m) => {
     setLoading(true);
@@ -64,13 +78,16 @@ export default function PaymentPage() {
 
   const generatePdf = async () => {
     const report = await apiFetch(`/api/reports/monthly?month=${month}`);
-    openPrintWindow(report, alice, lauro);
+    openPrintWindow(report, alice, lauro, isOwner);
   };
 
   if (loading || !summary) return <div className="h-full"><LoadingSpinner label="Carregando pagamentos..." /></div>;
 
+  const brlRate = summary.brlRate || 0;
+  const rateTime = formatRateTime(summary.brlRateUpdatedAt);
+
   return (
-    <div className="mx-auto max-w-4xl space-y-4">
+    <div className="mx-auto max-w-5xl space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-2xl font-bold text-ink">Pagamentos</h1>
         <div className="flex flex-wrap items-center gap-2">
@@ -105,12 +122,36 @@ export default function PaymentPage() {
         <a href="/profile" className="text-xs text-accent hover:underline">Editar dados → Perfil</a>
       </div>
 
+      {/* Exchange rate banner — owner only */}
+      {isOwner && brlRate > 0 && (
+        <div className="rounded-lg border border-line bg-surface2 px-3 py-2 text-xs text-ink2">
+          Cotação: <span className="font-medium text-ink">1 BRL = €{brlRate.toFixed(4)}</span>
+          {rateTime && <span className="text-muted"> · atualizado {rateTime}</span>}
+        </div>
+      )}
+
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Card label="Total horas" value={`${summary.totalHours}h`} />
-        <Card label="Total devido" value={formatEuro(summary.totalDue)} />
-        <Card label="Total pago" value={formatEuro(summary.totalPaid)} />
-        <Card label="Saldo pendente" value={formatEuro(summary.balance)} danger={summary.balance > 0} />
+        <DualCard
+          label="Total devido"
+          brl={summary.totalDue}
+          eur={summary.totalDueEur}
+          isOwner={isOwner}
+        />
+        <DualCard
+          label="Total pago"
+          brl={summary.totalPaid}
+          eur={summary.totalPaidEur}
+          isOwner={isOwner}
+        />
+        <DualCard
+          label="Saldo pendente"
+          brl={summary.balance}
+          eur={summary.balanceEur}
+          isOwner={isOwner}
+          danger={summary.balance > 0}
+        />
       </div>
 
       {/* Entries */}
@@ -123,23 +164,27 @@ export default function PaymentPage() {
               <th className="py-2 pr-2 font-medium">Tipo</th>
               <th className="py-2 pr-2 font-medium">Taxa</th>
               <th className="py-2 pr-2 font-medium">Horas</th>
-              <th className="py-2 pr-2 font-medium">Valor</th>
+              <th className="py-2 pr-2 font-medium">Valor (R$)</th>
+              {isOwner && <th className="py-2 pr-2 font-medium">Valor (€)</th>}
               <th className="py-2 pr-2 font-medium">Pago</th>
               <th className="py-2 font-medium">Ações</th>
             </tr>
           </thead>
           <tbody>
             {summary.entries.length === 0 ? (
-              <tr><td colSpan={8} className="py-6 text-center text-muted">Nenhum registro neste mês.</td></tr>
+              <tr><td colSpan={isOwner ? 9 : 8} className="py-6 text-center text-muted">Nenhum registro neste mês.</td></tr>
             ) : (
               summary.entries.map((e) => (
                 <tr key={e.id} className="border-b border-line/60 text-ink">
                   <td className="py-2 pr-2">{e.taskTitle}</td>
                   <td className="py-2 pr-2 text-ink2">{e.projectName || '—'}</td>
                   <td className="py-2 pr-2">{e.rateType === 'fixed' ? 'Fixo' : 'Por hora'}</td>
-                  <td className="py-2 pr-2">{e.rateType === 'fixed' ? `${formatEuro(e.rateValue)} (fixo)` : `${formatEuro(e.rateValue)}/h`}</td>
+                  <td className="py-2 pr-2">{e.rateType === 'fixed' ? `${formatBrl(e.rateValue)} (fixo)` : `${formatBrl(e.rateValue)}/h`}</td>
                   <td className="py-2 pr-2">{e.rateType === 'fixed' ? '—' : `${e.hours}h`}</td>
-                  <td className="py-2 pr-2 font-medium">{formatEuro(e.amount)}</td>
+                  <td className="py-2 pr-2 font-medium">{formatBrl(e.amountBrl ?? e.amount)}</td>
+                  {isOwner && (
+                    <td className="py-2 pr-2 text-ink2">{formatEuro(e.amountEur ?? 0)}</td>
+                  )}
                   <td className="py-2 pr-2">
                     <button onClick={() => togglePaid(e)} title={e.paid ? 'Pago' : 'Pendente'}>
                       {e.paid ? <Check className="h-4 w-4" style={{ color: '#22C55E' }} /> : <Clock className="h-4 w-4" style={{ color: '#F59E0B' }} />}
@@ -157,6 +202,14 @@ export default function PaymentPage() {
             )}
           </tbody>
         </table>
+        <div className="mt-3 flex justify-end">
+          <button
+            onClick={() => setShowManual(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2 hover:text-ink"
+          >
+            <Plus className="h-3.5 w-3.5" /> Adicionar tempo manualmente
+          </button>
+        </div>
       </div>
 
       {editRate && (
@@ -172,7 +225,7 @@ export default function PaymentPage() {
               </select>
             </label>
             <label className="mb-3 block">
-              <span className="mb-1 block text-xs text-ink2">Valor (€)</span>
+              <span className="mb-1 block text-xs text-ink2">Valor (R$)</span>
               <input type="number" min="0" step="0.5" value={editRate.value} onChange={(e) => setEditRate({ ...editRate, value: e.target.value })} className="input" />
             </label>
             <div className="flex justify-end gap-2">
@@ -181,6 +234,16 @@ export default function PaymentPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {showManual && (
+        <ManualEntryModal
+          onClose={() => setShowManual(false)}
+          onSaved={() => {
+            setShowManual(false);
+            load(month);
+          }}
+        />
       )}
     </div>
   );
@@ -195,9 +258,165 @@ function Card({ label, value, danger }) {
   );
 }
 
-function openPrintWindow(report, alice, lauro) {
+function DualCard({ label, brl, eur, isOwner, danger }) {
+  return (
+    <div className="rounded-xl border border-line bg-surface p-3">
+      <div className="text-[10px] text-muted">{label}</div>
+      <div className="text-lg font-bold" style={{ color: danger ? '#EF4444' : '#1A1814' }}>
+        {formatBrl(brl)}
+      </div>
+      {isOwner && (
+        <div className="mt-0.5 text-xs text-ink2">{formatEuro(eur || 0)}</div>
+      )}
+    </div>
+  );
+}
+
+function ManualEntryModal({ onClose, onSaved }) {
+  const tasks = useStore((s) => s.tasks);
+  const setTasks = useStore((s) => s.setTasks);
+  const [search, setSearch] = useState('');
+  const [taskId, setTaskId] = useState('');
+  const [date, setDate] = useState(todayStr());
+  const [startTime, setStartTime] = useState('09:00');
+  const [endTime, setEndTime] = useState('10:00');
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (tasks.length > 0) return;
+    apiFetch('/api/tasks').then(setTasks).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return tasks
+      .filter((t) => t.status !== 'done')
+      .filter((t) => !q || t.title.toLowerCase().includes(q))
+      .slice(0, 20);
+  }, [tasks, search]);
+
+  const durationSeconds = (() => {
+    const start = new Date(`${date}T${startTime}`);
+    const end = new Date(`${date}T${endTime}`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+    return Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+  })();
+  const durationLabel = (() => {
+    const h = Math.floor(durationSeconds / 3600);
+    const m = Math.floor((durationSeconds % 3600) / 60);
+    return `${h}h ${m}min`;
+  })();
+
+  const save = async () => {
+    setError('');
+    if (!taskId) return setError('Selecione uma tarefa.');
+    if (durationSeconds <= 0) return setError('Hora final deve ser depois da inicial.');
+    setBusy(true);
+    try {
+      const startedAt = new Date(`${date}T${startTime}`).toISOString();
+      const endedAt = new Date(`${date}T${endTime}`).toISOString();
+      await apiFetch('/api/timer/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          task_id: taskId,
+          started_at: startedAt,
+          ended_at: endedAt,
+          duration_seconds: durationSeconds,
+          notes,
+          manual: true,
+        }),
+      });
+      onSaved();
+    } catch (e) {
+      setError(String((e && e.message) || e) || 'Erro ao salvar.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-line px-4 py-3">
+          <h2 className="text-base font-bold text-ink">Adicionar tempo manualmente</h2>
+          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-3 px-4 py-4">
+          {error && (
+            <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>
+          )}
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-ink2">Tarefa</span>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar tarefa..."
+              className="input"
+            />
+            <select
+              value={taskId}
+              onChange={(e) => setTaskId(e.target.value)}
+              size={Math.min(5, Math.max(2, filtered.length))}
+              className="input mt-1 w-full"
+            >
+              {filtered.length === 0 && <option value="">Nenhuma tarefa</option>}
+              {filtered.map((t) => (
+                <option key={t.id} value={t.id}>{t.title}</option>
+              ))}
+            </select>
+          </label>
+
+          <div className="grid grid-cols-3 gap-2">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Data</span>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="input" />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Início</span>
+              <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className="input" />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Fim</span>
+              <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className="input" />
+            </label>
+          </div>
+
+          <div className="rounded-lg bg-surface2 px-3 py-2 text-xs text-ink2">
+            Duração calculada: <span className="font-semibold text-ink">{durationLabel}</span>
+          </div>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-ink2">Observações</span>
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} className="input resize-y" />
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
+          <button onClick={onClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
+            Cancelar
+          </button>
+          <button
+            onClick={save}
+            disabled={busy}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover disabled:opacity-60"
+          >
+            {busy ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function openPrintWindow(report, alice, lauro, isOwner) {
+  const fmt = (n) => `R$ ${(Number(n) || 0).toFixed(2).replace('.', ',')}`;
+  const fmtEur = (n) => `€${(Number(n) || 0).toFixed(2)}`;
   const rows = (report.entries || [])
-    .map((e) => `<tr><td>${e.taskTitle}</td><td>${e.projectName || '—'}</td><td>${e.rateType === 'fixed' ? 'Fixo' : 'Por hora'}</td><td>${e.hours || 0}</td><td>€${(e.amount || 0).toFixed(2)}</td><td>${e.paid ? 'Pago' : 'Pendente'}</td></tr>`)
+    .map((e) => `<tr><td>${e.taskTitle}</td><td>${e.projectName || '—'}</td><td>${e.rateType === 'fixed' ? 'Fixo' : 'Por hora'}</td><td>${e.hours || 0}</td><td>${fmt(e.amountBrl ?? e.amount)}</td>${isOwner ? `<td>${fmtEur(e.amountEur || 0)}</td>` : ''}<td>${e.paid ? 'Pago' : 'Pendente'}</td></tr>`)
     .join('');
   const tasks = (report.completedTasks || [])
     .map((t) => `<tr><td>${t.title}</td><td>${t.assignedUser ? t.assignedUser.name : '—'}</td></tr>`)
@@ -217,6 +436,7 @@ function openPrintWindow(report, alice, lauro) {
   <h1>AIDE — Relatório de Pagamento</h1>
   <div class="muted">Mês de ${m}/${y}</div>
   <div class="muted">Gerado em ${new Date().toLocaleString('pt-BR')}</div>
+  ${isOwner && report.brlRate ? `<div class="muted">Cotação: 1 BRL = €${Number(report.brlRate).toFixed(4)}</div>` : ''}
 
   <h2>Alice (Assistente)</h2>
   <div class="muted">${alice?.name || 'Alice'} · ${alice?.email || ''}<br>PIX (${report.alicePixKeyType || '—'}): ${report.alicePixKey || '—'} · ${report.aliceBankName || ''}</div>
@@ -225,11 +445,11 @@ function openPrintWindow(report, alice, lauro) {
   <div class="muted">${lauro?.name || 'Lauro'} · ${lauro?.email || ''}</div>
 
   <h2>Resumo</h2>
-  <table><tr><th>Total horas</th><th>Total devido</th><th>Total pago</th><th>Saldo</th></tr>
-  <tr><td>${report.totalHours}h</td><td>€${report.totalDue.toFixed(2)}</td><td>€${report.totalPaid.toFixed(2)}</td><td>€${report.balance.toFixed(2)}</td></tr></table>
+  <table><tr><th>Total horas</th><th>Total devido (R$)</th><th>Total pago (R$)</th><th>Saldo (R$)</th>${isOwner ? '<th>Saldo (€)</th>' : ''}</tr>
+  <tr><td>${report.totalHours}h</td><td>${fmt(report.totalDue)}</td><td>${fmt(report.totalPaid)}</td><td>${fmt(report.balance)}</td>${isOwner ? `<td>${fmtEur(report.balanceEur || 0)}</td>` : ''}</tr></table>
 
   <h2>Registros</h2>
-  <table><tr><th>Tarefa</th><th>Projeto</th><th>Tipo</th><th>Horas</th><th>Valor</th><th>Pago</th></tr>${rows || '<tr><td colspan="6">Nenhum</td></tr>'}</table>
+  <table><tr><th>Tarefa</th><th>Projeto</th><th>Tipo</th><th>Horas</th><th>Valor (R$)</th>${isOwner ? '<th>Valor (€)</th>' : ''}<th>Pago</th></tr>${rows || `<tr><td colspan="${isOwner ? 7 : 6}">Nenhum</td></tr>`}</table>
 
   <h2>Tarefas concluídas no mês</h2>
   <table><tr><th>Tarefa</th><th>Responsável</th></tr>${tasks || '<tr><td colspan="2">Nenhuma</td></tr>'}</table>

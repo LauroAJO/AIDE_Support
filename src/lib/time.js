@@ -21,6 +21,14 @@ export function formatEuro(value) {
   return `€${(Number(value) || 0).toFixed(2)}`;
 }
 
+// Brazilian real — Alice's local currency. R$ X,XX (BR uses comma decimals).
+export function formatBrl(value) {
+  return `R$ ${(Number(value) || 0).toLocaleString('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 // Unix seconds → DD/MM/YYYY HH:MM.
 export function formatDateTime(unixSeconds) {
   if (!unixSeconds) return '—';

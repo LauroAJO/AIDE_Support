@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Pencil, Trash2, Play, X } from 'lucide-react';
+import { Plus, Pencil, Trash2, Play, X, Info } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
@@ -18,16 +18,42 @@ const TARGET_LABEL = { lauro: 'Lauro', alice: 'Alice', both: 'Ambos' };
 const CHANNEL_LABEL = { app: 'No app', push: 'Push', both: 'Ambos' };
 const WEEKDAYS = [[1, 'Seg'], [2, 'Ter'], [3, 'Qua'], [4, 'Qui'], [5, 'Sex'], [6, 'Sáb'], [7, 'Dom']];
 
+function utcHourToLocalTime(h) {
+  const d = new Date();
+  d.setUTCHours(h ?? 8, 0, 0, 0);
+  return `${String(d.getHours()).padStart(2, '0')}:00`;
+}
+function localTimeToUtcHour(hhmm) {
+  const [h, m] = (hhmm || '10:00').split(':').map(Number);
+  const d = new Date();
+  d.setHours(h, m || 0, 0, 0);
+  return d.getUTCHours();
+}
+function fmtLastRun(unix) {
+  if (!unix) return 'Nunca executada';
+  const d = new Date(unix * 1000);
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 export default function AlertsPage() {
   const rules = useStore((s) => s.alertRules);
   const setRules = useStore((s) => s.setAlertRules);
   const [loading, setLoading] = useState(true);
-  const [editor, setEditor] = useState(undefined); // undefined=closed, null=new, rule=edit
+  const [tasks, setTasks] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [editor, setEditor] = useState(undefined);
   const [testMsg, setTestMsg] = useState('');
 
   const load = async () => {
     try {
-      setRules(await apiFetch('/api/alerts/rules'));
+      const [r, t, p] = await Promise.all([
+        apiFetch('/api/alerts/rules'),
+        apiFetch('/api/tasks').catch(() => []),
+        apiFetch('/api/projects').catch(() => []),
+      ]);
+      setRules(r);
+      setTasks(t);
+      setProjects(p);
     } finally {
       setLoading(false);
     }
@@ -53,24 +79,48 @@ export default function AlertsPage() {
     setTestMsg('Testando...');
     try {
       const res = await apiFetch(`/api/alerts/rules/${id}/test`, { method: 'POST' });
-      setTestMsg(res.triggered ? 'Aviso de teste enviado.' : 'Regra avaliada (sem disparo).');
+      setTestMsg(
+        res.triggered
+          ? `✅ Regra disparada — ${res.notificationsSent} notificação(ões) enviada(s)`
+          : 'ℹ️ Condição não atendida no momento'
+      );
+      load();
     } catch {
       setTestMsg('Falha ao testar.');
     }
+  };
+
+  const scopeLabel = (rule) => {
+    if (rule.task_id) return `Tarefa: ${rule.taskTitle || '—'}`;
+    if (rule.project_id) return `Projeto: ${rule.projectName || '—'}`;
+    return 'Todas as tarefas';
   };
 
   if (loading) return <div className="h-full"><LoadingSpinner label="Carregando avisos..." /></div>;
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-ink">Avisos Configuráveis</h1>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h1 className="text-2xl font-bold text-ink">Avisos Configuráveis</h1>
+          <p className="mt-0.5 text-xs text-muted">
+            Regras automáticas avaliadas diariamente. Avisos manuais podem ser enviados pelo sininho.
+          </p>
+        </div>
         <button
           onClick={() => setEditor(null)}
-          className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
         >
           <Plus className="h-4 w-4" /> Nova Regra
         </button>
+      </div>
+
+      <div
+        className="flex items-start gap-2 rounded-lg px-3 py-2 text-xs"
+        style={{ background: 'rgba(99,102,241,0.08)', color: '#4F52D3' }}
+      >
+        <Info className="mt-0.5 h-4 w-4 shrink-0" />
+        As regras são avaliadas automaticamente todo dia no horário configurado. Use o botão "Testar" para disparar uma regra agora.
       </div>
 
       {testMsg && <p className="text-xs text-ink2">{testMsg}</p>}
@@ -89,6 +139,11 @@ export default function AlertsPage() {
                     <Badge>{TRIGGER_LABEL[rule.trigger_type] || rule.trigger_type}</Badge>
                     <Badge tone="ink">{TARGET_LABEL[rule.target_user]}</Badge>
                     <Badge tone="accent">{CHANNEL_LABEL[rule.channel]}</Badge>
+                    <Badge>{scopeLabel(rule)}</Badge>
+                  </div>
+                  <div className="mt-1.5 text-[11px] text-muted">
+                    Última execução: {fmtLastRun(rule.last_run_at)}
+                    {rule.last_result ? ` · ${rule.last_result}` : ''}
                   </div>
                 </div>
                 <label className="flex shrink-0 items-center gap-1 text-xs text-ink2">
@@ -115,11 +170,14 @@ export default function AlertsPage() {
       {editor !== undefined && (
         <RuleEditor
           rule={editor}
+          tasks={tasks}
+          projects={projects}
           onClose={() => setEditor(undefined)}
           onSaved={() => {
             setEditor(undefined);
             load();
           }}
+          onTestResult={setTestMsg}
         />
       )}
     </div>
@@ -131,7 +189,7 @@ function Badge({ children, tone }) {
   return <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}>{children}</span>;
 }
 
-function RuleEditor({ rule, onClose, onSaved }) {
+function RuleEditor({ rule, tasks, projects, onClose, onSaved, onTestResult }) {
   const isEdit = !!rule;
   const [form, setForm] = useState(() => ({
     name: rule?.name || '',
@@ -139,35 +197,53 @@ function RuleEditor({ rule, onClose, onSaved }) {
     trigger_type: rule?.trigger_type || 'task_overdue',
     threshold: rule?.trigger_config?.threshold ?? 1,
     day: rule?.trigger_config?.day ?? 1,
-    time: rule?.trigger_config?.time ?? '08:00',
     target_user: rule?.target_user || 'both',
     channel: rule?.channel || 'both',
     active: rule?.active ?? true,
+    task_id: rule?.task_id || '',
+    project_id: rule?.project_id || '',
+    runTime: utcHourToLocalTime(rule?.run_hour ?? 8),
   }));
   const [saving, setSaving] = useState(false);
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
   const isCustomDay = form.trigger_type === 'custom_day';
 
+  const buildPayload = () => ({
+    name: form.name.trim(),
+    description: form.description,
+    trigger_type: form.trigger_type,
+    trigger_config: isCustomDay ? { day: Number(form.day) } : { threshold: Number(form.threshold) },
+    target_user: form.target_user,
+    channel: form.channel,
+    active: form.active,
+    task_id: form.task_id || null,
+    project_id: form.project_id || null,
+    run_hour: localTimeToUtcHour(form.runTime),
+  });
+
   const save = async () => {
     if (!form.name.trim()) return;
     setSaving(true);
-    const trigger_config = isCustomDay ? { day: Number(form.day), time: form.time } : { threshold: Number(form.threshold) };
-    const payload = {
-      name: form.name.trim(),
-      description: form.description,
-      trigger_type: form.trigger_type,
-      trigger_config,
-      target_user: form.target_user,
-      channel: form.channel,
-      active: form.active,
-    };
     try {
-      if (isEdit) await apiFetch(`/api/alerts/rules/${rule.id}`, { method: 'PUT', body: JSON.stringify(payload) });
-      else await apiFetch('/api/alerts/rules', { method: 'POST', body: JSON.stringify(payload) });
+      if (isEdit) await apiFetch(`/api/alerts/rules/${rule.id}`, { method: 'PUT', body: JSON.stringify(buildPayload()) });
+      else await apiFetch('/api/alerts/rules', { method: 'POST', body: JSON.stringify(buildPayload()) });
       onSaved();
     } finally {
       setSaving(false);
     }
+  };
+
+  const testNow = async () => {
+    if (!isEdit) return;
+    // Persist current edits first so the test reflects them.
+    await apiFetch(`/api/alerts/rules/${rule.id}`, { method: 'PUT', body: JSON.stringify(buildPayload()) });
+    const res = await apiFetch(`/api/alerts/rules/${rule.id}/test`, { method: 'POST' });
+    onTestResult(
+      res.triggered
+        ? `✅ Regra disparada — ${res.notificationsSent} notificação(ões) enviada(s)`
+        : 'ℹ️ Condição não atendida no momento'
+    );
+    onSaved();
   };
 
   const remove = async () => {
@@ -192,19 +268,43 @@ function RuleEditor({ rule, onClose, onSaved }) {
             </select>
           </Field>
           {isCustomDay ? (
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Dia da semana">
-                <select value={form.day} onChange={(e) => set({ day: e.target.value })} className="input">
-                  {WEEKDAYS.map(([n, l]) => <option key={n} value={n}>{l}</option>)}
-                </select>
-              </Field>
-              <Field label="Horário"><input type="time" value={form.time} onChange={(e) => set({ time: e.target.value })} className="input" /></Field>
-            </div>
+            <Field label="Dia da semana">
+              <select value={form.day} onChange={(e) => set({ day: e.target.value })} className="input">
+                {WEEKDAYS.map(([n, l]) => <option key={n} value={n}>{l}</option>)}
+              </select>
+            </Field>
           ) : (
             <Field label={THRESHOLD_LABEL[form.trigger_type]}>
               <input type="number" min="0" value={form.threshold} onChange={(e) => set({ threshold: e.target.value })} className="input" />
             </Field>
           )}
+
+          <Field label="Executar diariamente às">
+            <input type="time" value={form.runTime} onChange={(e) => set({ runTime: e.target.value })} className="input" />
+            <span className="mt-1 block text-[11px] text-muted">Horário local (convertido para UTC no servidor).</span>
+          </Field>
+
+          <Field label="Tarefa específica">
+            <select
+              value={form.task_id}
+              onChange={(e) => set({ task_id: e.target.value, project_id: e.target.value ? '' : form.project_id })}
+              className="input"
+            >
+              <option value="">Todas as tarefas</option>
+              {tasks.map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
+            </select>
+          </Field>
+          <Field label="Projeto específico">
+            <select
+              value={form.project_id}
+              onChange={(e) => set({ project_id: e.target.value, task_id: e.target.value ? '' : form.task_id })}
+              className="input"
+            >
+              <option value="">Todos os projetos</option>
+              {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+
           <Field label="Para quem?">
             <select value={form.target_user} onChange={(e) => set({ target_user: e.target.value })} className="input">
               <option value="lauro">Lauro</option>
@@ -229,8 +329,13 @@ function RuleEditor({ rule, onClose, onSaved }) {
             {saving ? 'Salvando...' : 'Salvar'}
           </button>
           {isEdit && (
+            <button onClick={testNow} className="flex items-center gap-1 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 hover:bg-surface2">
+              <Play className="h-4 w-4" /> Testar agora
+            </button>
+          )}
+          {isEdit && (
             <button onClick={remove} className="flex items-center gap-1 rounded-lg border border-danger/40 px-3 py-2 text-sm font-medium text-danger hover:bg-danger/10">
-              <Trash2 className="h-4 w-4" /> Excluir
+              <Trash2 className="h-4 w-4" />
             </button>
           )}
         </div>

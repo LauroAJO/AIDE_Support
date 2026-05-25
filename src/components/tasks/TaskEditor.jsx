@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Plus, Trash2, Paperclip, Search, ExternalLink } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
@@ -16,6 +16,9 @@ const EMPTY = {
   due_date: '',
   delivery_date: '',
   assigned_to: '',
+  area_id: '',
+  project_id: '',
+  front_id: '',
   tags: [],
   subtasks: [],
   comments: [],
@@ -34,6 +37,9 @@ function fromTask(task, initialStatus) {
     due_date: task.due_date || '',
     delivery_date: task.delivery_date || '',
     assigned_to: task.assigned_to || '',
+    area_id: task.area_id || '',
+    project_id: task.project_id || '',
+    front_id: task.front_id || '',
     tags: task.tags || [],
     subtasks: task.subtasks || [],
     comments: task.comments || [],
@@ -64,6 +70,30 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
   const currentUser = useStore((s) => s.user);
   const isEdit = !!task;
   const [form, setForm] = useState(() => fromTask(task, initialStatus));
+  const areas = useStore((s) => s.areas);
+  const projects = useStore((s) => s.projects);
+  const fronts = useStore((s) => s.fronts);
+  // Cascading lists. Projects filter by area, fronts filter by project. When
+  // no area is selected, all projects show (so legacy projects without an area
+  // remain visible). When no project is selected, no fronts show.
+  const projectsForArea = useMemo(() => {
+    if (!form.area_id) return projects;
+    return projects.filter((p) => p.area_id === form.area_id);
+  }, [projects, form.area_id]);
+  const frontsForProject = useMemo(() => {
+    if (!form.project_id) return [];
+    return fronts.filter((f) => f.project_id === form.project_id);
+  }, [fronts, form.project_id]);
+
+  // When the task is loaded with a project_id but no area_id, derive the area.
+  useEffect(() => {
+    if (form.project_id && !form.area_id) {
+      const proj = projects.find((p) => p.id === form.project_id);
+      if (proj && proj.area_id) setForm((f) => ({ ...f, area_id: proj.area_id }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.project_id, projects]);
+
   const [tagInput, setTagInput] = useState('');
   const [subInput, setSubInput] = useState('');
   const [commentInput, setCommentInput] = useState('');
@@ -187,7 +217,11 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
       assigned_to: form.assigned_to || null,
       due_date: form.due_date || null,
       delivery_date: form.delivery_date || null,
+      project_id: form.project_id || null,
+      front_id: form.front_id || null,
     };
+    // area_id is derived from project — don't send it to the API.
+    delete payload.area_id;
     try {
       const saved = isEdit
         ? await apiFetch(`/api/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify(payload) })
@@ -306,6 +340,47 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
               </div>
             )}
           </Field>
+
+          {/* Cascading hierarchy: Área → Projeto → Frente */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <Field label="Área">
+              <select
+                value={form.area_id}
+                onChange={(e) => set({ area_id: e.target.value, project_id: '', front_id: '' })}
+                className="input"
+              >
+                <option value="">Sem área</option>
+                {areas.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Projeto">
+              <select
+                value={form.project_id}
+                onChange={(e) => set({ project_id: e.target.value, front_id: '' })}
+                className="input"
+              >
+                <option value="">Sem projeto</option>
+                {projectsForArea.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Frente">
+              <select
+                value={form.front_id}
+                onChange={(e) => set({ front_id: e.target.value })}
+                className="input"
+                disabled={!form.project_id}
+              >
+                <option value="">{form.project_id ? 'Sem frente' : 'Escolha um projeto'}</option>
+                {frontsForProject.map((f) => (
+                  <option key={f.id} value={f.id}>{f.name}</option>
+                ))}
+              </select>
+            </Field>
+          </div>
 
           <div className="grid grid-cols-2 gap-3">
             <Field label="Status">

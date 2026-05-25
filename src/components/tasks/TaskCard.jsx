@@ -34,6 +34,11 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
         selected ? 'border-accent ring-1 ring-accent' : 'border-line'
       }`}
     >
+      {(task.areaName || task.projectName || task.frontName) && (
+        <div className="mb-1 truncate text-[10px] uppercase tracking-wide text-muted">
+          {[task.areaName, task.projectName, task.frontName].filter(Boolean).join(' › ')}
+        </div>
+      )}
       <div className="flex items-start justify-between gap-2">
         <span className="font-semibold text-ink">{task.title}</span>
         <div className="flex shrink-0 items-center gap-1">

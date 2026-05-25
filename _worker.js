@@ -76,6 +76,20 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/projects') return handleProjectsCollection(request, env, user);
   if (path.startsWith('/api/projects/')) return handleProjectItem(request, env, user, path.split('/')[3]);
 
+  // Hierarchy — Áreas > Projetos > Frentes
+  if (path === '/api/areas') return handleAreas(request, env, user);
+  if (path.startsWith('/api/areas/')) return handleAreaItem(request, env, user, path.split('/')[3]);
+  if (path === '/api/fronts') return handleFronts(request, env, user);
+  if (path.startsWith('/api/fronts/')) return handleFrontItem(request, env, user, path.split('/')[3]);
+
+  // Networking
+  if (path === '/api/network/people') return handleNetworkPeople(request, env, user);
+  if (path.startsWith('/api/network/people/')) return handleNetworkPersonItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/network/institutions') return handleNetworkInstitutions(request, env, user);
+  if (path.startsWith('/api/network/institutions/')) return handleNetworkInstitutionItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/network/connections') return handleNetworkConnections(request, env, user);
+  if (path.startsWith('/api/network/connections/')) return handleNetworkConnectionItem(request, env, user, path.split('/')[4]);
+
   // Timer
   if (path === '/api/timer/start') return handleTimerStart(request, env, user);
   if (path === '/api/timer/stop') return handleTimerStop(request, env, user);
@@ -110,6 +124,14 @@ async function handleAPI(request, env, ctx) {
 
   // Notes
   if (path === '/api/notes') return handleNotes(request, env, user);
+  // Note images — must match BEFORE the generic /api/notes/:id route below.
+  if (path.startsWith('/api/notes/') && path.endsWith('/images')) {
+    return handleNoteImages(request, env, user, path.split('/')[3]);
+  }
+  if (path.match(/^\/api\/notes\/[^/]+\/images\/[^/]+$/)) {
+    const parts = path.split('/');
+    return handleNoteImageItem(request, env, user, parts[3], parts[5]);
+  }
   if (path.startsWith('/api/notes/')) return handleNoteItem(request, env, user, path.split('/')[3]);
 
   // Notifications
@@ -180,7 +202,10 @@ const OAUTH_SCOPES = [
   'profile',
   'https://www.googleapis.com/auth/calendar',
   'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/drive.metadata.readonly'
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
+  // drive.file is required to upload note images. Owner must re-authenticate
+  // after deploy to grant this scope; existing read-only access is unaffected.
+  'https://www.googleapis.com/auth/drive.file'
 ].join(' ');
 
 // Redirect URI: use the explicit env override when set (local dev needs
@@ -397,6 +422,12 @@ function shapeTask(row) {
     title: row.title,
     description: row.description || '',
     project_id: row.project_id || null,
+    projectName: row.project_name || null,
+    front_id: row.front_id || null,
+    frontName: row.front_name || null,
+    area_id: row.area_id || null,
+    areaName: row.area_name || null,
+    areaColor: row.area_color || null,
     assigned_to: row.assigned_to || null,
     created_by: row.created_by || null,
     urgency: row.urgency,
@@ -421,9 +452,18 @@ function shapeTask(row) {
   };
 }
 
+// LEFT JOINs all the way through (front → project → area + assignee) so the
+// hierarchy is available on every task read. Wrapped via try/catch in shapeTask
+// callers — falls back to the legacy SELECT if migration 0015 hasn't landed.
 const TASK_SELECT =
-  'SELECT t.*, u.id AS au_id, u.name AS au_name, u.avatar AS au_avatar ' +
-  'FROM tasks t LEFT JOIN users u ON t.assigned_to = u.id';
+  'SELECT t.*, u.id AS au_id, u.name AS au_name, u.avatar AS au_avatar, ' +
+  'f.name AS front_name, p.name AS project_name, ' +
+  'a.id AS area_id, a.name AS area_name, a.color AS area_color ' +
+  'FROM tasks t ' +
+  'LEFT JOIN users u ON t.assigned_to = u.id ' +
+  'LEFT JOIN fronts f ON t.front_id = f.id ' +
+  'LEFT JOIN projects p ON t.project_id = p.id ' +
+  'LEFT JOIN areas a ON p.area_id = a.id';
 
 async function readJson(request) {
   try {
@@ -504,6 +544,12 @@ async function handleTasksCollection(request, env, user, ctx) {
       now,
       now
     ).run();
+    // Set front_id separately so a missing migration only loses the field.
+    if (body.front_id) {
+      try {
+        await env.DB.prepare('UPDATE tasks SET front_id = ? WHERE id = ?').bind(body.front_id, id).run();
+      } catch { /* migration 0015 not applied */ }
+    }
     const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(id).first();
     const shaped = shapeTask(row);
     if (shaped.assigned_to && shaped.assigned_to !== user.id) {
@@ -573,6 +619,12 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
       merged.due_date, merged.delivery_date, merged.tags, merged.comments,
       merged.subtasks, merged.time_entries, merged.favorited, merged.drive_attachments, now, taskId
     ).run();
+    if (body.front_id !== undefined) {
+      try {
+        await env.DB.prepare('UPDATE tasks SET front_id = ? WHERE id = ?')
+          .bind(body.front_id || null, taskId).run();
+      } catch { /* migration 0015 not applied */ }
+    }
     const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(taskId).first();
     const shaped = shapeTask(row);
     const assigneeChanged = (existing.assigned_to || null) !== (merged.assigned_to || null);
@@ -599,10 +651,27 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
 
 async function handleProjectsCollection(request, env, user) {
   if (request.method === 'GET') {
-    const { results } = await env.DB.prepare(
-      'SELECT * FROM projects ORDER BY created_at DESC'
-    ).all();
-    return json(results || []);
+    let rows = [];
+    try {
+      const r = await env.DB.prepare(
+        'SELECT p.*, a.name AS area_name, a.color AS area_color FROM projects p LEFT JOIN areas a ON p.area_id = a.id ORDER BY p.created_at DESC'
+      ).all();
+      rows = r.results || [];
+    } catch {
+      // areas table missing — fall back to plain projects list
+      const r = await env.DB.prepare('SELECT * FROM projects ORDER BY created_at DESC').all();
+      rows = r.results || [];
+    }
+    // Hydrate fronts for each project (single query, group by project_id).
+    let frontsByProject = {};
+    try {
+      const r = await env.DB.prepare('SELECT * FROM fronts ORDER BY name').all();
+      for (const f of r.results || []) {
+        if (!frontsByProject[f.project_id]) frontsByProject[f.project_id] = [];
+        frontsByProject[f.project_id].push(f);
+      }
+    } catch { /* fronts table missing */ }
+    return json(rows.map((p) => ({ ...p, fronts: frontsByProject[p.id] || [] })));
   }
 
   if (request.method === 'POST') {
@@ -616,6 +685,12 @@ async function handleProjectsCollection(request, env, user) {
     await env.DB.prepare(
       'INSERT INTO projects (id, name, color, created_by, created_at) VALUES (?,?,?,?,?)'
     ).bind(id, String(body.name).trim(), body.color || '#6366f1', user.id, now).run();
+    if (body.area_id || body.description) {
+      try {
+        await env.DB.prepare('UPDATE projects SET area_id = ?, description = ? WHERE id = ?')
+          .bind(body.area_id || null, body.description || '', id).run();
+      } catch { /* migration 0015 not applied */ }
+    }
     const row = await env.DB.prepare('SELECT * FROM projects WHERE id = ?').bind(id).first();
     return json(row, 201);
   }
@@ -625,6 +700,25 @@ async function handleProjectsCollection(request, env, user) {
 
 async function handleProjectItem(request, env, user, projectId) {
   if (!projectId) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM projects WHERE id = ?').bind(projectId).first();
+    if (!existing) return json({ error: 'Projeto não encontrado' }, 404);
+    const name = body.name !== undefined ? String(body.name).trim() : existing.name;
+    const color = body.color !== undefined ? body.color : existing.color;
+    await env.DB.prepare('UPDATE projects SET name = ?, color = ? WHERE id = ?')
+      .bind(name, color, projectId).run();
+    if (body.area_id !== undefined || body.description !== undefined) {
+      try {
+        await env.DB.prepare('UPDATE projects SET area_id = ?, description = ? WHERE id = ?')
+          .bind(body.area_id !== undefined ? (body.area_id || null) : (existing.area_id || null),
+                body.description !== undefined ? body.description : (existing.description || ''),
+                projectId).run();
+      } catch { /* migration 0015 not applied */ }
+    }
+    const row = await env.DB.prepare('SELECT * FROM projects WHERE id = ?').bind(projectId).first();
+    return json(row);
+  }
   if (request.method === 'DELETE') {
     await env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(projectId).run();
     return json({ ok: true });
@@ -2085,9 +2179,116 @@ async function handleBridge(request, env, ctx, path) {
   if (path === '/api/bridge/log') return handleBridgeLog(env);
   if (path === '/api/bridge/push/tasks') return handleBridgePushTasks(env, config);
   if (path === '/api/bridge/push/time-entries') return handleBridgePushTimeEntries(env, config);
+  if (path === '/api/bridge/push/people') return handleBridgePushPeople(env, config);
   if (path === '/api/bridge/receive/sprints') return handleBridgeReceiveSprints(request, env);
   if (path === '/api/bridge/receive/xp') return handleBridgeReceiveXp(request, env);
+  if (path === '/api/bridge/receive/people') return handleBridgeReceivePeople(request, env);
+  if (path === '/api/bridge/sync-status') return handleBridgeSyncStatus(env);
   return json({ error: 'Rota não encontrada' }, 404);
+}
+
+async function handleBridgePushPeople(env, config) {
+  if (!config.lifegame_url || !config.bridge_secret) return json({ error: 'Bridge não configurada' }, 400);
+  let people = [];
+  try {
+    const r = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
+    people = (r.results || []).map(shapeNetworkPerson);
+  } catch {
+    return json({ pushed: 0, error: 'Tabela network_people não migrada' }, 503);
+  }
+  const errors = [];
+  try {
+    const resp = await fetch(`${config.lifegame_url.replace(/\/$/, '')}/api/bridge/people`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': config.bridge_secret },
+      body: JSON.stringify({ people })
+    });
+    await logBridge(env, {
+      direction: 'outbound', entity_type: 'people', status: resp.ok ? 'success' : 'error',
+      payload: `${people.length} pessoas`, error: resp.ok ? null : `HTTP ${resp.status}`
+    });
+    if (!resp.ok) errors.push(`HTTP ${resp.status}`);
+  } catch (e) {
+    await logBridge(env, { direction: 'outbound', entity_type: 'people', status: 'error', error: String(e) });
+    errors.push(String(e));
+  }
+  return json({ pushed: errors.length ? 0 : people.length, errors });
+}
+
+async function handleBridgeReceivePeople(request, env) {
+  const body = (await readJson(request)) || {};
+  const people = Array.isArray(body.people) ? body.people : [];
+  const now = Math.floor(Date.now() / 1000);
+  let received = 0;
+  for (const p of people) {
+    if (!p || !p.name) continue;
+    try {
+      const existing = p.lifegame_person_id
+        ? await env.DB.prepare('SELECT id FROM network_people WHERE lifegame_person_id = ?').bind(p.lifegame_person_id).first()
+        : null;
+      if (existing) {
+        await env.DB.prepare(
+          `UPDATE network_people SET name=?, institution=?, role=?, email=?, phone=?, linkedin=?,
+            notes=?, connection_to_lauro=?, connection_strength=?, dex_contact_id=?, updated_at=?
+           WHERE id=?`
+        ).bind(
+          p.name, p.institution || '', p.role || '', p.email || '', p.phone || '',
+          p.linkedin || '', p.notes || '', p.connection_to_lauro || '',
+          Number(p.connection_strength) || 3, p.dex_contact_id || '', now, existing.id
+        ).run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO network_people
+            (id, name, type, institution, role, area_of_work, email, phone, linkedin, notes,
+             connection_to_lauro, connection_strength, tags, lifegame_person_id, dex_contact_id,
+             created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(
+          crypto.randomUUID(), p.name, p.type || 'person', p.institution || '', p.role || '',
+          p.area_of_work || '', p.email || '', p.phone || '', p.linkedin || '', p.notes || '',
+          p.connection_to_lauro || '', Number(p.connection_strength) || 3,
+          JSON.stringify(p.tags || []), p.lifegame_person_id || '', p.dex_contact_id || '',
+          now, now
+        ).run();
+      }
+      received += 1;
+    } catch { /* skip malformed */ }
+  }
+  await logBridge(env, {
+    direction: 'inbound', entity_type: 'people', status: 'success',
+    payload: `${received} pessoas`
+  });
+  return json({ received });
+}
+
+async function handleBridgeSyncStatus(env) {
+  // Walk the sync log to find each entity type's most recent success.
+  const safe = async (sql, ...binds) => {
+    try {
+      const r = await env.DB.prepare(sql).bind(...binds).first();
+      return r;
+    } catch { return null; }
+  };
+  const lastTask = await safe(
+    "SELECT MAX(synced_at) AS t FROM bridge_sync_log WHERE entity_type = 'tasks' AND status = 'success'"
+  );
+  const lastTime = await safe(
+    "SELECT MAX(synced_at) AS t FROM bridge_sync_log WHERE entity_type = 'time_entries' AND status = 'success'"
+  );
+  const lastPeople = await safe(
+    "SELECT MAX(synced_at) AS t FROM bridge_sync_log WHERE entity_type = 'people' AND status = 'success'"
+  );
+  const taskCount = await safe('SELECT COUNT(*) AS n FROM tasks');
+  const peopleCount = await safe('SELECT COUNT(*) AS n FROM network_people');
+  const config = await getBridgeConfig(env);
+  const connected = !!(config.lifegame_url && config.bridge_secret && config.sync_enabled);
+  return json({
+    tasks: { lastSync: lastTask ? lastTask.t : null, count: taskCount ? taskCount.n : 0 },
+    timeEntries: { lastSync: lastTime ? lastTime.t : null },
+    people: { lastSync: lastPeople ? lastPeople.t : null, count: peopleCount ? peopleCount.n : 0 },
+    synced: connected,
+    bridgeConfigured: connected
+  });
 }
 
 async function handleBridgeConfigUpdate(request, env, existing) {
@@ -3036,6 +3237,493 @@ async function handleMeetingStatus(request, env, user) {
     startedAt: row.started_at,
     elapsedSeconds: Math.max(0, now - row.started_at)
   });
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchy — Áreas > Projetos > Frentes
+// ---------------------------------------------------------------------------
+
+async function handleAreas(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare(
+        `SELECT a.*, (SELECT COUNT(*) FROM projects p WHERE p.area_id = a.id) AS project_count
+         FROM areas a ORDER BY a.name`
+      ).all();
+      return json(results || []);
+    } catch {
+      return json([]); // table not migrated yet
+    }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name || !String(body.name).trim()) return json({ error: 'Nome é obrigatório' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        'INSERT INTO areas (id, name, color, description, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?)'
+      ).bind(id, String(body.name).trim(), body.color || '#6366f1', body.description || '', user.id, now, now).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar área', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM areas WHERE id = ?').bind(id).first();
+    return json(row, 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleAreaItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM areas WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Área não encontrada' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      'UPDATE areas SET name = ?, color = ?, description = ?, updated_at = ? WHERE id = ?'
+    ).bind(
+      body.name !== undefined ? String(body.name).trim() : existing.name,
+      body.color !== undefined ? body.color : existing.color,
+      body.description !== undefined ? body.description : existing.description,
+      now, id
+    ).run();
+    const row = await env.DB.prepare('SELECT * FROM areas WHERE id = ?').bind(id).first();
+    return json(row);
+  }
+  if (request.method === 'DELETE') {
+    // Detach projects rather than cascade — preserves task history.
+    await env.DB.prepare('UPDATE projects SET area_id = NULL WHERE area_id = ?').bind(id).run().catch(() => {});
+    await env.DB.prepare('DELETE FROM areas WHERE id = ?').bind(id).run();
+    return json({ ok: true });
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleFronts(request, env, user) {
+  if (request.method === 'GET') {
+    const projectId = new URL(request.url).searchParams.get('project_id');
+    try {
+      let rows;
+      if (projectId) {
+        rows = await env.DB.prepare(
+          `SELECT f.*, (SELECT COUNT(*) FROM tasks t WHERE t.front_id = f.id) AS task_count
+           FROM fronts f WHERE f.project_id = ? ORDER BY f.name`
+        ).bind(projectId).all();
+      } else {
+        rows = await env.DB.prepare(
+          `SELECT f.*, (SELECT COUNT(*) FROM tasks t WHERE t.front_id = f.id) AS task_count
+           FROM fronts f ORDER BY f.name`
+        ).all();
+      }
+      return json(rows.results || []);
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name || !body.project_id) return json({ error: 'Campos obrigatórios: name, project_id' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        'INSERT INTO fronts (id, name, project_id, description, color, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)'
+      ).bind(id, String(body.name).trim(), body.project_id, body.description || '', body.color || '#6366f1', user.id, now, now).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar frente', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM fronts WHERE id = ?').bind(id).first();
+    return json(row, 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleFrontItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM fronts WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Frente não encontrada' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      'UPDATE fronts SET name=?, project_id=?, description=?, color=?, updated_at=? WHERE id=?'
+    ).bind(
+      body.name !== undefined ? String(body.name).trim() : existing.name,
+      body.project_id !== undefined ? body.project_id : existing.project_id,
+      body.description !== undefined ? body.description : existing.description,
+      body.color !== undefined ? body.color : existing.color,
+      now, id
+    ).run();
+    const row = await env.DB.prepare('SELECT * FROM fronts WHERE id = ?').bind(id).first();
+    return json(row);
+  }
+  if (request.method === 'DELETE') {
+    await env.DB.prepare('UPDATE tasks SET front_id = NULL WHERE front_id = ?').bind(id).run().catch(() => {});
+    await env.DB.prepare('DELETE FROM fronts WHERE id = ?').bind(id).run();
+    return json({ ok: true });
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---------------------------------------------------------------------------
+// Note images (stored in Google Drive: AIDE_SUPPORT/NOTAS/<noteId>/)
+// ---------------------------------------------------------------------------
+
+async function findOrCreateDriveFolder(name, parentId, ownerId, env) {
+  const safe = name.replace(/'/g, "\\'");
+  const q = encodeURIComponent(
+    `name='${safe}' and mimeType='application/vnd.google-apps.folder' and ` +
+    `'${parentId}' in parents and trashed=false`
+  );
+  const findResp = await googleFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`,
+    ownerId, env
+  );
+  if (findResp && findResp.ok) {
+    const data = await findResp.json();
+    if (data.files && data.files[0]) return data.files[0].id;
+  }
+  const createResp = await googleFetch(
+    'https://www.googleapis.com/drive/v3/files?fields=id',
+    ownerId, env,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId]
+      })
+    }
+  );
+  if (!createResp || !createResp.ok) {
+    throw new Error(`Falha ao criar pasta "${name}" no Drive (HTTP ${createResp ? createResp.status : 'no-token'})`);
+  }
+  const data = await createResp.json();
+  return data.id;
+}
+
+async function noteImageFolderId(noteId, ownerId, env) {
+  const root = await findOrCreateDriveFolder('AIDE_SUPPORT', 'root', ownerId, env);
+  const notasId = await findOrCreateDriveFolder('NOTAS', root, ownerId, env);
+  return findOrCreateDriveFolder(noteId, notasId, ownerId, env);
+}
+
+function shapeDriveFile(f) {
+  return {
+    fileId: f.id,
+    id: f.id,
+    name: f.name,
+    mimeType: f.mimeType,
+    webViewLink: f.webViewLink || null,
+    thumbnailLink: f.thumbnailLink || null,
+    webContentLink: f.webContentLink || null,
+    createdTime: f.createdTime || null
+  };
+}
+
+async function handleNoteImages(request, env, user, noteId) {
+  if (!noteId) return json({ error: 'ID da nota ausente' }, 400);
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+
+  if (request.method === 'GET') {
+    let folderId;
+    try {
+      folderId = await noteImageFolderId(noteId, ownerId, env);
+    } catch {
+      return json([]); // no folder yet → no images
+    }
+    const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
+    const resp = await googleFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,webViewLink,thumbnailLink,webContentLink,createdTime)&orderBy=createdTime`,
+      ownerId, env
+    );
+    const guard = googleGuard(resp);
+    if (guard) return guard;
+    if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
+    const data = await resp.json();
+    return json((data.files || []).map(shapeDriveFile));
+  }
+
+  if (request.method === 'POST') {
+    let form;
+    try {
+      form = await request.formData();
+    } catch {
+      return json({ error: 'Envie multipart/form-data com um campo "file"' }, 400);
+    }
+    const file = form.get('file');
+    if (!file || typeof file === 'string') {
+      return json({ error: 'Campo "file" ausente ou inválido' }, 400);
+    }
+    const folderId = await noteImageFolderId(noteId, ownerId, env);
+    const buffer = await file.arrayBuffer();
+
+    // multipart/related body for the Drive upload API. Boundary chosen to be
+    // ASCII-only and unlikely to appear in image bytes.
+    const boundary = '----AIDEUpload' + crypto.randomUUID();
+    const metadata = {
+      name: file.name || `image-${Date.now()}`,
+      parents: [folderId],
+      mimeType: file.type || 'application/octet-stream'
+    };
+    const enc = new TextEncoder();
+    const head = enc.encode(
+      `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      JSON.stringify(metadata) + `\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: ${metadata.mimeType}\r\n\r\n`
+    );
+    const tail = enc.encode(`\r\n--${boundary}--`);
+    const body = new Uint8Array(head.byteLength + buffer.byteLength + tail.byteLength);
+    body.set(head, 0);
+    body.set(new Uint8Array(buffer), head.byteLength);
+    body.set(tail, head.byteLength + buffer.byteLength);
+
+    const resp = await googleFetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,webViewLink,thumbnailLink,webContentLink',
+      ownerId, env,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+        body
+      }
+    );
+    const guard = googleGuard(resp);
+    if (guard) return guard;
+    if (!resp.ok) {
+      return json({ error: 'google_error', detail: await resp.text() }, 502);
+    }
+    const f = await resp.json();
+    return json(shapeDriveFile(f), 201);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleNoteImageItem(request, env, user, noteId, fileId) {
+  if (!noteId || !fileId) return json({ error: 'IDs ausentes' }, 400);
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  const { ownerId } = await getRoleUsers(env);
+  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+  const resp = await googleFetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`,
+    ownerId, env, { method: 'DELETE' }
+  );
+  const guard = googleGuard(resp);
+  if (guard) return guard;
+  if (!resp.ok && resp.status !== 404 && resp.status !== 410) {
+    return json({ error: 'google_error', detail: await resp.text() }, 502);
+  }
+  return json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Networking — people, institutions, connections
+// ---------------------------------------------------------------------------
+
+function shapeNetworkPerson(row) {
+  if (!row) return null;
+  let tags = [];
+  try { tags = JSON.parse(row.tags || '[]'); } catch { tags = []; }
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type || 'person',
+    institution: row.institution || '',
+    role: row.role || '',
+    area_of_work: row.area_of_work || '',
+    email: row.email || '',
+    phone: row.phone || '',
+    linkedin: row.linkedin || '',
+    notes: row.notes || '',
+    connection_to_lauro: row.connection_to_lauro || '',
+    connection_strength: row.connection_strength || 3,
+    tags,
+    lifegame_person_id: row.lifegame_person_id || '',
+    dex_contact_id: row.dex_contact_id || '',
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+function shapeInstitution(row) {
+  if (!row) return null;
+  let tags = [];
+  try { tags = JSON.parse(row.tags || '[]'); } catch { tags = []; }
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type || 'company',
+    area: row.area || '',
+    website: row.website || '',
+    linkedin: row.linkedin || '',
+    notes: row.notes || '',
+    tags,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+async function handleNetworkPeople(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
+      return json((results || []).map(shapeNetworkPerson));
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name) return json({ error: 'name é obrigatório' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO network_people
+          (id, name, type, institution, role, area_of_work, email, phone, linkedin, notes,
+           connection_to_lauro, connection_strength, tags, lifegame_person_id, dex_contact_id,
+           created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.name, body.type || 'person', body.institution || '', body.role || '',
+        body.area_of_work || '', body.email || '', body.phone || '', body.linkedin || '',
+        body.notes || '', body.connection_to_lauro || '',
+        Number(body.connection_strength) || 3,
+        JSON.stringify(body.tags || []),
+        body.lifegame_person_id || '', body.dex_contact_id || '',
+        user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar pessoa', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM network_people WHERE id = ?').bind(id).first();
+    return json(shapeNetworkPerson(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleNetworkPersonItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM network_people WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Pessoa não encontrada' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (key, fallback) => (body[key] !== undefined ? body[key] : fallback);
+    await env.DB.prepare(
+      `UPDATE network_people SET name=?, type=?, institution=?, role=?, area_of_work=?,
+         email=?, phone=?, linkedin=?, notes=?, connection_to_lauro=?, connection_strength=?,
+         tags=?, lifegame_person_id=?, dex_contact_id=?, updated_at=? WHERE id=?`
+    ).bind(
+      pick('name', existing.name), pick('type', existing.type), pick('institution', existing.institution),
+      pick('role', existing.role), pick('area_of_work', existing.area_of_work),
+      pick('email', existing.email), pick('phone', existing.phone), pick('linkedin', existing.linkedin),
+      pick('notes', existing.notes), pick('connection_to_lauro', existing.connection_to_lauro),
+      Number(pick('connection_strength', existing.connection_strength)) || 3,
+      body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
+      pick('lifegame_person_id', existing.lifegame_person_id),
+      pick('dex_contact_id', existing.dex_contact_id),
+      now, id
+    ).run();
+    const row = await env.DB.prepare('SELECT * FROM network_people WHERE id = ?').bind(id).first();
+    return json(shapeNetworkPerson(row));
+  }
+  if (request.method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM network_people WHERE id = ?').bind(id).run();
+    return json({ ok: true });
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleNetworkInstitutions(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare('SELECT * FROM network_institutions ORDER BY name').all();
+      return json((results || []).map(shapeInstitution));
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name) return json({ error: 'name é obrigatório' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO network_institutions
+          (id, name, type, area, website, linkedin, notes, tags, created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.name, body.type || 'company', body.area || '', body.website || '',
+        body.linkedin || '', body.notes || '', JSON.stringify(body.tags || []),
+        user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar instituição', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM network_institutions WHERE id = ?').bind(id).first();
+    return json(shapeInstitution(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleNetworkInstitutionItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM network_institutions WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Instituição não encontrada' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    await env.DB.prepare(
+      `UPDATE network_institutions SET name=?, type=?, area=?, website=?, linkedin=?, notes=?, tags=?, updated_at=? WHERE id=?`
+    ).bind(
+      pick('name', existing.name), pick('type', existing.type), pick('area', existing.area),
+      pick('website', existing.website), pick('linkedin', existing.linkedin),
+      pick('notes', existing.notes),
+      body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
+      now, id
+    ).run();
+    const row = await env.DB.prepare('SELECT * FROM network_institutions WHERE id = ?').bind(id).first();
+    return json(shapeInstitution(row));
+  }
+  if (request.method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM network_institutions WHERE id = ?').bind(id).run();
+    return json({ ok: true });
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleNetworkConnections(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare('SELECT * FROM network_connections ORDER BY created_at DESC').all();
+      return json(results || []);
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.person_a_id || !body.person_b_id) {
+      return json({ error: 'person_a_id e person_b_id obrigatórios' }, 400);
+    }
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        'INSERT INTO network_connections (id, person_a_id, person_b_id, connection_type, description, created_at) VALUES (?,?,?,?,?,?)'
+      ).bind(id, body.person_a_id, body.person_b_id, body.connection_type || '', body.description || '', now).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar conexão', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM network_connections WHERE id = ?').bind(id).first();
+    return json(row, 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleNetworkConnectionItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  await env.DB.prepare('DELETE FROM network_connections WHERE id = ?').bind(id).run();
+  return json({ ok: true });
 }
 
 // ---------------------------------------------------------------------------

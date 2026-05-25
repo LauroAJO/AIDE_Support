@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useStore } from './store';
 import { getToken, setToken, authHeaders } from './lib/auth';
+import { apiFetch } from './lib/api';
 import { registerPush } from './lib/push';
 import Layout from './components/Layout';
 import Login from './components/Login';
@@ -19,6 +20,8 @@ import AlertsPage from './components/alerts/AlertsPage';
 import PaymentPage from './components/payment/PaymentPage';
 import DashboardPage from './components/dashboard/DashboardPage';
 import MeetingPage from './components/meeting/MeetingPage';
+import AreasPage from './components/areas/AreasPage';
+import NetworkingPage from './components/networking/NetworkingPage';
 
 function Placeholder({ title }) {
   return (
@@ -87,6 +90,16 @@ export default function App() {
     if (user) registerPush();
   }, [user]);
 
+  // Preload the Áreas > Projetos > Frentes hierarchy so TaskEditor's cascading
+  // selectors are populated regardless of which page the user lands on first.
+  const setAreas = useStore((s) => s.setAreas);
+  const setFronts = useStore((s) => s.setFronts);
+  useEffect(() => {
+    if (!user) return;
+    apiFetch('/api/areas').then((d) => setAreas(d || [])).catch(() => {});
+    apiFetch('/api/fronts').then((d) => setFronts(d || [])).catch(() => {});
+  }, [user, setAreas, setFronts]);
+
   if (isLoading) {
     return (
       <div className="h-screen bg-base">
@@ -112,6 +125,8 @@ export default function App() {
         <Route path="/notes" element={<NotesPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
         <Route path="/meeting" element={<MeetingPage />} />
+        <Route path="/areas" element={<AreasPage />} />
+        <Route path="/networking" element={<NetworkingPage />} />
         <Route path="/payment" element={<PaymentPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/settings" element={<SettingsPage />} />

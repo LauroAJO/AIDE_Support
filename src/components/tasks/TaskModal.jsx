@@ -50,6 +50,11 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete }
         {/* Header */}
         <div className="flex items-start justify-between gap-3 border-b border-line p-5">
           <div className="min-w-0">
+            {(task.areaName || task.projectName || task.frontName) && (
+              <div className="mb-1 truncate text-[11px] uppercase tracking-wide text-muted">
+                {[task.areaName, task.projectName, task.frontName].filter(Boolean).join(' › ')}
+              </div>
+            )}
             <h2 className="text-xl font-bold text-ink">{task.title}</h2>
             <div className="mt-2 flex items-center gap-2">
               <span className="rounded px-2 py-0.5 text-xs font-medium text-white" style={{ background: STATUS_COLORS[task.status] }}>

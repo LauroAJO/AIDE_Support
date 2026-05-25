@@ -12,6 +12,8 @@ import {
   LayoutDashboard,
   Search,
   Video,
+  Layers,
+  Network as NetworkIcon,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
@@ -31,6 +33,8 @@ const NAV_ITEMS = [
   { to: '/alerts', label: 'Avisos', icon: Bell },
   { to: '/payment', label: 'Pagamentos', icon: CreditCard },
   { to: '/meeting', label: 'Reunião', icon: Video },
+  { to: '/areas', label: 'Áreas', icon: Layers },
+  { to: '/networking', label: 'Networking', icon: NetworkIcon },
 ];
 
 const OWNER_NAV = [{ to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard }];

@@ -45,6 +45,14 @@ export const useStore = create((set) => ({
   monthlyReport: null,
   personalData: null,
 
+  // v1.6 — Hierarchy (Áreas > Projetos > Frentes) + Networking
+  areas: [],
+  fronts: [],
+  networkPeople: [],
+  networkInstitutions: [],
+  networkConnections: [],
+  bridgeSyncStatus: null,
+
   setUser: (user) => set({ user }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
@@ -82,6 +90,13 @@ export const useStore = create((set) => ({
   setPaymentSummary: (paymentSummary) => set({ paymentSummary }),
   setMonthlyReport: (monthlyReport) => set({ monthlyReport }),
   setPersonalData: (personalData) => set({ personalData }),
+
+  setAreas: (areas) => set({ areas }),
+  setFronts: (fronts) => set({ fronts }),
+  setNetworkPeople: (networkPeople) => set({ networkPeople }),
+  setNetworkInstitutions: (networkInstitutions) => set({ networkInstitutions }),
+  setNetworkConnections: (networkConnections) => set({ networkConnections }),
+  setBridgeSyncStatus: (bridgeSyncStatus) => set({ bridgeSyncStatus }),
 }));
 
 // Derived: tasks filtered by the current taskFilter.

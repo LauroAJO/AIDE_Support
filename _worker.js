@@ -2365,6 +2365,12 @@ async function getBridgeConfig(env) {
     ).bind(Math.floor(Date.now() / 1000)).run();
     row = await env.DB.prepare("SELECT * FROM bridge_config WHERE id = 'singleton'").first();
   }
+  // Trim defensivo: usuários colando o segredo do dashboard às vezes incluem
+  // espaços/quebras de linha invisíveis. Normalizamos no read.
+  if (row) {
+    row.bridge_secret = (row.bridge_secret || '').trim();
+    row.lifegame_url = (row.lifegame_url || '').trim().replace(/\/$/, '');
+  }
   return row;
 }
 
@@ -2393,6 +2399,18 @@ async function logBridge(env, entry) {
 }
 
 async function handleBridge(request, env, ctx, path) {
+  // Test/debug endpoints rodam ANTES da validação de secret. Esse é o ponto
+  // do diagnóstico — usuário precisa conseguir testar exatamente quando o
+  // secret pode estar errado. Owner-only enforça a auth.
+  if (path === '/api/bridge/test' || path === '/api/bridge/config/debug') {
+    const userForDebug = await getUserFromRequest(request, env);
+    if (!userForDebug || userForDebug.role !== 'owner') {
+      return json({ error: 'Apenas owner' }, 403);
+    }
+    if (path === '/api/bridge/test') return handleBridgeTest(env);
+    return handleBridgeConfigDebug(env);
+  }
+
   const method = request.method;
   const secret = request.headers.get('X-Bridge-Secret');
   const config = await getBridgeConfig(env);
@@ -2410,6 +2428,8 @@ async function handleBridge(request, env, ctx, path) {
   if (path === '/api/bridge/push/time-entries') return handleBridgePushTimeEntries(env, config);
   if (path === '/api/bridge/push/timelog') return handleBridgePushTimeEntries(env, config); // alias
   if (path === '/api/bridge/push/people') return handleBridgePushPeople(env, config);
+  if (path === '/api/bridge/pull/tasks') return handleBridgePullTasks(env, config);
+  if (path === '/api/bridge/pull/people') return handleBridgePullPeople(env, config);
   if (path === '/api/bridge/pull/timelog') return handleBridgePullTimelog(env, config);
   if (path === '/api/bridge/receive/sprints') return handleBridgeReceiveSprints(request, env);
   if (path === '/api/bridge/receive/xp') return handleBridgeReceiveXp(request, env);
@@ -2419,32 +2439,102 @@ async function handleBridge(request, env, ctx, path) {
   return json({ error: 'Rota não encontrada' }, 404);
 }
 
+// Helper centralizado para chamadas ao Lifegame com logging detalhado.
+// Retorna { ok, status, body, url } sempre — nunca lança.
+async function lifegameFetch(config, urlPath, options = {}) {
+  const url = `${config.lifegame_url.replace(/\/$/, '')}${urlPath}`;
+  const secret = (config.bridge_secret || '').trim();
+  const headers = {
+    'X-Bridge-Secret': secret,
+    ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(options.headers || {}),
+  };
+  try {
+    const resp = await fetch(url, { method: options.method || 'GET', headers, body: options.body });
+    let body = '';
+    try { body = await resp.text(); } catch { /* ignore */ }
+    return { ok: resp.ok, status: resp.status, body, url, secret_length: secret.length };
+  } catch (e) {
+    return { ok: false, status: 0, body: String((e && e.message) || e), url, secret_length: secret.length, network_error: true };
+  }
+}
+
+// Diagnóstico — owner only, bypassa secret. Mostra config + tenta GET no
+// /api/bridge/status do Lifegame.
+async function handleBridgeTest(env) {
+  const config = await getBridgeConfig(env);
+  const cfg = {
+    lifegame_url: config.lifegame_url || null,
+    secret_length: (config.bridge_secret || '').length,
+    secret_first4: (config.bridge_secret || '').slice(0, 4),
+    secret_last4: (config.bridge_secret || '').slice(-4),
+    secret_has_whitespace: /\s/.test(config.bridge_secret || ''),
+    sync_enabled: !!config.sync_enabled,
+    last_sync_at: config.last_sync_at || null,
+  };
+  if (!config.lifegame_url) {
+    return json({ config: cfg, lifegame_status: null, error: 'lifegame_url ausente em bridge_config' });
+  }
+  if (!config.bridge_secret) {
+    return json({ config: cfg, lifegame_status: null, error: 'bridge_secret ausente em bridge_config' });
+  }
+  const r = await lifegameFetch(config, '/api/bridge/status');
+  return json({
+    config: cfg,
+    lifegame_status: { ok: r.ok, status: r.status, body: r.body.slice(0, 500), url: r.url },
+    error: r.ok ? null : (r.network_error ? `Network: ${r.body}` : `HTTP ${r.status}`),
+  });
+}
+
+// Debug — owner only. Retorna valores brutos de bridge_config para detectar
+// problemas de persistência (linha ausente, encoding, whitespace).
+async function handleBridgeConfigDebug(env) {
+  const row = await env.DB.prepare("SELECT * FROM bridge_config WHERE id = 'singleton'").first();
+  if (!row) return json({ exists: false, message: 'Singleton row missing — getBridgeConfig criaria uma em vazio' });
+  const sec = row.bridge_secret || '';
+  return json({
+    exists: true,
+    id: row.id,
+    lifegame_url: row.lifegame_url || '',
+    lifegame_url_trailing_slash: (row.lifegame_url || '').endsWith('/'),
+    bridge_secret_length: sec.length,
+    bridge_secret_first4: sec.slice(0, 4),
+    bridge_secret_last4: sec.slice(-4),
+    bridge_secret_has_whitespace: /\s/.test(sec),
+    bridge_secret_starts_with_space: sec.startsWith(' '),
+    bridge_secret_ends_with_space: sec.endsWith(' '),
+    sync_enabled: row.sync_enabled,
+    last_sync_at: row.last_sync_at,
+    updated_at: row.updated_at,
+  });
+}
+
 async function handleBridgePushPeople(env, config) {
   if (!config.lifegame_url || !config.bridge_secret) return json({ error: 'Bridge não configurada' }, 400);
   let people = [];
   try {
-    const r = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
-    people = (r.results || []).map(shapeNetworkPerson);
+    const dbR = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
+    people = (dbR.results || []).map(shapeNetworkPerson);
   } catch {
     return json({ pushed: 0, error: 'Tabela network_people não migrada' }, 503);
   }
-  const errors = [];
-  try {
-    const resp = await fetch(`${config.lifegame_url.replace(/\/$/, '')}/api/bridge/people`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': config.bridge_secret },
-      body: JSON.stringify({ people })
-    });
-    await logBridge(env, {
-      direction: 'outbound', entity_type: 'people', status: resp.ok ? 'success' : 'error',
-      payload: `${people.length} pessoas`, error: resp.ok ? null : `HTTP ${resp.status}`
-    });
-    if (!resp.ok) errors.push(`HTTP ${resp.status}`);
-  } catch (e) {
-    await logBridge(env, { direction: 'outbound', entity_type: 'people', status: 'error', error: String(e) });
-    errors.push(String(e));
-  }
-  return json({ pushed: errors.length ? 0 : people.length, errors });
+  const r = await lifegameFetch(config, '/api/bridge/people', {
+    method: 'POST', body: JSON.stringify({ people }),
+  });
+  await logBridge(env, {
+    direction: 'outbound', entity_type: 'people',
+    status: r.ok ? 'success' : 'error',
+    payload: `${people.length} pessoas`,
+    error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
+  });
+  if (r.ok) return json({ pushed: people.length, errors: [] });
+  return json({
+    pushed: 0,
+    errors: [`HTTP ${r.status}`],
+    detail: r.body.slice(0, 500),
+    url: r.url,
+    secret_length: r.secret_length,
+  }, r.status === 401 ? 401 : 502);
 }
 
 async function handleBridgeReceivePeople(request, env) {
@@ -2566,24 +2656,27 @@ async function handleBridgePushTasks(env, config) {
   if (!config.lifegame_url || !config.bridge_secret) return json({ error: 'Bridge não configurada' }, 400);
   const { results } = await env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC`).all();
   const tasks = (results || []).map(shapeTask);
-  const errors = [];
-  try {
-    const resp = await fetch(`${config.lifegame_url.replace(/\/$/, '')}/api/bridge/tasks`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': config.bridge_secret },
-      body: JSON.stringify({ tasks })
-    });
-    await logBridge(env, {
-      direction: 'outbound', entity_type: 'tasks', status: resp.ok ? 'success' : 'error',
-      payload: `${tasks.length} tarefas`, error: resp.ok ? null : `HTTP ${resp.status}`
-    });
-    if (!resp.ok) errors.push(`HTTP ${resp.status}`);
-    await env.DB.prepare("UPDATE bridge_config SET last_sync_at=? WHERE id='singleton'").bind(Math.floor(Date.now() / 1000)).run();
-  } catch (e) {
-    await logBridge(env, { direction: 'outbound', entity_type: 'tasks', status: 'error', error: String(e) });
-    errors.push(String(e));
+  const r = await lifegameFetch(config, '/api/bridge/tasks', {
+    method: 'POST', body: JSON.stringify({ tasks }),
+  });
+  await logBridge(env, {
+    direction: 'outbound', entity_type: 'tasks',
+    status: r.ok ? 'success' : 'error',
+    payload: `${tasks.length} tarefas`,
+    error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
+  });
+  if (r.ok) {
+    await env.DB.prepare("UPDATE bridge_config SET last_sync_at=? WHERE id='singleton'")
+      .bind(Math.floor(Date.now() / 1000)).run().catch(() => {});
+    return json({ pushed: tasks.length, errors: [] });
   }
-  return json({ pushed: errors.length ? 0 : tasks.length, errors });
+  return json({
+    pushed: 0,
+    errors: [`HTTP ${r.status}`],
+    detail: r.body.slice(0, 500),
+    url: r.url,
+    secret_length: r.secret_length,
+  }, r.status === 401 ? 401 : 502);
 }
 
 async function handleBridgePushTimeEntries(env, config) {
@@ -2613,32 +2706,27 @@ async function handleBridgePushTimeEntries(env, config) {
     durationSeconds: e.duration_seconds || 0,
     source: 'aide',
   }));
-  const errors = [];
-  try {
-    const resp = await fetch(`${config.lifegame_url.replace(/\/$/, '')}/api/bridge/timelog`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Bridge-Secret': config.bridge_secret },
-      body: JSON.stringify({ entries }),
-    });
-    let detail = null;
-    if (!resp.ok) {
-      try { detail = (await resp.text()).slice(0, 300); } catch { /* ignore */ }
-    }
-    await logBridge(env, {
-      direction: 'outbound', entity_type: 'timelog', status: resp.ok ? 'success' : 'error',
-      payload: `${entries.length} registros`,
-      error: resp.ok ? null : `HTTP ${resp.status}${detail ? ` — ${detail}` : ''}`,
-    });
-    if (!resp.ok) errors.push(`HTTP ${resp.status}${detail ? ` — ${detail}` : ''}`);
-    else {
-      await env.DB.prepare("UPDATE bridge_config SET last_sync_at=? WHERE id='singleton'")
-        .bind(Math.floor(Date.now() / 1000)).run().catch(() => {});
-    }
-  } catch (e) {
-    await logBridge(env, { direction: 'outbound', entity_type: 'timelog', status: 'error', error: String(e) });
-    errors.push(String(e));
+  const r = await lifegameFetch(config, '/api/bridge/timelog', {
+    method: 'POST', body: JSON.stringify({ entries }),
+  });
+  await logBridge(env, {
+    direction: 'outbound', entity_type: 'timelog',
+    status: r.ok ? 'success' : 'error',
+    payload: `${entries.length} registros`,
+    error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
+  });
+  if (r.ok) {
+    await env.DB.prepare("UPDATE bridge_config SET last_sync_at=? WHERE id='singleton'")
+      .bind(Math.floor(Date.now() / 1000)).run().catch(() => {});
+    return json({ pushed: entries.length, errors: [] });
   }
-  return json({ pushed: errors.length ? 0 : entries.length, errors });
+  return json({
+    pushed: 0,
+    errors: [`HTTP ${r.status}`],
+    detail: r.body.slice(0, 500),
+    url: r.url,
+    secret_length: r.secret_length,
+  }, r.status === 401 ? 401 : 502);
 }
 
 // Lifegame → AIDE: Lifegame faz POST aqui empurrando os time entries dele.
@@ -2662,35 +2750,93 @@ async function handleBridgeReceiveTimelog(request, env) {
   return json({ received: entries.length });
 }
 
-// AIDE puxa proativamente os time entries do Lifegame (origem=lifegame).
-// Usado pelo botão "Sincronizar registros do Lifegame" na PaymentPage/Settings.
-async function handleBridgePullTimelog(env, config) {
-  if (!config.lifegame_url || !config.bridge_secret) return json({ error: 'Bridge não configurada' }, 400);
-  try {
-    const resp = await fetch(`${config.lifegame_url.replace(/\/$/, '')}/api/bridge/timelog`, {
-      method: 'GET',
-      headers: { 'X-Bridge-Secret': config.bridge_secret },
-    });
-    if (!resp.ok) {
-      let detail = null;
-      try { detail = (await resp.text()).slice(0, 300); } catch { /* ignore */ }
-      await logBridge(env, {
-        direction: 'inbound', entity_type: 'timelog', status: 'error',
-        error: `HTTP ${resp.status}${detail ? ` — ${detail}` : ''}`,
-      });
-      return json({ received: 0, error: `HTTP ${resp.status}` }, 502);
-    }
-    const data = await resp.json().catch(() => ({}));
-    const entries = Array.isArray(data && data.entries) ? data.entries : [];
-    await logBridge(env, {
-      direction: 'inbound', entity_type: 'timelog', status: 'success',
-      payload: `${entries.length} registros (pull)`,
-    });
-    return json({ received: entries.length, entries });
-  } catch (e) {
-    await logBridge(env, { direction: 'inbound', entity_type: 'timelog', status: 'error', error: String(e) });
-    return json({ received: 0, error: String(e) }, 500);
+// AIDE puxa proativamente as tarefas do Lifegame. Retorna o array em
+// `tasks` sem persistir (decisão de armazenamento fica no caller).
+async function handleBridgePullTasks(env, config) {
+  if (!config.lifegame_url || !config.bridge_secret) {
+    return json({ error: 'Bridge não configurada' }, 400);
   }
+  const r = await lifegameFetch(config, '/api/bridge/tasks');
+  if (!r.ok) {
+    await logBridge(env, {
+      direction: 'inbound', entity_type: 'tasks', status: 'error',
+      error: `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
+    });
+    return json({
+      error: 'bridge_fetch_failed',
+      status: r.status,
+      detail: r.body.slice(0, 500),
+      url: r.url,
+      secret_length: r.secret_length,
+    }, r.status === 401 ? 401 : 502);
+  }
+  let data; try { data = JSON.parse(r.body); } catch { data = {}; }
+  // Lifegame retorna { tasks: [...], total } OU diretamente um array.
+  const tasks = Array.isArray(data && data.tasks) ? data.tasks
+              : (Array.isArray(data) ? data : []);
+  await logBridge(env, {
+    direction: 'inbound', entity_type: 'tasks', status: 'success',
+    payload: `${tasks.length} tarefas (pull)`,
+  });
+  return json({ received: tasks.length, tasks });
+}
+
+// AIDE puxa proativamente as pessoas do Lifegame.
+async function handleBridgePullPeople(env, config) {
+  if (!config.lifegame_url || !config.bridge_secret) {
+    return json({ error: 'Bridge não configurada' }, 400);
+  }
+  const r = await lifegameFetch(config, '/api/bridge/people');
+  if (!r.ok) {
+    await logBridge(env, {
+      direction: 'inbound', entity_type: 'people', status: 'error',
+      error: `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
+    });
+    return json({
+      error: 'bridge_fetch_failed',
+      status: r.status,
+      detail: r.body.slice(0, 500),
+      url: r.url,
+      secret_length: r.secret_length,
+    }, r.status === 401 ? 401 : 502);
+  }
+  let data; try { data = JSON.parse(r.body); } catch { data = {}; }
+  const people = Array.isArray(data && data.people) ? data.people
+               : (Array.isArray(data) ? data : []);
+  await logBridge(env, {
+    direction: 'inbound', entity_type: 'people', status: 'success',
+    payload: `${people.length} pessoas (pull)`,
+  });
+  return json({ received: people.length, people });
+}
+
+// AIDE puxa proativamente os time entries do Lifegame (origem=lifegame).
+async function handleBridgePullTimelog(env, config) {
+  if (!config.lifegame_url || !config.bridge_secret) {
+    return json({ error: 'Bridge não configurada' }, 400);
+  }
+  const r = await lifegameFetch(config, '/api/bridge/timelog');
+  if (!r.ok) {
+    await logBridge(env, {
+      direction: 'inbound', entity_type: 'timelog', status: 'error',
+      error: `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
+    });
+    return json({
+      error: 'bridge_fetch_failed',
+      status: r.status,
+      detail: r.body.slice(0, 500),
+      url: r.url,
+      secret_length: r.secret_length,
+    }, r.status === 401 ? 401 : 502);
+  }
+  let data; try { data = JSON.parse(r.body); } catch { data = {}; }
+  const entries = Array.isArray(data && data.entries) ? data.entries
+                : (Array.isArray(data) ? data : []);
+  await logBridge(env, {
+    direction: 'inbound', entity_type: 'timelog', status: 'success',
+    payload: `${entries.length} registros (pull)`,
+  });
+  return json({ received: entries.length, entries });
 }
 
 async function handleBridgeReceiveSprints(request, env) {

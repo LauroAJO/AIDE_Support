@@ -119,7 +119,13 @@ export const selectFilteredTasks = (state) => {
   return tasks.filter((t) => {
     if (taskFilter.status === 'favorites') {
       if (!t.favorited) return false;
-    } else if (taskFilter.status !== 'all' && t.status !== taskFilter.status) {
+      // Mesmo entre favoritas, concluídas ficam arquivadas (não poluem).
+      if (t.status === 'done') return false;
+    } else if (taskFilter.status === 'all') {
+      // "Todas" arquiva (esconde) tarefas concluídas. Para vê-las,
+      // o usuário clica explicitamente em "Concluídas".
+      if (t.status === 'done') return false;
+    } else if (t.status !== taskFilter.status) {
       return false;
     }
     if (q && !t.title.toLowerCase().includes(q)) return false;

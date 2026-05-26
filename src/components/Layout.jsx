@@ -30,7 +30,6 @@ const NAV_ITEMS = [
   { to: '/calendar', label: 'Calendário', icon: Calendar },
   { to: '/drive', label: 'Drive', icon: HardDrive },
   { to: '/notes', label: 'Notas', icon: FileText },
-  { to: '/alerts', label: 'Avisos', icon: Bell },
   { to: '/payment', label: 'Pagamentos', icon: CreditCard },
   { to: '/meeting', label: 'Reunião', icon: Video },
   { to: '/areas', label: 'Áreas', icon: Layers },
@@ -141,6 +140,13 @@ export default function Layout({ children }) {
                   className="block w-full px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
                   Meu Perfil
+                </button>
+                <button
+                  type="button"
+                  onClick={() => go('/alerts')}
+                  className="block w-full px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                >
+                  Avisos
                 </button>
                 <button
                   type="button"

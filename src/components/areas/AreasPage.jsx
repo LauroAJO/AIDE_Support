@@ -8,7 +8,40 @@ import LoadingSpinner from '../shared/LoadingSpinner';
 
 const DEFAULT_COLOR = '#6366f1';
 const PRESET_COLORS = [
-  '#6366f1', '#0EA5E9', '#22C55E', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6',
+  // Neutros
+  '#0f172a', '#475569', '#94a3b8',
+  // Vermelhos
+  '#991b1b', '#ef4444', '#fca5a5',
+  // Laranjas
+  '#9a3412', '#f97316', '#fdba74',
+  // Âmbar
+  '#92400e', '#f59e0b', '#fcd34d',
+  // Amarelos
+  '#854d0e', '#eab308', '#fde047',
+  // Limas
+  '#3f6212', '#84cc16', '#bef264',
+  // Verdes
+  '#166534', '#22c55e', '#86efac',
+  // Esmeraldas
+  '#065f46', '#10b981', '#6ee7b7',
+  // Teal
+  '#115e59', '#14b8a6', '#5eead4',
+  // Ciano
+  '#155e75', '#06b6d4', '#67e8f9',
+  // Céu
+  '#0c4a6e', '#0ea5e9', '#7dd3fc',
+  // Azul
+  '#1e40af', '#3b82f6', '#93c5fd',
+  // Índigo
+  '#3730a3', '#6366f1', '#a5b4fc',
+  // Violeta
+  '#5b21b6', '#8b5cf6', '#c4b5fd',
+  // Fúcsia
+  '#86198f', '#d946ef', '#f0abfc',
+  // Rosa
+  '#9d174d', '#ec4899', '#f9a8d4',
+  // Carmim
+  '#9f1239', '#f43f5e', '#fda4af',
 ];
 
 export default function AreasPage() {
@@ -357,6 +390,17 @@ function EditorModal({ editor, areas, projects, onClose, onSaved }) {
                 />
               ))}
             </div>
+            <label className="mt-2 flex items-center gap-2 text-xs text-ink2">
+              <span>Personalizada:</span>
+              <input
+                type="color"
+                value={form.color || DEFAULT_COLOR}
+                onChange={(e) => setForm({ ...form, color: e.target.value })}
+                className="h-7 w-10 cursor-pointer rounded border border-line bg-transparent p-0"
+                aria-label="Cor personalizada"
+              />
+              <span className="font-mono text-[10px] uppercase text-muted">{form.color || DEFAULT_COLOR}</span>
+            </label>
           </div>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">

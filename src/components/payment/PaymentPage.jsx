@@ -56,16 +56,33 @@ export default function PaymentPage() {
   const [editEntry, setEditEntry] = useState(null); // time_entry payload
   const [showManual, setShowManual] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [avail, setAvail] = useState(null);
+  const [defaultRateDraft, setDefaultRateDraft] = useState('');
+  const [savingDefaultRate, setSavingDefaultRate] = useState(false);
+  const [defaultRateMsg, setDefaultRateMsg] = useState(null);
 
   const isOwner = user?.role === 'owner';
 
   const load = async (m) => {
     setLoading(true);
     try {
-      const [sum, users] = await Promise.all([apiFetch(`/api/payment/summary?month=${m}`), apiFetch('/api/users')]);
+      const [sum, users, av] = await Promise.all([
+        apiFetch(`/api/payment/summary?month=${m}`),
+        apiFetch('/api/users'),
+        apiFetch('/api/availability').catch(() => null),
+      ]);
       setSummary(sum);
       setAlice(users.find((u) => u.role === 'assistant') || null);
       setLauro(users.find((u) => u.role === 'owner') || null);
+      if (av) {
+        setAvail(av);
+        // Para assistant a taxa padrão vive em hourly_rate_brl (R$/h);
+        // para owner, em hourly_rate (€/h).
+        const seed = user?.role === 'assistant'
+          ? (av.hourly_rate_brl ?? 0)
+          : (av.hourly_rate ?? 0);
+        setDefaultRateDraft(String(seed));
+      }
     } finally {
       setLoading(false);
     }
@@ -74,6 +91,27 @@ export default function PaymentPage() {
     load(month);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month]);
+
+  const saveDefaultRate = async () => {
+    if (!avail) return;
+    setSavingDefaultRate(true);
+    setDefaultRateMsg(null);
+    try {
+      const value = Number(defaultRateDraft) || 0;
+      const patch = user?.role === 'assistant'
+        ? { ...avail, hourly_rate_brl: value, currency: 'BRL' }
+        : { ...avail, hourly_rate: value };
+      const saved = await apiFetch('/api/availability', { method: 'PUT', body: JSON.stringify(patch) });
+      setAvail(saved);
+      setDefaultRateMsg({ kind: 'ok', text: 'Taxa padrão salva.' });
+      // Recarrega o summary para refletir a nova taxa nos cards/banner.
+      load(month);
+    } catch (e) {
+      setDefaultRateMsg({ kind: 'err', text: `Falha: ${String((e && e.message) || e).slice(0, 200)}` });
+    } finally {
+      setSavingDefaultRate(false);
+    }
+  };
 
   const togglePaid = async (entry) => {
     await apiFetch(`/api/payment/entries/${entry.id}/paid`, { method: 'PUT', body: JSON.stringify({ paid: !entry.paid }) });
@@ -175,13 +213,51 @@ export default function PaymentPage() {
           ) : (
             <div className="text-xs" style={{ color: '#F59E0B' }}>Alice não cadastrou chave PIX</div>
           )}
-          {defaultRate > 0 && (
-            <div className="mt-0.5 text-[11px] text-muted">
-              Taxa padrão: <span className="font-medium text-ink2">R$ {defaultRate.toFixed(2)}/h</span>
-            </div>
-          )}
         </div>
         <a href="/profile" className="text-xs text-accent hover:underline">Editar dados → Perfil</a>
+      </div>
+
+      {/* Editor da taxa padrão — único local. ProfilePage só remete pra cá. */}
+      <div className="rounded-xl border border-line bg-surface p-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="block min-w-[200px]">
+            <span className="mb-1 block text-xs font-medium text-ink2">
+              Taxa padrão {user?.role === 'assistant' ? '(R$/h)' : '(€/h)'}
+            </span>
+            <input
+              type="number"
+              min="0"
+              step="0.5"
+              value={defaultRateDraft}
+              onChange={(e) => setDefaultRateDraft(e.target.value)}
+              placeholder="0.00"
+              className="input"
+              disabled={!avail}
+            />
+          </label>
+          <button
+            onClick={saveDefaultRate}
+            disabled={savingDefaultRate || !avail}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
+          >
+            {savingDefaultRate ? 'Salvando...' : 'Salvar taxa padrão'}
+          </button>
+          {defaultRateMsg && (
+            <span
+              className={`text-xs ${
+                defaultRateMsg.kind === 'ok' ? 'text-emerald-600' : 'text-danger'
+              }`}
+            >
+              {defaultRateMsg.text}
+            </span>
+          )}
+          <p className="basis-full text-[11px] text-muted">
+            Esta é a taxa usada como padrão quando uma nova entrada de tempo é criada sem taxa explícita.
+            {defaultRate > 0 && (
+              <> Valor atual aplicado às entradas: <span className="font-medium text-ink2">R$ {defaultRate.toFixed(2)}/h</span>.</>
+            )}
+          </p>
+        </div>
       </div>
 
       {/* Exchange rate banner — owner only */}

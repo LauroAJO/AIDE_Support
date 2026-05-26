@@ -654,6 +654,21 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
           .bind(body.front_id || null, taskId).run();
       } catch { /* migration 0015 not applied */ }
     }
+    // Taxa da tarefa (rate_type/rate_value) — migration 0014_payment_v2.
+    // Updated separately para tolerar bancos onde a migração não foi aplicada.
+    if (body.rate_type !== undefined || body.rate_value !== undefined) {
+      const validTypes = ['inherit', 'hourly', 'fixed'];
+      const rateType = body.rate_type !== undefined
+        ? (validTypes.includes(body.rate_type) ? body.rate_type : existing.rate_type || 'inherit')
+        : existing.rate_type;
+      const rateValue = body.rate_value !== undefined
+        ? (Number(body.rate_value) || 0)
+        : existing.rate_value;
+      try {
+        await env.DB.prepare('UPDATE tasks SET rate_type = ?, rate_value = ? WHERE id = ?')
+          .bind(rateType, rateValue, taskId).run();
+      } catch { /* migration 0014 not applied */ }
+    }
     const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(taskId).first();
     const shaped = shapeTask(row);
     const assigneeChanged = (existing.assigned_to || null) !== (merged.assigned_to || null);

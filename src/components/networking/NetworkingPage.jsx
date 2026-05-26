@@ -595,16 +595,27 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
 
   useEffect(() => {
     if (!containerRef.current) return;
+    const el = containerRef.current;
     const update = () => {
-      if (!containerRef.current) return;
-      const r = containerRef.current.getBoundingClientRect();
+      if (!el) return;
+      const r = el.getBoundingClientRect();
       const w = Math.max(500, Number.isFinite(r.width) ? r.width : 900);
       const h = Math.max(450, Number.isFinite(r.height) ? r.height : 600);
       setSize({ w, h });
     };
     update();
+    // ResizeObserver garante que a SVG redimensione quando o container
+    // ganhar altura após o mount (mudança de tab, abrir/fechar sidebar etc.).
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(update);
+      ro.observe(el);
+    }
     window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', update);
+    };
   }, []);
 
   // Guarantee positive viewBox even before measurement settles.
@@ -675,7 +686,7 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
   const isDimmed = (id) => focusId && focusId !== id && !connectsTo(focusId, id, Array.isArray(connections) ? connections : [], safeRoles);
 
   return (
-    <div ref={containerRef} className="relative h-full w-full rounded-xl border border-line bg-surface">
+    <div ref={containerRef} className="relative h-full min-h-[600px] w-full rounded-xl border border-line bg-surface">
       <svg width="100%" height="100%" viewBox={`0 0 ${safeW} ${safeH}`} style={{ display: 'block' }}>
         {/* Person ↔ Institution dashed links (from person_roles) */}
         {safeRoles.filter((r) => r && r.institution_id && r.person_id).map((r, i) => {

@@ -50,6 +50,15 @@ export default function TaskTreeView({ onOpenTask, onPersist, onChanged }) {
   const [collapse, setCollapse] = useState(() => loadCollapse(user?.id));
   const [inlineForm, setInlineForm] = useState(null); // { kind, parentId, value }
   const [editor, setEditor] = useState(null); // { kind, payload }
+  // Concluídas ficam arquivadas (escondidas) por padrão.
+  const [showDone, setShowDone] = useState(false);
+
+  // Filtra a lista que entra nos buckets — todas as contagens e renderizações
+  // derivam daqui, então o toggle afeta o tree inteiro.
+  const visibleTasks = useMemo(
+    () => (showDone ? tasks : tasks.filter((t) => t.status !== 'done')),
+    [tasks, showDone]
+  );
 
   useEffect(() => {
     // Hydrate hierarchy lazily if it hasn't been loaded yet.
@@ -87,28 +96,33 @@ export default function TaskTreeView({ onOpenTask, onPersist, onChanged }) {
   // Tasks bucketed by where they live in the tree.
   const tasksByFront = useMemo(() => {
     const m = {};
-    for (const t of tasks) {
+    for (const t of visibleTasks) {
       if (t.front_id) {
         if (!m[t.front_id]) m[t.front_id] = [];
         m[t.front_id].push(t);
       }
     }
     return m;
-  }, [tasks]);
+  }, [visibleTasks]);
 
   const tasksByProjectNoFront = useMemo(() => {
     const m = {};
-    for (const t of tasks) {
+    for (const t of visibleTasks) {
       if (!t.front_id && t.project_id) {
         if (!m[t.project_id]) m[t.project_id] = [];
         m[t.project_id].push(t);
       }
     }
     return m;
-  }, [tasks]);
+  }, [visibleTasks]);
 
   const orphanTasks = useMemo(
-    () => tasks.filter((t) => !t.project_id && !t.front_id),
+    () => visibleTasks.filter((t) => !t.project_id && !t.front_id),
+    [visibleTasks]
+  );
+
+  const doneCount = useMemo(
+    () => tasks.filter((t) => t.status === 'done').length,
     [tasks]
   );
 
@@ -241,6 +255,21 @@ export default function TaskTreeView({ onOpenTask, onPersist, onChanged }) {
 
   return (
     <div className="space-y-3">
+      {/* Toggle de arquivadas */}
+      {doneCount > 0 && (
+        <div className="flex items-center justify-end">
+          <button
+            type="button"
+            onClick={() => setShowDone((v) => !v)}
+            className="rounded-md border border-line bg-surface px-2.5 py-1 text-[11px] font-medium text-ink2 hover:bg-surface2"
+            title={showDone ? 'Ocultar tarefas concluídas' : 'Mostrar tarefas concluídas (arquivadas)'}
+          >
+            {showDone
+              ? `Ocultar concluídas (${doneCount})`
+              : `Mostrar concluídas (${doneCount} arquivadas)`}
+          </button>
+        </div>
+      )}
       {areas.map((a) => {
         const areaKey = `area:${a.id}`;
         const closed = !!collapse[areaKey];

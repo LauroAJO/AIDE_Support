@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch, PanelLeftClose, PanelLeft } from 'lucide-react';
+import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { needsDate } from '../../lib/tasks';
@@ -11,7 +11,6 @@ import TaskModal from './TaskModal';
 import ImportModal from './ImportModal';
 import KanbanBoard from './KanbanBoard';
 import TaskTreeView from './TaskTreeView';
-import TaskTreeFilter from './TaskTreeFilter';
 
 const STATUS_TABS = [
   ['all', 'Todas'],
@@ -38,11 +37,8 @@ export default function TasksPage() {
   const taskView = useStore((s) => s.taskView);
   const setTaskView = useStore((s) => s.setTaskView);
   const treeFilter = useStore((s) => s.taskTreeFilter);
-  const areas = useStore((s) => s.areas);
   const setAreas = useStore((s) => s.setAreas);
-  const fronts = useStore((s) => s.fronts);
   const setFronts = useStore((s) => s.setFronts);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // Compute locally with useMemo. Subscribing via useStore(selectFilteredTasks)
   // would return a new array every render → Zustand v5 + useSyncExternalStore
@@ -293,23 +289,7 @@ export default function TasksPage() {
 
         {/* Task list / Kanban / Árvore */}
         <div className="mt-3 flex min-h-0 flex-1 gap-3 overflow-hidden pb-2">
-          {taskView === 'list' && sidebarOpen && (
-            <TaskTreeFilter />
-          )}
           <div className="min-w-0 flex-1 overflow-y-auto">
-            {taskView === 'list' && (
-              <div className="mb-2 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => setSidebarOpen((v) => !v)}
-                  className="flex items-center gap-1 rounded-md border border-line px-2 py-1 text-[11px] text-ink2 hover:bg-surface2"
-                  title={sidebarOpen ? 'Ocultar árvore' : 'Mostrar árvore'}
-                >
-                  {sidebarOpen ? <PanelLeftClose className="h-3 w-3" /> : <PanelLeft className="h-3 w-3" />}
-                  {sidebarOpen ? 'Ocultar árvore' : 'Mostrar árvore'}
-                </button>
-              </div>
-            )}
             {taskView === 'kanban' ? (
               <KanbanBoard
                 tasks={filtered}

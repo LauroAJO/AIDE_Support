@@ -46,6 +46,21 @@ export default function SettingsPage() {
   const [bridgeMsg, setBridgeMsg] = useState(null); // { kind: 'ok'|'err', text }
   const [secretDirty, setSecretDirty] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+
+  const testBridge = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const r = await apiFetch('/api/bridge/test');
+      setTestResult({ kind: r.error ? 'err' : 'ok', data: r });
+    } catch (e) {
+      setTestResult({ kind: 'err', data: { error: String((e && e.message) || e) } });
+    } finally {
+      setTesting(false);
+    }
+  };
   const [syncMsg, setSyncMsg] = useState('');
   const [cronMsg, setCronMsg] = useState('');
 
@@ -287,7 +302,32 @@ export default function SettingsPage() {
               >
                 Sincronizar registros de tempo
               </button>
+              <button
+                onClick={testBridge}
+                disabled={testing}
+                className="rounded-lg border border-accent/40 px-3 py-2 text-sm font-medium text-accent hover:bg-accent/10 disabled:opacity-60"
+              >
+                {testing ? 'Testando...' : 'Testar conexão'}
+              </button>
             </div>
+            {testResult && (
+              <div
+                className={`rounded-md border px-3 py-2 text-xs ${
+                  testResult.kind === 'ok'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                    : 'border-danger/30 bg-danger/10 text-danger'
+                }`}
+              >
+                <div className="mb-1 font-semibold">
+                  {testResult.kind === 'ok' && testResult.data?.lifegame_status?.ok
+                    ? 'Conexão OK — Lifegame respondeu com sucesso.'
+                    : 'Conexão falhou — veja o detalhe:'}
+                </div>
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-snug">
+                  {JSON.stringify(testResult.data, null, 2)}
+                </pre>
+              </div>
+            )}
             {bridgeMsg && (
               <p
                 className={`rounded-md px-3 py-2 text-xs ${

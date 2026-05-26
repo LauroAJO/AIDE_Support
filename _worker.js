@@ -2403,9 +2403,26 @@ async function handleBridge(request, env, ctx, path) {
   // do diagnóstico — usuário precisa conseguir testar exatamente quando o
   // secret pode estar errado. Owner-only enforça a auth.
   if (path === '/api/bridge/test' || path === '/api/bridge/config/debug') {
-    const userForDebug = await getUserFromRequest(request, env);
+    let userForDebug = await getUserFromRequest(request, env);
+    // Fallback debug-only: aceita ?token=<bearer> na query, permitindo
+    // acessar via barra de endereços do browser (que não manda header).
+    // Restrito aos dois endpoints diagnóstico e validado contra D1.
+    if (!userForDebug) {
+      const queryToken = new URL(request.url).searchParams.get('token');
+      if (queryToken) {
+        const now = Math.floor(Date.now() / 1000);
+        userForDebug = await env.DB.prepare(
+          `SELECT u.* FROM sessions s
+             JOIN users u ON s.user_id = u.id
+            WHERE s.token = ? AND s.expires_at > ?`
+        ).bind(queryToken, now).first();
+      }
+    }
     if (!userForDebug || userForDebug.role !== 'owner') {
-      return json({ error: 'Apenas owner' }, 403);
+      return json({
+        error: 'Apenas owner',
+        hint: 'Acesse via SettingsPage (botão Testar conexão) OU adicione ?token=<seu_bearer> na URL. Pegue o token em DevTools > Application > Local Storage > aide_token.',
+      }, 403);
     }
     if (path === '/api/bridge/test') return handleBridgeTest(env);
     return handleBridgeConfigDebug(env);

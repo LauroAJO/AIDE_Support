@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Trash2, ExternalLink, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Trash2, ExternalLink, CheckCircle2, AlertTriangle, RefreshCw, Eye, EyeOff } from 'lucide-react';
 import { useStore } from '../store';
 import { apiFetch } from '../lib/api';
 import { getToken } from '../lib/auth';
@@ -45,6 +45,7 @@ export default function SettingsPage() {
   const [savingBridge, setSavingBridge] = useState(false);
   const [bridgeMsg, setBridgeMsg] = useState(null); // { kind: 'ok'|'err', text }
   const [secretDirty, setSecretDirty] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [cronMsg, setCronMsg] = useState('');
 
@@ -229,22 +230,42 @@ export default function SettingsPage() {
               <span className="mb-1 block text-xs font-medium text-ink2">
                 Bridge Secret {bridge.has_secret && !secretDirty && <span className="text-muted">(já definido — clique para alterar)</span>}
               </span>
-              <input
-                type="password"
-                value={secretDirty ? bridge.bridge_secret : ''}
-                onFocus={() => {
-                  if (!secretDirty) {
-                    setBridge({ ...bridge, bridge_secret: '' });
+              {/* type="text" para evitar o warning do password manager
+                  ("Password field is not inside a form"). É uma API key,
+                  não senha de usuário. Mascarado visualmente via CSS quando
+                  showSecret=false. */}
+              <div className="relative">
+                <input
+                  type="text"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck="false"
+                  data-form-type="other"
+                  value={secretDirty ? bridge.bridge_secret : ''}
+                  onFocus={() => {
+                    if (!secretDirty) {
+                      setBridge({ ...bridge, bridge_secret: '' });
+                      setSecretDirty(true);
+                    }
+                  }}
+                  onChange={(e) => {
+                    setBridge({ ...bridge, bridge_secret: e.target.value });
                     setSecretDirty(true);
-                  }
-                }}
-                onChange={(e) => {
-                  setBridge({ ...bridge, bridge_secret: e.target.value });
-                  setSecretDirty(true);
-                }}
-                placeholder={bridge.has_secret ? 'deixe em branco para manter o atual' : 'defina um segredo'}
-                className="input"
-              />
+                  }}
+                  placeholder={bridge.has_secret ? 'deixe em branco para manter o atual' : 'defina um segredo'}
+                  className="input pr-10"
+                  style={!showSecret ? { WebkitTextSecurity: 'disc', MozTextSecurity: 'disc', textSecurity: 'disc' } : undefined}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSecret((v) => !v)}
+                  title={showSecret ? 'Ocultar' : 'Mostrar'}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink"
+                  aria-label={showSecret ? 'Ocultar segredo' : 'Mostrar segredo'}
+                >
+                  {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </label>
             <div className="flex flex-wrap gap-2">
               <button

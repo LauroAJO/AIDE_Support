@@ -2653,16 +2653,31 @@ async function handleBridgeLog(env) {
 }
 
 async function handleBridgePushTasks(env, config) {
-  if (!config.lifegame_url || !config.bridge_secret) return json({ error: 'Bridge não configurada' }, 400);
+  // Erro de configuração com diagnóstico — diz QUAL campo está faltando.
+  if (!config.lifegame_url || !config.bridge_secret) {
+    return json({
+      error: 'bridge_not_configured',
+      missing: {
+        lifegame_url: !config.lifegame_url,
+        bridge_secret: !config.bridge_secret,
+      },
+      lifegame_url_set: !!config.lifegame_url,
+      secret_length: (config.bridge_secret || '').length,
+      hint: 'Configurar em Settings → Bridge — Lifegame na AIDE',
+    }, 400);
+  }
   const { results } = await env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC`).all();
   const tasks = (results || []).map(shapeTask);
+  const requestBody = JSON.stringify({ tasks });
   const r = await lifegameFetch(config, '/api/bridge/tasks', {
-    method: 'POST', body: JSON.stringify({ tasks }),
+    method: 'POST', body: requestBody,
   });
+  // Log inclui tamanho do payload e amostra do primeiro task pra diagnóstico
+  // (Cloudflare guarda só os primeiros 500 chars de error).
   await logBridge(env, {
     direction: 'outbound', entity_type: 'tasks',
     status: r.ok ? 'success' : 'error',
-    payload: `${tasks.length} tarefas`,
+    payload: `${tasks.length} tarefas, ${requestBody.length} bytes`,
     error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
   });
   if (r.ok) {
@@ -2670,13 +2685,18 @@ async function handleBridgePushTasks(env, config) {
       .bind(Math.floor(Date.now() / 1000)).run().catch(() => {});
     return json({ pushed: tasks.length, errors: [] });
   }
+  // Spec: retornar 400 com detalhe completo da rejeição do Lifegame, para
+  // o usuário ver direto na resposta o que o LG disse.
   return json({
-    pushed: 0,
-    errors: [`HTTP ${r.status}`],
+    error: 'lifegame_rejected',
+    status: r.status,
     detail: r.body.slice(0, 500),
     url: r.url,
     secret_length: r.secret_length,
-  }, r.status === 401 ? 401 : 502);
+    body_size: requestBody.length,
+    task_count: tasks.length,
+    first_task_sample: tasks[0] ? JSON.stringify(tasks[0]).slice(0, 300) : null,
+  }, 400);
 }
 
 async function handleBridgePushTimeEntries(env, config) {

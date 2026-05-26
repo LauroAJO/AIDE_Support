@@ -40,7 +40,17 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
         </div>
       )}
       <div className="flex items-start justify-between gap-2">
-        <span className="font-semibold text-ink">{task.title}</span>
+        <span className="font-semibold text-ink">
+          {task.title}
+          {task.source === 'lifegame' && (
+            <span
+              className="ml-1.5 inline-block rounded-full bg-accent/10 px-1.5 py-0.5 align-middle text-[9px] font-medium text-accent"
+              title="Importada do Lifegame"
+            >
+              LG
+            </span>
+          )}
+        </span>
         <div className="flex shrink-0 items-center gap-1">
           {onToggleFavorite && (
             <button

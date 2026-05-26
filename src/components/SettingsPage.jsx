@@ -61,6 +61,29 @@ export default function SettingsPage() {
       setTesting(false);
     }
   };
+
+  const [importing, setImporting] = useState(false);
+  const importFromLifegame = async () => {
+    setImporting(true);
+    setSyncMsg('Importando do Lifegame...');
+    try {
+      const [tasks, people] = await Promise.all([
+        apiFetch('/api/bridge/import/tasks', { method: 'POST' }).catch((e) => ({ error: String(e.message || e) })),
+        apiFetch('/api/bridge/import/people', { method: 'POST' }).catch((e) => ({ error: String(e.message || e) })),
+      ]);
+      const parts = [];
+      if (tasks && tasks.error) parts.push(`tarefas: erro (${String(tasks.error).slice(0, 80)})`);
+      else if (tasks) parts.push(`tarefas: ${tasks.inserted || 0} novas, ${tasks.updated || 0} atualizadas (de ${tasks.fetched || 0})`);
+      if (people && people.error) parts.push(`pessoas: erro (${String(people.error).slice(0, 80)})`);
+      else if (people) parts.push(`pessoas: ${people.inserted || 0} novas, ${people.updated || 0} atualizadas (de ${people.fetched || 0})`);
+      setSyncMsg(parts.join(' · '));
+      loadBridge();
+    } catch (e) {
+      setSyncMsg(`Falha na importação: ${String((e && e.message) || e).slice(0, 200)}`);
+    } finally {
+      setImporting(false);
+    }
+  };
   const [syncMsg, setSyncMsg] = useState('');
   const [cronMsg, setCronMsg] = useState('');
 
@@ -308,6 +331,14 @@ export default function SettingsPage() {
                 className="rounded-lg border border-accent/40 px-3 py-2 text-sm font-medium text-accent hover:bg-accent/10 disabled:opacity-60"
               >
                 {testing ? 'Testando...' : 'Testar conexão'}
+              </button>
+              <button
+                onClick={importFromLifegame}
+                disabled={importing}
+                className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
+                title="Puxa tarefas e pessoas do Lifegame e grava em D1 com source=lifegame"
+              >
+                {importing ? 'Importando...' : '← Importar do Lifegame'}
               </button>
             </div>
             {testResult && (

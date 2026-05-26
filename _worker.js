@@ -473,6 +473,8 @@ function shapeTask(row) {
     favorited: row.favorited ? 1 : 0,
     google_event_id: row.google_event_id || null,
     drive_attachments: parseJsonArray(row.drive_attachments),
+    source: row.source || 'aide',
+    lifegame_id: row.lifegame_id || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     score: calcScore(row.urgency, row.importance),
@@ -2448,6 +2450,8 @@ async function handleBridge(request, env, ctx, path) {
   if (path === '/api/bridge/pull/tasks') return handleBridgePullTasks(env, config);
   if (path === '/api/bridge/pull/people') return handleBridgePullPeople(env, config);
   if (path === '/api/bridge/pull/timelog') return handleBridgePullTimelog(env, config);
+  if (path === '/api/bridge/import/tasks') return handleBridgeImport(env, config, 'tasks');
+  if (path === '/api/bridge/import/people') return handleBridgeImport(env, config, 'people');
   if (path === '/api/bridge/receive/sprints') return handleBridgeReceiveSprints(request, env);
   if (path === '/api/bridge/receive/xp') return handleBridgeReceiveXp(request, env);
   if (path === '/api/bridge/receive/people') return handleBridgeReceivePeople(request, env);
@@ -2874,6 +2878,137 @@ async function handleBridgePullTimelog(env, config) {
     payload: `${entries.length} registros (pull)`,
   });
   return json({ received: entries.length, entries });
+}
+
+// ── IMPORTAÇÃO Lifegame → AIDE (pull + upsert em D1) ─────────────────────
+// Diferente de pull/* (que só retornam dados em memória), import/* faz
+// upsert real nas tabelas tasks/network_people com source='lifegame'.
+
+// Idempotente: probe + ALTER se necessário. Cobre o caso de migration 0018
+// não ter sido aplicada manualmente.
+async function ensureLifegameColumns(env) {
+  try {
+    await env.DB.prepare('SELECT source, lifegame_id FROM tasks LIMIT 1').first();
+  } catch {
+    try { await env.DB.prepare("ALTER TABLE tasks ADD COLUMN source TEXT DEFAULT 'aide'").run(); } catch { /* já existe */ }
+    try { await env.DB.prepare('ALTER TABLE tasks ADD COLUMN lifegame_id TEXT').run(); } catch { /* já existe */ }
+    try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_tasks_lifegame_id ON tasks(lifegame_id)').run(); } catch { /* ignore */ }
+  }
+  try {
+    await env.DB.prepare('SELECT source FROM network_people LIMIT 1').first();
+  } catch {
+    try { await env.DB.prepare("ALTER TABLE network_people ADD COLUMN source TEXT DEFAULT 'aide'").run(); } catch { /* já existe */ }
+  }
+}
+
+async function upsertLifegameTask(env, t) {
+  if (!t || !t.id) throw new Error('task sem id');
+  const now = Math.floor(Date.now() / 1000);
+  const tags = JSON.stringify(Array.isArray(t.tags) ? t.tags : []);
+  const title = (t.title || '').trim() || '(sem título)';
+  const urgency = Math.max(0, Math.min(10, Number(t.urgency) || 5));
+  const importance = Math.max(0, Math.min(10, Number(t.importance) || 5));
+  const status = ['backlog', 'todo', 'doing', 'done', 'blocked'].includes(t.status) ? t.status : 'backlog';
+
+  const existing = await env.DB.prepare('SELECT id FROM tasks WHERE lifegame_id = ?').bind(t.id).first();
+  if (existing) {
+    await env.DB.prepare(
+      'UPDATE tasks SET title=?, urgency=?, importance=?, status=?, tags=?, updated_at=? WHERE id=?'
+    ).bind(title, urgency, importance, status, tags, now, existing.id).run();
+    return 'updated';
+  }
+  await env.DB.prepare(
+    `INSERT INTO tasks
+      (id, title, description, urgency, importance, energy, status, tags, comments, subtasks, time_entries,
+       favorited, drive_attachments, source, lifegame_id, created_at, updated_at)
+     VALUES (?, ?, '', ?, ?, 5, ?, ?, '[]', '[]', '[]', 0, '[]', 'lifegame', ?, ?, ?)`
+  ).bind(crypto.randomUUID(), title, urgency, importance, status, tags, t.id, now, now).run();
+  return 'inserted';
+}
+
+async function upsertLifegamePerson(env, p) {
+  if (!p || !p.id) throw new Error('person sem id');
+  const now = Math.floor(Date.now() / 1000);
+  const name = (p.name || '').trim() || '(sem nome)';
+  const role = p.role || '';
+  const tags = JSON.stringify(Array.isArray(p.tags) ? p.tags : []);
+
+  const existing = await env.DB.prepare('SELECT id FROM network_people WHERE lifegame_person_id = ?').bind(p.id).first();
+  if (existing) {
+    await env.DB.prepare(
+      'UPDATE network_people SET name=?, role=?, tags=?, updated_at=? WHERE id=?'
+    ).bind(name, role, tags, now, existing.id).run();
+    return 'updated';
+  }
+  await env.DB.prepare(
+    `INSERT INTO network_people
+      (id, name, type, role, tags, lifegame_person_id, source, created_at, updated_at)
+     VALUES (?, ?, 'person', ?, ?, ?, 'lifegame', ?, ?)`
+  ).bind(crypto.randomUUID(), name, role, tags, p.id, now, now).run();
+  return 'inserted';
+}
+
+async function cacheLifegamePayload(env, entityType, payload) {
+  try {
+    await env.DB.prepare(
+      'INSERT INTO lifegame_cache (id, entity_type, payload, synced_at) VALUES (?, ?, ?, ?)'
+    ).bind(crypto.randomUUID(), entityType, JSON.stringify(payload).slice(0, 100000), Math.floor(Date.now() / 1000)).run();
+  } catch { /* tabela ainda não criada — best effort */ }
+}
+
+async function handleBridgeImport(env, config, entity) {
+  if (!config.lifegame_url || !config.bridge_secret) {
+    return json({ error: 'bridge_not_configured', hint: 'Configurar URL + secret em Settings → Bridge' }, 400);
+  }
+  const lgPath = entity === 'tasks' ? '/api/bridge/tasks' : '/api/bridge/people';
+  const r = await lifegameFetch(config, lgPath);
+  if (!r.ok) {
+    await logBridge(env, {
+      direction: 'inbound', entity_type: entity, status: 'error',
+      error: `import HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
+    });
+    return json({
+      error: 'lifegame_rejected',
+      status: r.status,
+      detail: r.body.slice(0, 500),
+      url: r.url,
+    }, r.status === 401 ? 401 : 400);
+  }
+  let data; try { data = JSON.parse(r.body); } catch { data = {}; }
+  const items = entity === 'tasks'
+    ? (Array.isArray(data.tasks) ? data.tasks : (Array.isArray(data) ? data : []))
+    : (Array.isArray(data.people) ? data.people : (Array.isArray(data) ? data : []));
+
+  await ensureLifegameColumns(env);
+  await cacheLifegamePayload(env, entity, items);
+
+  let inserted = 0, updated = 0;
+  const errors = [];
+  for (const item of items) {
+    try {
+      const result = entity === 'tasks'
+        ? await upsertLifegameTask(env, item)
+        : await upsertLifegamePerson(env, item);
+      if (result === 'inserted') inserted += 1;
+      else if (result === 'updated') updated += 1;
+    } catch (e) {
+      errors.push({ id: item && item.id, error: String((e && e.message) || e).slice(0, 200) });
+    }
+  }
+
+  await logBridge(env, {
+    direction: 'inbound', entity_type: entity, status: errors.length ? 'error' : 'success',
+    payload: `import: ${inserted} novos, ${updated} atualizados, ${errors.length} erros`,
+    error: errors.length ? errors.slice(0, 3).map((e) => `${e.id}: ${e.error}`).join('; ') : null,
+  });
+
+  return json({
+    fetched: items.length,
+    inserted,
+    updated,
+    errors_count: errors.length,
+    errors: errors.slice(0, 10),
+  });
 }
 
 async function handleBridgeReceiveSprints(request, env) {

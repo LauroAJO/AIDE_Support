@@ -56,7 +56,6 @@ export default function PaymentPage() {
   const [editEntry, setEditEntry] = useState(null); // time_entry payload
   const [showManual, setShowManual] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [avail, setAvail] = useState(null);
   const [defaultRateDraft, setDefaultRateDraft] = useState('');
   const [savingDefaultRate, setSavingDefaultRate] = useState(false);
   const [defaultRateMsg, setDefaultRateMsg] = useState(null);
@@ -66,23 +65,16 @@ export default function PaymentPage() {
   const load = async (m) => {
     setLoading(true);
     try {
-      const [sum, users, av] = await Promise.all([
+      const [sum, users] = await Promise.all([
         apiFetch(`/api/payment/summary?month=${m}`),
         apiFetch('/api/users'),
-        apiFetch('/api/availability').catch(() => null),
       ]);
       setSummary(sum);
       setAlice(users.find((u) => u.role === 'assistant') || null);
       setLauro(users.find((u) => u.role === 'owner') || null);
-      if (av) {
-        setAvail(av);
-        // Para assistant a taxa padrão vive em hourly_rate_brl (R$/h);
-        // para owner, em hourly_rate (€/h).
-        const seed = user?.role === 'assistant'
-          ? (av.hourly_rate_brl ?? 0)
-          : (av.hourly_rate ?? 0);
-        setDefaultRateDraft(String(seed));
-      }
+      // Seed do editor: taxa padrão é sempre a de Alice (assistant), vindo do
+      // summary.defaultRate. NÃO depende de quem está logado.
+      setDefaultRateDraft(String(sum.defaultRate ?? 0));
     } finally {
       setLoading(false);
     }
@@ -93,19 +85,18 @@ export default function PaymentPage() {
   }, [month]);
 
   const saveDefaultRate = async () => {
-    if (!avail) return;
     setSavingDefaultRate(true);
     setDefaultRateMsg(null);
     try {
-      const value = Number(defaultRateDraft) || 0;
-      const patch = user?.role === 'assistant'
-        ? { ...avail, hourly_rate_brl: value, currency: 'BRL' }
-        : { ...avail, hourly_rate: value };
-      const saved = await apiFetch('/api/availability', { method: 'PUT', body: JSON.stringify(patch) });
-      setAvail(saved);
+      const rate = Number(defaultRateDraft) || 0;
+      // Endpoint dedicado escreve em ALICE.availability.hourly_rate_brl
+      // independente do papel do usuário logado.
+      await apiFetch('/api/payment/default-rate', {
+        method: 'PUT',
+        body: JSON.stringify({ rate }),
+      });
       setDefaultRateMsg({ kind: 'ok', text: 'Taxa padrão salva.' });
-      // Recarrega o summary para refletir a nova taxa nos cards/banner.
-      load(month);
+      load(month); // Recarrega o summary com a nova taxa.
     } catch (e) {
       setDefaultRateMsg({ kind: 'err', text: `Falha: ${String((e && e.message) || e).slice(0, 200)}` });
     } finally {
@@ -217,12 +208,13 @@ export default function PaymentPage() {
         <a href="/profile" className="text-xs text-accent hover:underline">Editar dados → Perfil</a>
       </div>
 
-      {/* Editor da taxa padrão — único local. ProfilePage só remete pra cá. */}
+      {/* Editor da taxa padrão — único local. Escreve em Alice.hourly_rate_brl
+          via /api/payment/default-rate independente do papel do usuário logado. */}
       <div className="rounded-xl border border-line bg-surface p-4">
         <div className="flex flex-wrap items-end gap-3">
           <label className="block min-w-[200px]">
             <span className="mb-1 block text-xs font-medium text-ink2">
-              Taxa padrão {user?.role === 'assistant' ? '(R$/h)' : '(€/h)'}
+              Taxa padrão de {alice?.name?.split(' ')[0] || 'Alice'} (R$/h)
             </span>
             <input
               type="number"
@@ -232,12 +224,11 @@ export default function PaymentPage() {
               onChange={(e) => setDefaultRateDraft(e.target.value)}
               placeholder="0.00"
               className="input"
-              disabled={!avail}
             />
           </label>
           <button
             onClick={saveDefaultRate}
-            disabled={savingDefaultRate || !avail}
+            disabled={savingDefaultRate}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
           >
             {savingDefaultRate ? 'Salvando...' : 'Salvar taxa padrão'}
@@ -252,10 +243,10 @@ export default function PaymentPage() {
             </span>
           )}
           <p className="basis-full text-[11px] text-muted">
-            Esta é a taxa usada como padrão quando uma nova entrada de tempo é criada sem taxa explícita.
-            {defaultRate > 0 && (
-              <> Valor atual aplicado às entradas: <span className="font-medium text-ink2">R$ {defaultRate.toFixed(2)}/h</span>.</>
-            )}
+            Aplicada como padrão a novas entradas de tempo sem taxa explícita.
+            {defaultRate > 0
+              ? <> Valor atual: <span className="font-medium text-ink2">R$ {defaultRate.toFixed(2)}/h</span>.</>
+              : <> Ainda não configurada — entradas sem taxa explícita totalizam R$ 0,00.</>}
           </p>
         </div>
       </div>

@@ -189,6 +189,7 @@ async function handleAPI(request, env, ctx) {
 
   // Payment
   if (path === '/api/payment/summary') return handlePaymentSummary(request, env, user);
+  if (path === '/api/payment/default-rate') return handlePaymentDefaultRate(request, env, user);
   if (path.startsWith('/api/payment/entries/') && path.endsWith('/paid')) {
     return handlePaymentEntryPaid(request, env, user, path.split('/')[4]);
   }
@@ -881,10 +882,15 @@ async function handleTimerEntries(request, env, user) {
 async function handleTimerEntryItem(request, env, user, id) {
   if (!id) return json({ error: 'ID ausente' }, 400);
 
+  // Owner pode editar/excluir entradas de qualquer usuário (gestão de pagamentos
+  // na PaymentPage lista as entradas de Alice). Assistant continua restrito às
+  // suas próprias entradas.
+  const isOwner = user.role === 'owner';
+
   if (request.method === 'PUT') {
-    const existing = await env.DB.prepare(
-      'SELECT * FROM time_entries WHERE id = ? AND user_id = ?'
-    ).bind(id, user.id).first();
+    const existing = isOwner
+      ? await env.DB.prepare('SELECT * FROM time_entries WHERE id = ?').bind(id).first()
+      : await env.DB.prepare('SELECT * FROM time_entries WHERE id = ? AND user_id = ?').bind(id, user.id).first();
     if (!existing) return json({ error: 'Registro não encontrado' }, 404);
 
     const body = (await readJson(request)) || {};
@@ -945,9 +951,9 @@ async function handleTimerEntryItem(request, env, user, id) {
   }
 
   if (request.method === 'DELETE') {
-    const result = await env.DB.prepare(
-      'DELETE FROM time_entries WHERE id = ? AND user_id = ?'
-    ).bind(id, user.id).run();
+    const result = isOwner
+      ? await env.DB.prepare('DELETE FROM time_entries WHERE id = ?').bind(id).run()
+      : await env.DB.prepare('DELETE FROM time_entries WHERE id = ? AND user_id = ?').bind(id, user.id).run();
     return json({ deleted: true, changes: result.meta?.changes ?? 0 });
   }
 
@@ -3119,20 +3125,23 @@ async function computePaymentSummary(env, month) {
      ORDER BY e.started_at`
   ).bind(assistantId, start, end).all();
 
-  // Alice's default rate is BRL after Payment v2. Fall back to legacy
-  // `hourly_rate` so historical rows still resolve when the migration hasn't
-  // landed yet.
+  // Taxa padrão = Alice.availability.hourly_rate_brl (BRL).
+  // NÃO faz fallback pra `hourly_rate` legacy (€/h), porque misturar moedas
+  // produzia valores fantasmas tipo "R$ 2.50" quando hourly_rate_brl estava 0
+  // mas hourly_rate tinha um euro antigo. Se hourly_rate_brl não foi setado,
+  // defaultRate = 0 e o usuário precisa configurar em Pagamentos.
   let availRow = null;
   try {
     availRow = await env.DB.prepare(
-      'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
+      'SELECT hourly_rate_brl FROM availability WHERE user_id = ?'
     ).bind(assistantId).first();
   } catch {
+    // Coluna ausente (migration 0014 não aplicada) — usa legacy como BRL.
     availRow = await env.DB.prepare(
-      'SELECT hourly_rate FROM availability WHERE user_id = ?'
+      'SELECT hourly_rate AS hourly_rate_brl FROM availability WHERE user_id = ?'
     ).bind(assistantId).first();
   }
-  const defaultRate = (availRow && (availRow.hourly_rate_brl || availRow.hourly_rate)) || 0;
+  const defaultRate = (availRow && availRow.hourly_rate_brl) || 0;
 
   const brl = await getBrlEurRate(env);
   const brlRate = brl.rate;
@@ -3216,6 +3225,75 @@ async function computePaymentSummary(env, month) {
 async function handlePaymentSummary(request, env, user) {
   const month = new URL(request.url).searchParams.get('month') || new Date().toISOString().slice(0, 7);
   return json(await computePaymentSummary(env, month));
+}
+
+// GET retorna a taxa padrão (BRL) atualmente configurada para Alice.
+// PUT define/atualiza a taxa padrão. Salva em ALICE.availability.hourly_rate_brl
+// independente de quem está logado (owner ou assistant). Owner edita a taxa
+// de Alice da PaymentPage sem precisar logar como Alice.
+async function handlePaymentDefaultRate(request, env, user) {
+  if (request.method !== 'GET' && request.method !== 'PUT') {
+    return json({ error: 'Método não permitido' }, 405);
+  }
+  if (user.role !== 'owner' && user.role !== 'assistant') {
+    return json({ error: 'Não autorizado' }, 403);
+  }
+  const { assistantId } = await getRoleUsers(env);
+  if (!assistantId) return json({ error: 'Assistente não cadastrada' }, 404);
+
+  if (request.method === 'GET') {
+    let row = null;
+    try {
+      row = await env.DB.prepare(
+        'SELECT hourly_rate_brl FROM availability WHERE user_id = ?'
+      ).bind(assistantId).first();
+    } catch {
+      row = await env.DB.prepare(
+        'SELECT hourly_rate AS hourly_rate_brl FROM availability WHERE user_id = ?'
+      ).bind(assistantId).first();
+    }
+    return json({ rate: (row && row.hourly_rate_brl) || 0 });
+  }
+
+  // PUT
+  const body = (await readJson(request)) || {};
+  const rate = Number(body.rate);
+  if (!Number.isFinite(rate) || rate < 0) {
+    return json({ error: 'Taxa inválida' }, 400);
+  }
+  const now = Math.floor(Date.now() / 1000);
+  // Tenta UPDATE (migration 0014 com hourly_rate_brl); se a coluna não existir,
+  // cai pro legacy hourly_rate.
+  let updated = false;
+  try {
+    const res = await env.DB.prepare(
+      'UPDATE availability SET hourly_rate_brl = ?, currency = ?, updated_at = ? WHERE user_id = ?'
+    ).bind(rate, 'BRL', now, assistantId).run();
+    updated = (res.meta?.changes ?? 0) > 0;
+  } catch {
+    /* coluna ausente */
+  }
+  if (!updated) {
+    // Linha ainda não existe — INSERT mínimo (defaults do schema cobrem o resto).
+    try {
+      await env.DB.prepare(
+        `INSERT INTO availability (id, user_id, hourly_rate_brl, currency, updated_at)
+         VALUES (?, ?, ?, 'BRL', ?)`
+      ).bind(crypto.randomUUID(), assistantId, rate, now).run();
+      updated = true;
+    } catch {
+      // Migration 0014 sem hourly_rate_brl — fallback no campo legacy.
+      try {
+        await env.DB.prepare(
+          'UPDATE availability SET hourly_rate = ?, updated_at = ? WHERE user_id = ?'
+        ).bind(rate, now, assistantId).run();
+        updated = true;
+      } catch (e) {
+        return json({ error: 'Falha ao salvar taxa', detail: String(e && e.message || e) }, 500);
+      }
+    }
+  }
+  return json({ rate, savedAt: now });
 }
 
 async function handlePaymentEntryPaid(request, env, user, id) {

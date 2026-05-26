@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, FileText, Check, Clock, Pencil, Plus, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileText, Check, Clock, Pencil, Plus, X, Trash2 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { formatEuro, formatBrl } from '../../lib/time';
@@ -26,6 +26,24 @@ function formatRateTime(unix) {
   return new Date(unix * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
 
+// Build a YYYY-MM-DD / HH:MM pair from a unix timestamp (local).
+function splitTs(unix) {
+  if (!unix) return { date: todayStr(), time: '09:00' };
+  const d = new Date(unix * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return {
+    date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+  };
+}
+
+function durationLabel(sec) {
+  const h = Math.floor((sec || 0) / 3600);
+  const m = Math.floor(((sec || 0) % 3600) / 60);
+  const s = Math.floor((sec || 0) % 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 export default function PaymentPage() {
   const user = useStore((s) => s.user);
   const summary = useStore((s) => s.paymentSummary);
@@ -35,7 +53,9 @@ export default function PaymentPage() {
   const [alice, setAlice] = useState(null);
   const [lauro, setLauro] = useState(null);
   const [editRate, setEditRate] = useState(null); // { taskId, type, value }
+  const [editEntry, setEditEntry] = useState(null); // time_entry payload
   const [showManual, setShowManual] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const isOwner = user?.role === 'owner';
 
@@ -76,6 +96,39 @@ export default function PaymentPage() {
     load(month);
   };
 
+  const deleteEntry = async (entryId) => {
+    if (!window.confirm('Excluir esta entrada? Esta ação não pode ser desfeita.')) return;
+    setBusy(true);
+    try {
+      await apiFetch(`/api/timer/entries/${entryId}`, { method: 'DELETE' });
+      load(month);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyDefaultRateToAll = async () => {
+    if (!summary?.defaultRate) return;
+    const targets = (summary.entries || []).filter(
+      (e) => (!e.entryRate || e.entryRate === 0) && e.rateSource === 'default'
+    );
+    if (targets.length === 0) return;
+    if (!window.confirm(`Aplicar taxa padrão (R$ ${summary.defaultRate.toFixed(2)}/h) a ${targets.length} entrada(s)?`)) return;
+    setBusy(true);
+    try {
+      for (const e of targets) {
+        // eslint-disable-next-line no-await-in-loop
+        await apiFetch(`/api/timer/entries/${e.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ hourly_rate: summary.defaultRate }),
+        });
+      }
+      load(month);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const generatePdf = async () => {
     const report = await apiFetch(`/api/reports/monthly?month=${month}`);
     openPrintWindow(report, alice, lauro, isOwner);
@@ -85,6 +138,10 @@ export default function PaymentPage() {
 
   const brlRate = summary.brlRate || 0;
   const rateTime = formatRateTime(summary.brlRateUpdatedAt);
+  const defaultRate = summary.defaultRate || 0;
+  const entriesUsingDefault = (summary.entries || []).filter(
+    (e) => e.rateSource === 'default' && (!e.entryRate || e.entryRate === 0)
+  ).length;
 
   return (
     <div className="mx-auto max-w-5xl space-y-4">
@@ -118,6 +175,11 @@ export default function PaymentPage() {
           ) : (
             <div className="text-xs" style={{ color: '#F59E0B' }}>Alice não cadastrou chave PIX</div>
           )}
+          {defaultRate > 0 && (
+            <div className="mt-0.5 text-[11px] text-muted">
+              Taxa padrão: <span className="font-medium text-ink2">R$ {defaultRate.toFixed(2)}/h</span>
+            </div>
+          )}
         </div>
         <a href="/profile" className="text-xs text-accent hover:underline">Editar dados → Perfil</a>
       </div>
@@ -127,6 +189,23 @@ export default function PaymentPage() {
         <div className="rounded-lg border border-line bg-surface2 px-3 py-2 text-xs text-ink2">
           Cotação: <span className="font-medium text-ink">1 BRL = €{brlRate.toFixed(4)}</span>
           {rateTime && <span className="text-muted"> · atualizado {rateTime}</span>}
+        </div>
+      )}
+
+      {/* Apply-default banner */}
+      {entriesUsingDefault > 0 && defaultRate > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line px-3 py-2 text-xs"
+             style={{ background: 'rgba(99,102,241,0.06)', color: '#3730A3' }}>
+          <span>
+            {entriesUsingDefault} entrada(s) usando a taxa padrão de R$ {defaultRate.toFixed(2)}/h.
+          </span>
+          <button
+            onClick={applyDefaultRateToAll}
+            disabled={busy}
+            className="rounded-md border border-accent/40 bg-surface px-2 py-1 text-[11px] font-medium text-accent hover:bg-accent/10 disabled:opacity-60"
+          >
+            Aplicar taxa padrão a todas
+          </button>
         </div>
       )}
 
@@ -179,7 +258,14 @@ export default function PaymentPage() {
                   <td className="py-2 pr-2">{e.taskTitle}</td>
                   <td className="py-2 pr-2 text-ink2">{e.projectName || '—'}</td>
                   <td className="py-2 pr-2">{e.rateType === 'fixed' ? 'Fixo' : 'Por hora'}</td>
-                  <td className="py-2 pr-2">{e.rateType === 'fixed' ? `${formatBrl(e.rateValue)} (fixo)` : `${formatBrl(e.rateValue)}/h`}</td>
+                  <td className="py-2 pr-2">
+                    {e.rateType === 'fixed'
+                      ? `${formatBrl(e.rateValue)} (fixo)`
+                      : `${formatBrl(e.rateValue)}/h`}
+                    {e.rateSource === 'default' && (
+                      <span className="ml-1 text-[10px] text-muted">(padrão)</span>
+                    )}
+                  </td>
                   <td className="py-2 pr-2">{e.rateType === 'fixed' ? '—' : `${e.hours}h`}</td>
                   <td className="py-2 pr-2 font-medium">{formatBrl(e.amountBrl ?? e.amount)}</td>
                   {isOwner && (
@@ -191,11 +277,40 @@ export default function PaymentPage() {
                     </button>
                   </td>
                   <td className="py-2">
-                    {e.taskId && (
-                      <button onClick={() => setEditRate({ taskId: e.taskId, type: e.rateType, value: e.rateValue })} className="text-ink2 hover:text-ink" title="Editar taxa">
-                        <Pencil className="h-3.5 w-3.5" />
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setEditEntry({
+                          id: e.id,
+                          taskTitle: e.taskTitle,
+                          rate: e.entryRate || e.rateValue || defaultRate,
+                          notes: e.notes || '',
+                          ...splitTs(e.started_at),
+                          endDate: splitTs(e.ended_at || e.started_at).date,
+                          endTime: splitTs(e.ended_at || (e.started_at + (e.duration_seconds || 0))).time,
+                        })}
+                        className="rounded-md border border-line p-1 text-ink2 hover:bg-surface2"
+                        title="Editar entrada"
+                      >
+                        <Pencil className="h-3 w-3" />
                       </button>
-                    )}
+                      {e.taskId && (
+                        <button
+                          onClick={() => setEditRate({ taskId: e.taskId, type: e.rateType, value: e.rateValue })}
+                          className="rounded-md border border-line p-1 text-ink2 hover:bg-surface2"
+                          title="Editar taxa da tarefa"
+                        >
+                          R$
+                        </button>
+                      )}
+                      <button
+                        onClick={() => deleteEntry(e.id)}
+                        disabled={busy}
+                        className="rounded-md border border-line p-1 text-danger hover:bg-danger/10 disabled:opacity-60"
+                        title="Excluir entrada"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))
@@ -236,8 +351,18 @@ export default function PaymentPage() {
         </div>
       )}
 
+      {editEntry && (
+        <EntryEditModal
+          entry={editEntry}
+          defaultRate={defaultRate}
+          onClose={() => setEditEntry(null)}
+          onSaved={() => { setEditEntry(null); load(month); }}
+        />
+      )}
+
       {showManual && (
         <ManualEntryModal
+          defaultRate={defaultRate}
           onClose={() => setShowManual(false)}
           onSaved={() => {
             setShowManual(false);
@@ -272,7 +397,119 @@ function DualCard({ label, brl, eur, isOwner, danger }) {
   );
 }
 
-function ManualEntryModal({ onClose, onSaved }) {
+function calcDurationSeconds(date, startTime, endDate, endTime) {
+  const start = new Date(`${date}T${startTime}`);
+  const end = new Date(`${endDate || date}T${endTime}`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  return Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
+}
+
+function EntryEditModal({ entry, defaultRate, onClose, onSaved }) {
+  const [form, setForm] = useState(entry);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const duration = calcDurationSeconds(form.date, form.time, form.endDate, form.endTime);
+
+  const save = async () => {
+    setError('');
+    if (duration <= 0) return setError('Hora final deve ser depois da inicial.');
+    setBusy(true);
+    try {
+      const startedAt = new Date(`${form.date}T${form.time}`).toISOString();
+      const endedAt = new Date(`${form.endDate || form.date}T${form.endTime}`).toISOString();
+      await apiFetch(`/api/timer/entries/${form.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          started_at: startedAt,
+          ended_at: endedAt,
+          duration_seconds: duration,
+          hourly_rate: Number(form.rate) || 0,
+          notes: form.notes,
+        }),
+      });
+      onSaved();
+    } catch (e) {
+      setError(String((e && e.message) || e) || 'Erro ao salvar.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-line px-4 py-3">
+          <h2 className="text-base font-bold text-ink">Editar entrada</h2>
+          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-3 px-4 py-4">
+          {error && (
+            <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>
+          )}
+          <div className="rounded-lg bg-surface2 px-3 py-2 text-xs">
+            <span className="text-muted">Tarefa: </span>
+            <span className="font-medium text-ink">{form.taskTitle || '—'}</span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Data</span>
+              <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value, endDate: e.target.value })} className="input" />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Início</span>
+              <input type="time" value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} className="input" />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Fim</span>
+              <input type="time" value={form.endTime} onChange={(e) => setForm({ ...form, endTime: e.target.value })} className="input" />
+            </label>
+          </div>
+
+          <div className="rounded-lg bg-surface2 px-3 py-2 text-xs text-ink2">
+            Duração: <span className="font-semibold text-ink">{durationLabel(duration)}</span>
+          </div>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-ink2">
+              Taxa (R$/h){defaultRate > 0 ? ` — padrão R$ ${defaultRate.toFixed(2)}` : ''}
+            </span>
+            <input
+              type="number"
+              min="0"
+              step="0.5"
+              value={form.rate}
+              onChange={(e) => setForm({ ...form, rate: e.target.value })}
+              className="input"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-ink2">Observações</span>
+            <textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="input resize-y" />
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
+          <button onClick={onClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
+            Cancelar
+          </button>
+          <button
+            onClick={save}
+            disabled={busy}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover disabled:opacity-60"
+          >
+            {busy ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ManualEntryModal({ defaultRate, onClose, onSaved }) {
   const tasks = useStore((s) => s.tasks);
   const setTasks = useStore((s) => s.setTasks);
   const [search, setSearch] = useState('');
@@ -280,6 +517,7 @@ function ManualEntryModal({ onClose, onSaved }) {
   const [date, setDate] = useState(todayStr());
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('10:00');
+  const [rate, setRate] = useState(defaultRate || 0);
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -293,22 +531,11 @@ function ManualEntryModal({ onClose, onSaved }) {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return tasks
-      .filter((t) => t.status !== 'done')
       .filter((t) => !q || t.title.toLowerCase().includes(q))
-      .slice(0, 20);
+      .slice(0, 30);
   }, [tasks, search]);
 
-  const durationSeconds = (() => {
-    const start = new Date(`${date}T${startTime}`);
-    const end = new Date(`${date}T${endTime}`);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
-    return Math.max(0, Math.floor((end.getTime() - start.getTime()) / 1000));
-  })();
-  const durationLabel = (() => {
-    const h = Math.floor(durationSeconds / 3600);
-    const m = Math.floor((durationSeconds % 3600) / 60);
-    return `${h}h ${m}min`;
-  })();
+  const durationSeconds = calcDurationSeconds(date, startTime, date, endTime);
 
   const save = async () => {
     setError('');
@@ -325,6 +552,7 @@ function ManualEntryModal({ onClose, onSaved }) {
           started_at: startedAt,
           ended_at: endedAt,
           duration_seconds: durationSeconds,
+          hourly_rate: Number(rate) || 0,
           notes,
           manual: true,
         }),
@@ -361,12 +589,14 @@ function ManualEntryModal({ onClose, onSaved }) {
             <select
               value={taskId}
               onChange={(e) => setTaskId(e.target.value)}
-              size={Math.min(5, Math.max(2, filtered.length))}
+              size={Math.min(6, Math.max(3, filtered.length))}
               className="input mt-1 w-full"
             >
               {filtered.length === 0 && <option value="">Nenhuma tarefa</option>}
               {filtered.map((t) => (
-                <option key={t.id} value={t.id}>{t.title}</option>
+                <option key={t.id} value={t.id}>
+                  {t.title}{t.status === 'done' ? ' · concluída' : ''}
+                </option>
               ))}
             </select>
           </label>
@@ -387,8 +617,22 @@ function ManualEntryModal({ onClose, onSaved }) {
           </div>
 
           <div className="rounded-lg bg-surface2 px-3 py-2 text-xs text-ink2">
-            Duração calculada: <span className="font-semibold text-ink">{durationLabel}</span>
+            Duração calculada: <span className="font-semibold text-ink">{durationLabel(durationSeconds)}</span>
           </div>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-ink2">
+              Taxa (R$/h){defaultRate > 0 ? ` — padrão R$ ${defaultRate.toFixed(2)}` : ''}
+            </span>
+            <input
+              type="number"
+              min="0"
+              step="0.5"
+              value={rate}
+              onChange={(e) => setRate(e.target.value)}
+              className="input"
+            />
+          </label>
 
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-ink2">Observações</span>

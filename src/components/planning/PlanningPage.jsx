@@ -37,13 +37,18 @@ export default function PlanningPage() {
   const [keyResults, setKeyResults] = useState([]);
   const [krInput, setKrInput] = useState('');
 
+  const setAreas = useStore((s) => s.setAreas);
+  const setProjects = useStore((s) => s.setProjects);
+
   const load = async (dateIso) => {
     setLoading(true);
     try {
-      const [plan, t, e] = await Promise.all([
+      const [plan, t, e, a, p] = await Promise.all([
         apiFetch(`/api/planning/week?date=${dateIso}`),
         apiFetch('/api/tasks'),
         apiFetch('/api/timer/entries'),
+        apiFetch('/api/areas').catch(() => []),
+        apiFetch('/api/projects').catch(() => []),
       ]);
       setWeekPlan(plan);
       setGoal(plan.weekly_goal || '');
@@ -55,6 +60,8 @@ export default function PlanningPage() {
       });
       setTasks(t);
       setEntries(e);
+      setAreas(a || []);
+      setProjects(p || []);
     } catch {
       /* ignore */
     } finally {
@@ -129,6 +136,38 @@ export default function PlanningPage() {
     return m;
   }, [tasks]);
 
+  const allAreas = useStore((s) => s.areas);
+  const allProjects = useStore((s) => s.projects);
+
+  const breadcrumbForTask = (task) => {
+    if (!task) return '';
+    const parts = [];
+    if (task.areaName) parts.push(task.areaName);
+    if (task.projectName) parts.push(task.projectName);
+    return parts.join(' › ');
+  };
+
+  // Tasks grouped by Area > Project for the day picker.
+  const tasksGrouped = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filteredTasks = tasks
+      .filter((t) => t.status !== 'done')
+      .filter((t) => !q || t.title.toLowerCase().includes(q));
+
+    const byArea = new Map(); // areaId|'__none__' → { name, projects: Map(projId → { name, tasks }) }
+    for (const t of filteredTasks) {
+      const aKey = t.area_id || '__none__';
+      const aName = t.areaName || (t.area_id ? 'Área' : 'Sem área');
+      if (!byArea.has(aKey)) byArea.set(aKey, { name: aName, projects: new Map() });
+      const aGroup = byArea.get(aKey);
+      const pKey = t.project_id || '__none__';
+      const pName = t.projectName || (t.project_id ? 'Projeto' : 'Sem projeto');
+      if (!aGroup.projects.has(pKey)) aGroup.projects.set(pKey, { name: pName, tasks: [] });
+      aGroup.projects.get(pKey).tasks.push(t);
+    }
+    return byArea;
+  }, [tasks, search]);
+
   if (loading || !weekPlan) {
     return (
       <div className="h-full">
@@ -187,10 +226,6 @@ export default function PlanningPage() {
   const hoursTrackedSeconds = entries
     .filter((e) => e.started_at >= weekStartTs && e.started_at < weekEndTs)
     .reduce((sum, e) => sum + (e.duration_seconds || 0), 0);
-
-  const nonDoneTasks = tasks
-    .filter((t) => t.status !== 'done')
-    .filter((t) => t.title.toLowerCase().includes(search.trim().toLowerCase()));
 
   const rangeLabel = `${formatDateBR(weekStart)} a ${formatDateBR(addDaysISO(weekStart, 6))}`;
 
@@ -321,33 +356,39 @@ export default function PlanningPage() {
                     {ids.map((id, idx) => {
                       const task = tasksById[id];
                       if (!task) return null;
+                      const crumb = breadcrumbForTask(task);
                       return (
                         <div
                           key={id}
-                          className="group flex items-center gap-1.5 rounded-lg border border-line bg-base px-2 py-1.5"
+                          className="group rounded-lg border border-line bg-base px-2 py-1.5"
                         >
-                          <span
-                            className="h-2 w-2 shrink-0 rounded-full"
-                            style={{ background: STATUS_COLORS[task.status] }}
-                            title={STATUS_LABELS[task.status]}
-                          />
-                          <button
-                            onClick={() => openTask(task)}
-                            className="min-w-0 flex-1 truncate text-left text-xs text-ink hover:text-accent"
-                          >
-                            {task.title}
-                          </button>
-                          <div className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100">
-                            <button onClick={() => move(dayIso, idx, -1)} className="text-muted hover:text-ink">
-                              <ArrowUp className="h-3 w-3" />
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className="h-2 w-2 shrink-0 rounded-full"
+                              style={{ background: STATUS_COLORS[task.status] }}
+                              title={STATUS_LABELS[task.status]}
+                            />
+                            <button
+                              onClick={() => openTask(task)}
+                              className="min-w-0 flex-1 truncate text-left text-xs text-ink hover:text-accent"
+                            >
+                              {task.title}
                             </button>
-                            <button onClick={() => move(dayIso, idx, 1)} className="text-muted hover:text-ink">
-                              <ArrowDown className="h-3 w-3" />
-                            </button>
-                            <button onClick={() => removeFromDay(dayIso, id)} className="text-muted hover:text-danger">
-                              <X className="h-3 w-3" />
-                            </button>
+                            <div className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100">
+                              <button onClick={() => move(dayIso, idx, -1)} className="text-muted hover:text-ink">
+                                <ArrowUp className="h-3 w-3" />
+                              </button>
+                              <button onClick={() => move(dayIso, idx, 1)} className="text-muted hover:text-ink">
+                                <ArrowDown className="h-3 w-3" />
+                              </button>
+                              <button onClick={() => removeFromDay(dayIso, id)} className="text-muted hover:text-danger">
+                                <X className="h-3 w-3" />
+                              </button>
+                            </div>
                           </div>
+                          {crumb && (
+                            <div className="mt-0.5 truncate pl-3.5 text-[10px] text-muted">{crumb}</div>
+                          )}
                         </div>
                       );
                     })}
@@ -402,6 +443,14 @@ export default function PlanningPage() {
             </dl>
           </div>
 
+          <HoursByAreaPanel
+            entries={entries}
+            tasksById={tasksById}
+            weekStartTs={weekStartTs}
+            weekEndTs={weekEndTs}
+          />
+
+
           <div className="rounded-xl border border-line bg-surface p-4">
             <p className="mb-2 text-xs font-medium text-ink2">Níveis estratégicos</p>
             <div className="space-y-3">
@@ -455,30 +504,46 @@ export default function PlanningPage() {
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
-              {nonDoneTasks.length === 0 ? (
+              {tasksGrouped.size === 0 ? (
                 <p className="p-3 text-center text-xs text-muted">Nenhuma tarefa.</p>
               ) : (
-                nonDoneTasks.map((t) => {
-                  const already = (dayPlans[addFor] || []).includes(t.id);
-                  return (
-                    <button
-                      key={t.id}
-                      disabled={already}
-                      onClick={() => {
-                        addToDay(addFor, t.id);
-                        setAddFor(null);
-                      }}
-                      className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:opacity-40"
-                    >
-                      <span
-                        className="h-2 w-2 shrink-0 rounded-full"
-                        style={{ background: STATUS_COLORS[t.status] }}
-                      />
-                      <span className="truncate">{t.title}</span>
-                      {already && <span className="ml-auto text-[10px] text-muted">já adicionada</span>}
-                    </button>
-                  );
-                })
+                Array.from(tasksGrouped.entries()).map(([areaKey, areaGroup]) => (
+                  <div key={areaKey} className="mb-2">
+                    <div className="px-1 py-1 text-[10px] font-semibold uppercase text-muted">
+                      Área: {areaGroup.name}
+                    </div>
+                    {Array.from(areaGroup.projects.entries()).map(([projKey, projGroup]) => (
+                      <div key={projKey} className="mb-1">
+                        {projGroup.name !== 'Sem projeto' && (
+                          <div className="ml-2 px-1 py-0.5 text-[10px] text-ink2">
+                            Projeto: <span className="font-medium">{projGroup.name}</span>
+                          </div>
+                        )}
+                        {projGroup.tasks.map((t) => {
+                          const already = (dayPlans[addFor] || []).includes(t.id);
+                          return (
+                            <button
+                              key={t.id}
+                              disabled={already}
+                              onClick={() => {
+                                addToDay(addFor, t.id);
+                                setAddFor(null);
+                              }}
+                              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:opacity-40"
+                            >
+                              <span
+                                className="h-2 w-2 shrink-0 rounded-full"
+                                style={{ background: STATUS_COLORS[t.status] }}
+                              />
+                              <span className="truncate">{t.title}</span>
+                              {already && <span className="ml-auto text-[10px] text-muted">já adicionada</span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                ))
               )}
             </div>
           </div>
@@ -493,6 +558,50 @@ function Stat({ label, value }) {
     <div className="rounded-lg bg-surface2 px-2 py-2">
       <dt className="text-[10px] text-muted">{label}</dt>
       <dd className="text-sm font-bold text-ink">{value}</dd>
+    </div>
+  );
+}
+
+function HoursByAreaPanel({ entries, tasksById, weekStartTs, weekEndTs }) {
+  const byArea = useMemo(() => {
+    const m = new Map();
+    for (const e of entries) {
+      if (e.started_at < weekStartTs || e.started_at >= weekEndTs) continue;
+      const task = e.task_id ? tasksById[e.task_id] : null;
+      const areaKey = task?.area_id || '__none__';
+      const name = task?.areaName || 'Sem área';
+      if (!m.has(areaKey)) m.set(areaKey, { name, color: task?.areaColor || '#9E9890', seconds: 0 });
+      m.get(areaKey).seconds += e.duration_seconds || 0;
+    }
+    return Array.from(m.values()).sort((a, b) => b.seconds - a.seconds);
+  }, [entries, tasksById, weekStartTs, weekEndTs]);
+
+  const totalSec = byArea.reduce((s, a) => s + a.seconds, 0);
+
+  if (byArea.length === 0) return null;
+
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4">
+      <p className="mb-2 text-xs font-medium text-ink2">Horas por Área</p>
+      <ul className="space-y-1.5">
+        {byArea.map((a, i) => {
+          const pct = totalSec > 0 ? (a.seconds / totalSec) * 100 : 0;
+          return (
+            <li key={i}>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="flex items-center gap-1.5 text-ink">
+                  <span className="h-2 w-2 rounded-full" style={{ background: a.color || '#9E9890' }} />
+                  {a.name}
+                </span>
+                <span className="text-ink2">{formatDuration(a.seconds)}</span>
+              </div>
+              <div className="mt-0.5 h-1.5 w-full overflow-hidden rounded-full bg-surface2">
+                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: a.color || '#9E9890' }} />
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

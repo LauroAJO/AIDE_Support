@@ -122,11 +122,17 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/calendar/sync') return handleCalendarSync(request, env, user);
   if (path === '/api/calendar/list') return handleCalendarList(request, env, user);
 
-  // Access control
+  // Access control (legacy owner-only)
   if (path === '/api/access/drive') return handleAccessDrive(request, env, user);
   if (path.startsWith('/api/access/drive/')) return handleAccessDriveItem(request, env, user, path.split('/')[4]);
   if (path === '/api/access/calendar') return handleAccessCalendar(request, env, user);
   if (path.startsWith('/api/access/calendar/')) return handleAccessCalendarItem(request, env, user, path.split('/')[4]);
+
+  // Bidirectional sharing (v1.8) — either user can grant the other access.
+  if (path === '/api/sharing/drive') return handleSharingDrive(request, env, user);
+  if (path.startsWith('/api/sharing/drive/')) return handleSharingDriveItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/sharing/calendar') return handleSharingCalendar(request, env, user);
+  if (path.startsWith('/api/sharing/calendar/')) return handleSharingCalendarItem(request, env, user, path.split('/')[4]);
 
   // Drive
   if (path === '/api/drive/files') return handleDriveFiles(request, env, user);
@@ -868,23 +874,66 @@ async function handleTimerEntryItem(request, env, user, id) {
 
     const body = (await readJson(request)) || {};
     const notes = body.notes !== undefined ? body.notes : existing.notes;
-    const rate = body.hourly_rate !== undefined ? (Number(body.hourly_rate) || 0) : existing.hourly_rate;
+
+    // Accept both hourly_rate and hourly_rate_brl (legacy/new column names).
+    let rate = existing.hourly_rate;
+    if (body.hourly_rate !== undefined) rate = Number(body.hourly_rate) || 0;
+    else if (body.hourly_rate_brl !== undefined) rate = Number(body.hourly_rate_brl) || 0;
+
+    let startedAt = existing.started_at;
+    let endedAt = existing.ended_at;
+    let durationSeconds = existing.duration_seconds;
+
+    const parseTs = (v) => {
+      if (v == null) return null;
+      if (typeof v === 'number') return Math.floor(v);
+      const t = new Date(v).getTime();
+      return Number.isNaN(t) ? null : Math.floor(t / 1000);
+    };
+
+    if (body.started_at !== undefined) {
+      const t = parseTs(body.started_at);
+      if (t == null) return json({ error: 'started_at inválido' }, 400);
+      startedAt = t;
+    }
+    if (body.ended_at !== undefined) {
+      const t = parseTs(body.ended_at);
+      if (t == null) return json({ error: 'ended_at inválido' }, 400);
+      endedAt = t;
+    }
+    if (body.started_at !== undefined || body.ended_at !== undefined) {
+      if (endedAt != null && endedAt <= startedAt) {
+        return json({ error: 'ended_at deve ser maior que started_at' }, 400);
+      }
+      if (endedAt != null) durationSeconds = endedAt - startedAt;
+    }
+    if (body.duration_seconds !== undefined) {
+      durationSeconds = Math.max(0, Math.floor(Number(body.duration_seconds) || 0));
+    }
+
     let paid = existing.paid;
     let paidAt = existing.paid_at;
     if (body.paid !== undefined) {
       paid = body.paid ? 1 : 0;
       paidAt = body.paid ? (existing.paid_at || Math.floor(Date.now() / 1000)) : null;
     }
+    if (body.paid_at !== undefined) {
+      paidAt = parseTs(body.paid_at);
+    }
+
     await env.DB.prepare(
-      'UPDATE time_entries SET notes = ?, hourly_rate = ?, paid = ?, paid_at = ? WHERE id = ?'
-    ).bind(notes, rate, paid, paidAt, id).run();
+      `UPDATE time_entries SET notes = ?, hourly_rate = ?, paid = ?, paid_at = ?,
+        started_at = ?, ended_at = ?, duration_seconds = ? WHERE id = ?`
+    ).bind(notes, rate, paid, paidAt, startedAt, endedAt, durationSeconds, id).run();
     const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
     return json(shapeEntry(row));
   }
 
   if (request.method === 'DELETE') {
-    await env.DB.prepare('DELETE FROM time_entries WHERE id = ? AND user_id = ?').bind(id, user.id).run();
-    return json({ ok: true });
+    const result = await env.DB.prepare(
+      'DELETE FROM time_entries WHERE id = ? AND user_id = ?'
+    ).bind(id, user.id).run();
+    return json({ deleted: true, changes: result.meta?.changes ?? 0 });
   }
 
   return json({ error: 'Método não permitido' }, 405);
@@ -1193,30 +1242,42 @@ async function cacheEvent(env, userId, shaped, raw) {
 
 // Returns a Set of allowed google_file_ids for a restricted (assistant) user,
 // or null when there's no restriction (owner, or no allow rules = open).
+// Combines legacy `drive_access_rules` (owner-managed) with v1.8
+// `drive_sharing_rules` (bidirectional) where the current user is the grantee.
 async function allowedDriveIds(env, user) {
   if (!user || user.role === 'owner') return null;
+  const ids = [];
   try {
     const { results } = await env.DB.prepare(
       "SELECT google_file_id FROM drive_access_rules WHERE access_type = 'allow' AND applies_to = 'alice'"
     ).all();
-    const ids = (results || []).map((r) => r.google_file_id);
-    return ids.length ? new Set(ids) : null;
-  } catch {
-    return null; // table not migrated → open by default
-  }
+    for (const r of results || []) ids.push(r.google_file_id);
+  } catch { /* table missing → no legacy rules */ }
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT google_file_id FROM drive_sharing_rules WHERE grantee_user_id = ?'
+    ).bind(user.id).all();
+    for (const r of results || []) ids.push(r.google_file_id);
+  } catch { /* table missing */ }
+  return ids.length ? new Set(ids) : null;
 }
 
 async function allowedCalendarIds(env, user) {
   if (!user || user.role === 'owner') return null;
+  const ids = [];
   try {
     const { results } = await env.DB.prepare(
       "SELECT google_calendar_id FROM calendar_access_rules WHERE access_type = 'allow' AND applies_to = 'alice'"
     ).all();
-    const ids = (results || []).map((r) => r.google_calendar_id);
-    return ids.length ? new Set(ids) : null;
-  } catch {
-    return null;
-  }
+    for (const r of results || []) ids.push(r.google_calendar_id);
+  } catch { /* legacy table missing */ }
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT google_calendar_id FROM calendar_sharing_rules WHERE grantee_user_id = ?'
+    ).bind(user.id).all();
+    for (const r of results || []) ids.push(r.google_calendar_id);
+  } catch { /* table missing */ }
+  return ids.length ? new Set(ids) : null;
 }
 
 async function handleAccessDrive(request, env, user) {
@@ -1277,6 +1338,130 @@ async function handleAccessCalendarItem(request, env, user, id) {
   if (user.role !== 'owner') return json({ error: 'Não autorizado' }, 403);
   await env.DB.prepare('DELETE FROM calendar_access_rules WHERE id = ?').bind(id).run();
   return json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Bidirectional Drive/Calendar sharing (v1.8)
+// Either user (Lauro or Alice) can grant the other access to items in their
+// own Drive/Calendar. The grantor's Google token is used at fetch time.
+// ---------------------------------------------------------------------------
+
+async function otherUserId(env, currentUserId) {
+  const row = await env.DB.prepare(
+    "SELECT id FROM users WHERE id <> ? ORDER BY (role='owner') DESC, name LIMIT 1"
+  ).bind(currentUserId).first();
+  return row ? row.id : null;
+}
+
+function shapeSharingRule(r, type) {
+  return {
+    id: r.id,
+    grantor_user_id: r.grantor_user_id,
+    grantee_user_id: r.grantee_user_id,
+    [type === 'drive' ? 'google_file_id' : 'google_calendar_id']:
+      type === 'drive' ? r.google_file_id : r.google_calendar_id,
+    [type === 'drive' ? 'file_name' : 'calendar_name']:
+      type === 'drive' ? r.file_name : r.calendar_name,
+    mime_type: r.mime_type || '',
+    color: r.color || null,
+    created_at: r.created_at
+  };
+}
+
+async function handleSharingDrive(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM drive_sharing_rules
+         WHERE grantor_user_id = ? OR grantee_user_id = ?
+         ORDER BY created_at DESC`
+      ).bind(user.id, user.id).all();
+      return json((results || []).map((r) => shapeSharingRule(r, 'drive')));
+    } catch {
+      return json([]); // table not migrated yet
+    }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.google_file_id || !body.file_name) {
+      return json({ error: 'Campos obrigatórios: google_file_id, file_name' }, 400);
+    }
+    const granteeId = body.grantee_user_id || (await otherUserId(env, user.id));
+    if (!granteeId) return json({ error: 'Outro usuário não encontrado' }, 400);
+    const id = crypto.randomUUID();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO drive_sharing_rules
+           (id, grantor_user_id, grantee_user_id, google_file_id, file_name, mime_type, created_at)
+         VALUES (?,?,?,?,?,?,?)`
+      ).bind(
+        id, user.id, granteeId, body.google_file_id, body.file_name,
+        body.mime_type || '', Math.floor(Date.now() / 1000)
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM drive_sharing_rules WHERE id = ?').bind(id).first();
+    return json(shapeSharingRule(row, 'drive'), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleSharingDriveItem(request, env, user, id) {
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  const row = await env.DB.prepare('SELECT * FROM drive_sharing_rules WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: 'Regra não encontrada' }, 404);
+  if (row.grantor_user_id !== user.id) return json({ error: 'Apenas o concedente pode remover' }, 403);
+  await env.DB.prepare('DELETE FROM drive_sharing_rules WHERE id = ?').bind(id).run();
+  return json({ deleted: true });
+}
+
+async function handleSharingCalendar(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM calendar_sharing_rules
+         WHERE grantor_user_id = ? OR grantee_user_id = ?
+         ORDER BY created_at DESC`
+      ).bind(user.id, user.id).all();
+      return json((results || []).map((r) => shapeSharingRule(r, 'calendar')));
+    } catch {
+      return json([]);
+    }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.google_calendar_id || !body.calendar_name) {
+      return json({ error: 'Campos obrigatórios: google_calendar_id, calendar_name' }, 400);
+    }
+    const granteeId = body.grantee_user_id || (await otherUserId(env, user.id));
+    if (!granteeId) return json({ error: 'Outro usuário não encontrado' }, 400);
+    const id = crypto.randomUUID();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO calendar_sharing_rules
+           (id, grantor_user_id, grantee_user_id, google_calendar_id, calendar_name, color, created_at)
+         VALUES (?,?,?,?,?,?,?)`
+      ).bind(
+        id, user.id, granteeId, body.google_calendar_id, body.calendar_name,
+        body.color || '#6366f1', Math.floor(Date.now() / 1000)
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM calendar_sharing_rules WHERE id = ?').bind(id).first();
+    return json(shapeSharingRule(row, 'calendar'), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleSharingCalendarItem(request, env, user, id) {
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  const row = await env.DB.prepare('SELECT * FROM calendar_sharing_rules WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: 'Regra não encontrada' }, 404);
+  if (row.grantor_user_id !== user.id) return json({ error: 'Apenas o concedente pode remover' }, 403);
+  await env.DB.prepare('DELETE FROM calendar_sharing_rules WHERE id = ?').bind(id).run();
+  return json({ deleted: true });
 }
 
 async function handleCalendarEvents(request, env, user) {
@@ -2315,18 +2500,35 @@ async function handleBridgeSyncStatus(env) {
 }
 
 async function handleBridgeConfigUpdate(request, env, existing) {
-  const body = (await readJson(request)) || {};
-  const url = body.lifegame_url !== undefined ? body.lifegame_url : existing.lifegame_url;
-  // Only overwrite the secret if a real (non-masked, non-empty) value is sent.
-  let secret = existing.bridge_secret;
-  if (body.bridge_secret !== undefined && body.bridge_secret && !body.bridge_secret.startsWith('•')) {
-    secret = body.bridge_secret;
+  try {
+    const body = (await readJson(request)) || {};
+    const url = body.lifegame_url !== undefined ? String(body.lifegame_url || '').trim() : existing.lifegame_url;
+
+    // Secret handling: the GET endpoint returns the secret masked as a
+    // string of bullet characters ('••••••••'). When the user types a new
+    // secret without clearing the field they often end up with the mask
+    // PREFIXED to their input ('••••••••mysecret'). Strip any leading
+    // bullets first, then decide:
+    //   - undefined / empty / pure-bullets / unchanged → keep existing
+    //   - anything else → save it
+    let secret = existing.bridge_secret;
+    if (body.bridge_secret !== undefined) {
+      const raw = String(body.bridge_secret || '');
+      const cleaned = raw.replace(/^[•●]+/, '').trim();
+      const isPureMask = /^[•●]*$/.test(raw);
+      if (cleaned && !isPureMask) {
+        secret = cleaned;
+      }
+    }
+
+    const enabled = body.sync_enabled !== undefined ? (body.sync_enabled ? 1 : 0) : existing.sync_enabled;
+    await env.DB.prepare(
+      "UPDATE bridge_config SET lifegame_url=?, bridge_secret=?, sync_enabled=?, updated_at=? WHERE id='singleton'"
+    ).bind(url, secret, enabled, Math.floor(Date.now() / 1000)).run();
+    return json(maskBridgeConfig(await getBridgeConfig(env)));
+  } catch (e) {
+    return json({ error: 'Falha ao salvar configuração do Bridge', detail: String((e && e.message) || e) }, 500);
   }
-  const enabled = body.sync_enabled !== undefined ? (body.sync_enabled ? 1 : 0) : existing.sync_enabled;
-  await env.DB.prepare(
-    "UPDATE bridge_config SET lifegame_url=?, bridge_secret=?, sync_enabled=?, updated_at=? WHERE id='singleton'"
-  ).bind(url, secret, enabled, Math.floor(Date.now() / 1000)).run();
-  return json(maskBridgeConfig(await getBridgeConfig(env)));
 }
 
 async function handleBridgeLog(env) {
@@ -2928,6 +3130,11 @@ async function computePaymentSummary(env, month) {
 
   for (const e of results || []) {
     const rate = resolveRateFromRow(e, defaultRate);
+    // rateSource: 'task'|'project'|'default'|'entry' — drives the "(padrão)" tag.
+    let rateSource = 'default';
+    if (e.t_rate_type && e.t_rate_type !== 'inherit') rateSource = 'task';
+    else if (e.p_rate_type && e.p_rate_type !== 'inherit') rateSource = 'project';
+    else if ((e.hourly_rate || 0) > 0) rateSource = 'entry';
     const hours = (e.duration_seconds || 0) / 3600;
     let amount;
     if (rate.type === 'fixed') {
@@ -2951,12 +3158,18 @@ async function computePaymentSummary(env, month) {
       taskTitle: e.task_title || '—',
       projectName: e.project_name || null,
       rateType: rate.type,
-      rateValue: rate.value,
+      rateValue: rate.value || 0,
+      rateSource,
+      entryRate: e.hourly_rate || 0,
       hours: Math.round(hours * 100) / 100,
       amount: Math.round(amount * 100) / 100,
       amountBrl: Math.round(amountBrl * 100) / 100,
       amountEur: Math.round(amountEur * 100) / 100,
-      paid: !!e.paid
+      paid: !!e.paid,
+      started_at: e.started_at,
+      ended_at: e.ended_at,
+      duration_seconds: e.duration_seconds || 0,
+      notes: e.notes || ''
     });
   }
 
@@ -2976,6 +3189,8 @@ async function computePaymentSummary(env, month) {
     balanceEur: Math.round((totalDue - totalPaid) * brlRate * 100) / 100,
     brlRate,
     brlRateUpdatedAt: brl.updated_at,
+    defaultRate,
+    aliceRate: defaultRate,
     entries,
     alicePixKey: pd ? pd.pix_key || '' : '',
     alicePixKeyType: pd ? pd.pix_key_type || '' : '',

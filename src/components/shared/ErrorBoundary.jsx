@@ -17,8 +17,12 @@ export default class ErrorBoundary extends Component {
     console.error('AIDE error boundary:', error, info);
   }
 
+  reset = () => this.setState({ error: null });
+
   render() {
     if (this.state.error) {
+      const { fallback } = this.props;
+      if (fallback) return fallback({ error: this.state.error, reset: this.reset });
       return (
         <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
           <h1 className="text-xl font-bold text-ink">Algo deu errado</h1>

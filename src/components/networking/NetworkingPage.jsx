@@ -6,6 +6,7 @@ import {
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ErrorBoundary from '../shared/ErrorBoundary';
 
 const INSTITUTION_TYPES = [
   ['company', 'Empresa'],
@@ -334,13 +335,25 @@ export default function NetworkingPage() {
         </div>
       ) : (
         <div className="mt-3 min-h-0 flex-1">
-          <NetworkMap
-            people={people}
-            institutions={institutions}
-            connections={connections}
-            personRoles={personRoles}
-            onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
-          />
+          <ErrorBoundary
+            fallback={({ reset }) => (
+              <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-line bg-surface p-8 text-center">
+                <p className="text-sm font-medium text-ink">Erro ao carregar mapa — tente recarregar</p>
+                <div className="flex gap-2">
+                  <button onClick={reset} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink2 hover:bg-surface2">Tentar de novo</button>
+                  <button onClick={() => setView('list')} className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover">Voltar à lista</button>
+                </div>
+              </div>
+            )}
+          >
+            <NetworkMap
+              people={Array.isArray(people) ? people : []}
+              institutions={Array.isArray(institutions) ? institutions : []}
+              connections={Array.isArray(connections) ? connections : []}
+              personRoles={Array.isArray(personRoles) ? personRoles : []}
+              onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
+            />
+          </ErrorBoundary>
         </div>
       )}
 
@@ -583,25 +596,33 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
   useEffect(() => {
     if (!containerRef.current) return;
     const update = () => {
+      if (!containerRef.current) return;
       const r = containerRef.current.getBoundingClientRect();
-      setSize({ w: Math.max(500, r.width), h: Math.max(450, r.height) });
+      const w = Math.max(500, Number.isFinite(r.width) ? r.width : 900);
+      const h = Math.max(450, Number.isFinite(r.height) ? r.height : 600);
+      setSize({ w, h });
     };
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, []);
 
-  const lauroPos = { x: size.w / 2, y: size.h / 2 };
+  // Guarantee positive viewBox even before measurement settles.
+  const safeW = Math.max(100, Number(size.w) || 900);
+  const safeH = Math.max(100, Number(size.h) || 600);
+  const lauroPos = { x: safeW / 2, y: safeH / 2 };
 
   // Stable circular layout: people on the outer ring, institutions on a
   // smaller inner ring. Order is the array order (already sorted by name).
   const personNodes = useMemo(() => {
-    const cx = size.w / 2;
-    const cy = size.h / 2;
-    const r = Math.min(size.w, size.h) * 0.4;
-    return people.map((p, i) => {
-      const angle = (i / Math.max(1, people.length)) * Math.PI * 2;
-      const radius = 14 + Math.min(15, (p.connection_strength || 0) * 1.5);
+    const list = Array.isArray(people) ? people.filter((p) => p && p.id) : [];
+    const cx = safeW / 2;
+    const cy = safeH / 2;
+    const r = Math.min(safeW, safeH) * 0.4;
+    const denom = Math.max(1, list.length);
+    return list.map((p, i) => {
+      const angle = (i / denom) * Math.PI * 2;
+      const radius = 14 + Math.min(15, (Number(p.connection_strength) || 0) * 1.5);
       return {
         ...p, _kind: 'person',
         x: cx + r * Math.cos(angle),
@@ -609,15 +630,17 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
         radius,
       };
     });
-  }, [people, size]);
+  }, [people, safeW, safeH]);
 
   const institutionNodes = useMemo(() => {
-    const cx = size.w / 2;
-    const cy = size.h / 2;
-    const r = Math.min(size.w, size.h) * 0.22;
-    return institutions.map((it, i) => {
-      const angle = (i / Math.max(1, institutions.length)) * Math.PI * 2 + Math.PI / 4;
-      const strength = (it.connection_strength) || 5; // institutions don't have a stored strength yet
+    const list = Array.isArray(institutions) ? institutions.filter((i) => i && i.id) : [];
+    const cx = safeW / 2;
+    const cy = safeH / 2;
+    const r = Math.min(safeW, safeH) * 0.22;
+    const denom = Math.max(1, list.length);
+    return list.map((it, i) => {
+      const angle = (i / denom) * Math.PI * 2 + Math.PI / 4;
+      const strength = Number(it.connection_strength) || 5;
       const width = 80 + Math.min(40, strength * 2);
       return {
         ...it, _kind: 'institution',
@@ -626,20 +649,21 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
         width, height: 28,
       };
     });
-  }, [institutions, size]);
+  }, [institutions, safeW, safeH]);
 
   const nodeIndex = useMemo(() => {
     const m = {};
-    personNodes.forEach((n) => { m[n.id] = n; });
-    institutionNodes.forEach((n) => { m[n.id] = n; });
+    personNodes.forEach((n) => { if (n && n.id) m[n.id] = n; });
+    institutionNodes.forEach((n) => { if (n && n.id) m[n.id] = n; });
     return m;
   }, [personNodes, institutionNodes]);
 
   // Group p2p connections by unordered pair for curve offsets when multiple
   // edges exist between the same two people.
   const connWithCurve = useMemo(() => {
+    const list = Array.isArray(connections) ? connections.filter((c) => c && c.person_a_id && c.person_b_id) : [];
     const seenByPair = new Map();
-    return connections.map((c) => {
+    return list.map((c) => {
       const key = [c.person_a_id, c.person_b_id].sort().join('|');
       const seen = seenByPair.get(key) || 0;
       seenByPair.set(key, seen + 1);
@@ -647,16 +671,18 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
     });
   }, [connections]);
 
-  const isDimmed = (id) => focusId && focusId !== id && !connectsTo(focusId, id, connections, personRoles);
+  const safeRoles = Array.isArray(personRoles) ? personRoles : [];
+  const isDimmed = (id) => focusId && focusId !== id && !connectsTo(focusId, id, Array.isArray(connections) ? connections : [], safeRoles);
 
   return (
     <div ref={containerRef} className="relative h-full w-full rounded-xl border border-line bg-surface">
-      <svg width="100%" height="100%" viewBox={`0 0 ${size.w} ${size.h}`} style={{ display: 'block' }}>
+      <svg width="100%" height="100%" viewBox={`0 0 ${safeW} ${safeH}`} style={{ display: 'block' }}>
         {/* Person ↔ Institution dashed links (from person_roles) */}
-        {personRoles.filter((r) => r.institution_id).map((r, i) => {
+        {safeRoles.filter((r) => r && r.institution_id && r.person_id).map((r, i) => {
           const a = nodeIndex[r.person_id];
           const b = nodeIndex[r.institution_id];
           if (!a || !b) return null;
+          if (!Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(b.x) || !Number.isFinite(b.y)) return null;
           const dim = isDimmed(r.person_id) && isDimmed(r.institution_id);
           return (
             <line
@@ -675,6 +701,7 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
           const a = nodeIndex[c.person_a_id];
           const b = nodeIndex[c.person_b_id];
           if (!a || !b) return null;
+          if (!Number.isFinite(a.x) || !Number.isFinite(b.x)) return null;
           const strength = c.strength != null ? c.strength : 5;
           const stroke = personStrengthColor(strength);
           const width = 1 + (strength / 10) * 3;
@@ -691,10 +718,12 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
           const my = (a.y + b.y) / 2;
           const dx = b.x - a.x;
           const dy = b.y - a.y;
-          const len = Math.sqrt(dx * dx + dy * dy) || 1;
-          const offset = c._curveIndex * 14;
+          const rawLen = Math.sqrt(dx * dx + dy * dy);
+          const len = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : 1;
+          const offset = (c._curveIndex || 0) * 14;
           const cx = mx + (-dy / len) * offset;
           const cy = my + (dx / len) * offset;
+          if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
           return (
             <path key={c.id} d={`M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`} fill="none" stroke={stroke} strokeWidth={width} opacity={dim ? 0.15 : 0.85}>
               <title>{c.connection_type || 'conexão'}</title>
@@ -751,7 +780,7 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
         })}
 
         {personNodes.length === 0 && institutionNodes.length === 0 && (
-          <text x={size.w / 2} y={size.h / 2 + 60} textAnchor="middle" fill="#9E9890" fontSize="12">
+          <text x={safeW / 2} y={safeH / 2 + 60} textAnchor="middle" fill="#9E9890" fontSize="12">
             Adicione pessoas e instituições para visualizar o mapa.
           </text>
         )}

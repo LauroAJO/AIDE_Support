@@ -6,7 +6,7 @@ import { getToken } from '../lib/auth';
 import { APP_VERSION } from '../version';
 import { isAuthScopeError } from './shared/ScopeBanner';
 import Avatar from './shared/Avatar';
-import AccessControl from './settings/AccessControl';
+import Sharing from './settings/Sharing';
 
 const ROLE_LABELS = { owner: 'Proprietário', assistant: 'Assistente' };
 const GITHUB_URL = 'https://github.com/LauroAJO/AIDE_Support';
@@ -43,6 +43,8 @@ export default function SettingsPage() {
   const [bridge, setBridge] = useState(null);
   const [bridgeLog, setBridgeLog] = useState([]);
   const [savingBridge, setSavingBridge] = useState(false);
+  const [bridgeMsg, setBridgeMsg] = useState(null); // { kind: 'ok'|'err', text }
+  const [secretDirty, setSecretDirty] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [cronMsg, setCronMsg] = useState('');
 
@@ -75,16 +77,27 @@ export default function SettingsPage() {
 
   const saveBridge = async () => {
     setSavingBridge(true);
+    setBridgeMsg(null);
     try {
+      // Only send the secret when the user actually edited the field. The
+      // GET response masks it as bullets; sending those back would no-op
+      // and (with the old logic) could overwrite the real value.
+      const payload = {
+        lifegame_url: bridge.lifegame_url,
+        sync_enabled: bridge.sync_enabled,
+      };
+      if (secretDirty && bridge.bridge_secret && !/^[•●]+$/.test(bridge.bridge_secret)) {
+        payload.bridge_secret = bridge.bridge_secret;
+      }
       const saved = await apiFetch('/api/bridge/config', {
         method: 'PUT',
-        body: JSON.stringify({
-          lifegame_url: bridge.lifegame_url,
-          bridge_secret: bridge.bridge_secret,
-          sync_enabled: bridge.sync_enabled,
-        }),
+        body: JSON.stringify(payload),
       });
       setBridge(saved);
+      setSecretDirty(false);
+      setBridgeMsg({ kind: 'ok', text: 'Configuração salva.' });
+    } catch (e) {
+      setBridgeMsg({ kind: 'err', text: `Falha ao salvar: ${String((e && e.message) || e).slice(0, 200)}` });
     } finally {
       setSavingBridge(false);
     }
@@ -155,8 +168,9 @@ export default function SettingsPage() {
         </div>
       </Section>
 
-      {/* Access control — owner manages Alice's visibility */}
-      {currentUser?.role === 'owner' && <AccessControl />}
+      {/* Bidirectional Drive/Calendar sharing — both Lauro and Alice can grant
+          and receive access to items in their own Google accounts. */}
+      <Sharing />
 
       {/* Data */}
       <Section title="Dados">
@@ -212,12 +226,23 @@ export default function SettingsPage() {
               />
             </label>
             <label className="block">
-              <span className="mb-1 block text-xs font-medium text-ink2">Bridge Secret</span>
+              <span className="mb-1 block text-xs font-medium text-ink2">
+                Bridge Secret {bridge.has_secret && !secretDirty && <span className="text-muted">(já definido — clique para alterar)</span>}
+              </span>
               <input
                 type="password"
-                value={bridge.bridge_secret}
-                onChange={(e) => setBridge({ ...bridge, bridge_secret: e.target.value })}
-                placeholder={bridge.has_secret ? '•••••••• (definido)' : 'defina um segredo'}
+                value={secretDirty ? bridge.bridge_secret : ''}
+                onFocus={() => {
+                  if (!secretDirty) {
+                    setBridge({ ...bridge, bridge_secret: '' });
+                    setSecretDirty(true);
+                  }
+                }}
+                onChange={(e) => {
+                  setBridge({ ...bridge, bridge_secret: e.target.value });
+                  setSecretDirty(true);
+                }}
+                placeholder={bridge.has_secret ? 'deixe em branco para manter o atual' : 'defina um segredo'}
                 className="input"
               />
             </label>
@@ -242,6 +267,17 @@ export default function SettingsPage() {
                 Sincronizar registros de tempo
               </button>
             </div>
+            {bridgeMsg && (
+              <p
+                className={`rounded-md px-3 py-2 text-xs ${
+                  bridgeMsg.kind === 'ok'
+                    ? 'border border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border border-danger/30 bg-danger/10 text-danger'
+                }`}
+              >
+                {bridgeMsg.text}
+              </p>
+            )}
             {syncMsg && <p className="text-xs text-ink2">{syncMsg}</p>}
 
             {bridgeLog.length > 0 && (

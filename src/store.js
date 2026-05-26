@@ -53,6 +53,11 @@ export const useStore = create((set) => ({
   networkConnections: [],
   bridgeSyncStatus: null,
 
+  // v1.8 — Tasks tree view (Lista | Kanban | Árvore)
+  taskView: 'list', // 'list' | 'kanban' | 'tree'
+  treeCollapse: {},
+  taskTreeFilter: { areaId: null, projectId: null, frontId: null },
+
   setUser: (user) => set({ user }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
@@ -97,6 +102,13 @@ export const useStore = create((set) => ({
   setNetworkInstitutions: (networkInstitutions) => set({ networkInstitutions }),
   setNetworkConnections: (networkConnections) => set({ networkConnections }),
   setBridgeSyncStatus: (bridgeSyncStatus) => set({ bridgeSyncStatus }),
+
+  setTaskView: (taskView) => set({ taskView }),
+  setTreeCollapse: (treeCollapse) => set({ treeCollapse }),
+  setTaskTreeFilter: (patch) =>
+    set((state) => ({ taskTreeFilter: { ...state.taskTreeFilter, ...patch } })),
+  clearTaskTreeFilter: () =>
+    set({ taskTreeFilter: { areaId: null, projectId: null, frontId: null } }),
 }));
 
 // Derived: tasks filtered by the current taskFilter.

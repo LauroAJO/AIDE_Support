@@ -893,7 +893,13 @@ async function handleTimerEntryItem(request, env, user, id) {
     const existing = isOwner
       ? await env.DB.prepare('SELECT * FROM time_entries WHERE id = ?').bind(id).first()
       : await env.DB.prepare('SELECT * FROM time_entries WHERE id = ? AND user_id = ?').bind(id, user.id).first();
-    if (!existing) return json({ error: 'Registro não encontrado' }, 404);
+    if (!existing) {
+      return json({
+        error: 'Registro não encontrado',
+        id,
+        path: new URL(request.url).pathname,
+      }, 404);
+    }
 
     const body = (await readJson(request)) || {};
     const notes = body.notes !== undefined ? body.notes : existing.notes;
@@ -1679,10 +1685,18 @@ async function handleDriveFiles(request, env, user) {
   else if (parent) q = `'${esc(parent)}' in parents and trashed = false`;
   else q = `'root' in parents and trashed = false`;
 
-  // The Drive belongs to Lauro — always fetch with the owner's token, then
-  // apply Alice's drive_access_rules below. (Alice's own Drive isn't used.)
-  const { ownerId } = await getRoleUsers(env);
-  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+  // Each user sees their OWN Drive. When navigating into a folder that was
+  // shared via drive_sharing_rules (Alice was granted access to Lauro's
+  // folder), fetch that subtree with the grantor's token instead.
+  let tokenUserId = user.id;
+  if (parent) {
+    try {
+      const share = await env.DB.prepare(
+        'SELECT grantor_user_id FROM drive_sharing_rules WHERE google_file_id = ? AND grantee_user_id = ?'
+      ).bind(parent, user.id).first();
+      if (share && share.grantor_user_id) tokenUserId = share.grantor_user_id;
+    } catch { /* table missing → no sharing rules */ }
+  }
 
   const api =
     'https://www.googleapis.com/drive/v3/files?' +
@@ -1692,14 +1706,12 @@ async function handleDriveFiles(request, env, user) {
       orderBy: 'folder,name',
       fields: 'files(id,name,mimeType,webViewLink,iconLink,modifiedTime,size,parents)'
     });
-  const resp = await googleFetch(api, ownerId, env);
+  const resp = await googleFetch(api, tokenUserId, env);
   const guard = googleGuard(resp);
   if (guard) return guard;
   if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
   const data = await resp.json();
 
-  // Favorites are per-viewer (Alice may favorite different shared folders than
-  // Lauro). Cache rows are also keyed by owner so listings stay consistent.
   const favs = await env.DB.prepare(
     'SELECT google_file_id FROM drive_items_cache WHERE user_id = ? AND is_favorite = 1'
   ).bind(user.id).all();
@@ -1707,7 +1719,7 @@ async function handleDriveFiles(request, env, user) {
 
   const files = [];
   for (const f of data.files || []) {
-    await cacheDriveItem(env, ownerId, f);
+    await cacheDriveItem(env, tokenUserId, f);
     files.push({
       id: f.id,
       googleFileId: f.id,
@@ -1722,13 +1734,33 @@ async function handleDriveFiles(request, env, user) {
     });
   }
 
-  // Access control for the assistant: if allow rules exist, only show allowed
-  // items — unless we're browsing inside an explicitly-allowed folder, in
-  // which case its contents are shown freely.
-  const allowed = await allowedDriveIds(env, user);
-  if (allowed && !(parent && allowed.has(parent))) {
-    return json(files.filter((f) => allowed.has(f.googleFileId)));
+  // At root, append items shared with this user (from drive_sharing_rules)
+  // so they appear alongside the user's own Drive contents.
+  if (!parent && !search) {
+    try {
+      const shared = await env.DB.prepare(
+        'SELECT google_file_id, file_name, mime_type FROM drive_sharing_rules WHERE grantee_user_id = ?'
+      ).bind(user.id).all();
+      for (const r of shared.results || []) {
+        if (!files.find((f) => f.googleFileId === r.google_file_id)) {
+          files.push({
+            id: r.google_file_id,
+            googleFileId: r.google_file_id,
+            name: r.file_name,
+            mimeType: r.mime_type || '',
+            webViewLink: null,
+            iconLink: null,
+            modifiedTime: null,
+            size: null,
+            parents: [],
+            isFavorite: favSet.has(r.google_file_id),
+            shared: true
+          });
+        }
+      }
+    } catch { /* table missing */ }
   }
+
   return json(files);
 }
 
@@ -3507,6 +3539,7 @@ async function evaluateRule(rule, config, env, force) {
 function resolveRateFromRow(e, defaultRate) {
   if (e.t_rate_type && e.t_rate_type !== 'inherit') return { type: e.t_rate_type, value: e.t_rate_value || 0 };
   if (e.p_rate_type && e.p_rate_type !== 'inherit') return { type: e.p_rate_type, value: e.p_rate_value || 0 };
+  if ((e.hourly_rate || 0) > 0) return { type: 'hourly', value: e.hourly_rate };
   return { type: 'hourly', value: defaultRate || 0 };
 }
 

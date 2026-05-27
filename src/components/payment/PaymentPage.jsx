@@ -26,6 +26,19 @@ function formatRateTime(unix) {
   return new Date(unix * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
 
+function formatEntryDate(unix) {
+  if (!unix) return '';
+  const d = new Date(unix * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+}
+
+function dateKey(unix) {
+  if (!unix) return '';
+  const d = new Date(unix * 1000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // Build a YYYY-MM-DD / HH:MM pair from a unix timestamp (local).
 function splitTs(unix) {
   if (!unix) return { date: todayStr(), time: '09:00' };
@@ -305,6 +318,7 @@ export default function PaymentPage() {
         <table className="w-full text-left text-xs">
           <thead>
             <tr className="border-b border-line text-muted">
+              <th className="py-2 pr-2 font-medium">Data</th>
               <th className="py-2 pr-2 font-medium">Tarefa</th>
               <th className="py-2 pr-2 font-medium">Projeto</th>
               <th className="py-2 pr-2 font-medium">Tipo</th>
@@ -318,70 +332,88 @@ export default function PaymentPage() {
           </thead>
           <tbody>
             {summary.entries.length === 0 ? (
-              <tr><td colSpan={isOwner ? 9 : 8} className="py-6 text-center text-muted">Nenhum registro neste mês.</td></tr>
-            ) : (
-              summary.entries.map((e) => (
-                <tr key={e.id} className="border-b border-line/60 text-ink">
-                  <td className="py-2 pr-2">{e.taskTitle}</td>
-                  <td className="py-2 pr-2 text-ink2">{e.projectName || '—'}</td>
-                  <td className="py-2 pr-2">{e.rateType === 'fixed' ? 'Fixo' : 'Por hora'}</td>
-                  <td className="py-2 pr-2">
-                    {e.rateType === 'fixed'
-                      ? `${formatBrl(e.rateValue)} (fixo)`
-                      : `${formatBrl(e.rateValue)}/h`}
-                    {e.rateSource === 'default' && (
-                      <span className="ml-1 text-[10px] text-muted">(padrão)</span>
-                    )}
-                  </td>
-                  <td className="py-2 pr-2">{e.rateType === 'fixed' ? '—' : `${e.hours}h`}</td>
-                  <td className="py-2 pr-2 font-medium">{formatBrl(e.amountBrl ?? e.amount)}</td>
-                  {isOwner && (
-                    <td className="py-2 pr-2 text-ink2">{formatEuro(e.amountEur ?? 0)}</td>
-                  )}
-                  <td className="py-2 pr-2">
-                    <button onClick={() => togglePaid(e)} title={e.paid ? 'Pago' : 'Pendente'}>
-                      {e.paid ? <Check className="h-4 w-4" style={{ color: '#22C55E' }} /> : <Clock className="h-4 w-4" style={{ color: '#F59E0B' }} />}
-                    </button>
-                  </td>
-                  <td className="py-2">
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setEditEntry({
-                          id: e.id,
-                          taskTitle: e.taskTitle,
-                          rate: e.entryRate || e.rateValue || defaultRate,
-                          notes: e.notes || '',
-                          ...splitTs(e.started_at),
-                          endDate: splitTs(e.ended_at || e.started_at).date,
-                          endTime: splitTs(e.ended_at || (e.started_at + (e.duration_seconds || 0))).time,
-                        })}
-                        className="rounded-md border border-line p-1 text-ink2 hover:bg-surface2"
-                        title="Editar entrada"
-                      >
-                        <Pencil className="h-3 w-3" />
-                      </button>
-                      {e.taskId && (
-                        <button
-                          onClick={() => setEditRate({ taskId: e.taskId, type: e.rateType, value: e.rateValue })}
-                          className="rounded-md border border-line p-1 text-ink2 hover:bg-surface2"
-                          title="Editar taxa da tarefa"
-                        >
-                          R$
-                        </button>
+              <tr><td colSpan={isOwner ? 10 : 9} className="py-6 text-center text-muted">Nenhum registro neste mês.</td></tr>
+            ) : (() => {
+              const sorted = [...summary.entries].sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+              let lastDateKey = null;
+              const rows = [];
+              for (const e of sorted) {
+                const k = dateKey(e.started_at);
+                if (k !== lastDateKey) {
+                  rows.push(
+                    <tr key={`hdr-${k}`} className="bg-surface2/60">
+                      <td colSpan={isOwner ? 10 : 9} className="py-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-ink2">
+                        {formatEntryDate(e.started_at)}
+                      </td>
+                    </tr>
+                  );
+                  lastDateKey = k;
+                }
+                rows.push(
+                  <tr key={e.id} className="border-b border-line/60 text-ink">
+                    <td className="py-2 pr-2 text-ink2">{formatEntryDate(e.started_at)}</td>
+                    <td className="py-2 pr-2">{e.taskTitle}</td>
+                    <td className="py-2 pr-2 text-ink2">{e.projectName || '—'}</td>
+                    <td className="py-2 pr-2">{e.rateType === 'fixed' ? 'Fixo' : 'Por hora'}</td>
+                    <td className="py-2 pr-2">
+                      {e.rateType === 'fixed'
+                        ? `${formatBrl(e.rateValue)} (fixo)`
+                        : `${formatBrl(e.rateValue)}/h`}
+                      {e.rateSource === 'default' && (
+                        <span className="ml-1 text-[10px] text-muted">(padrão)</span>
                       )}
-                      <button
-                        onClick={() => deleteEntry(e.id)}
-                        disabled={busy}
-                        className="rounded-md border border-line p-1 text-danger hover:bg-danger/10 disabled:opacity-60"
-                        title="Excluir entrada"
-                      >
-                        <Trash2 className="h-3 w-3" />
+                    </td>
+                    <td className="py-2 pr-2">{e.rateType === 'fixed' ? '—' : `${e.hours}h`}</td>
+                    <td className="py-2 pr-2 font-medium">{formatBrl(e.amountBrl ?? e.amount)}</td>
+                    {isOwner && (
+                      <td className="py-2 pr-2 text-ink2">{formatEuro(e.amountEur ?? 0)}</td>
+                    )}
+                    <td className="py-2 pr-2">
+                      <button onClick={() => togglePaid(e)} title={e.paid ? 'Pago' : 'Pendente'}>
+                        {e.paid ? <Check className="h-4 w-4" style={{ color: '#22C55E' }} /> : <Clock className="h-4 w-4" style={{ color: '#F59E0B' }} />}
                       </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
-            )}
+                    </td>
+                    <td className="py-2">
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => setEditEntry({
+                            id: e.id,
+                            taskTitle: e.taskTitle,
+                            rate: e.entryRate || e.rateValue || defaultRate,
+                            notes: e.notes || '',
+                            ...splitTs(e.started_at),
+                            endDate: splitTs(e.ended_at || e.started_at).date,
+                            endTime: splitTs(e.ended_at || (e.started_at + (e.duration_seconds || 0))).time,
+                          })}
+                          className="rounded-md border border-line p-1 text-ink2 hover:bg-surface2"
+                          title="Editar entrada"
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </button>
+                        {e.taskId && (
+                          <button
+                            onClick={() => setEditRate({ taskId: e.taskId, type: e.rateType, value: e.rateValue })}
+                            className="rounded-md border border-line p-1 text-ink2 hover:bg-surface2"
+                            title="Editar taxa da tarefa"
+                          >
+                            R$
+                          </button>
+                        )}
+                        <button
+                          onClick={() => deleteEntry(e.id)}
+                          disabled={busy}
+                          className="rounded-md border border-line p-1 text-danger hover:bg-danger/10 disabled:opacity-60"
+                          title="Excluir entrada"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              }
+              return rows;
+            })()}
           </tbody>
         </table>
         <div className="mt-3 flex justify-end">
@@ -579,6 +611,10 @@ function EntryEditModal({ entry, defaultRate, onClose, onSaved }) {
 function ManualEntryModal({ defaultRate, onClose, onSaved }) {
   const tasks = useStore((s) => s.tasks);
   const setTasks = useStore((s) => s.setTasks);
+  const areas = useStore((s) => s.areas);
+  const projects = useStore((s) => s.projects);
+  const setProjects = useStore((s) => s.setProjects);
+  const fronts = useStore((s) => s.fronts);
   const [search, setSearch] = useState('');
   const [taskId, setTaskId] = useState('');
   const [date, setDate] = useState(todayStr());
@@ -589,9 +625,17 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  // Inline new-task creation
+  const [createMode, setCreateMode] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newAreaId, setNewAreaId] = useState('');
+  const [newProjectId, setNewProjectId] = useState('');
+  const [newFrontId, setNewFrontId] = useState('');
+  const [creating, setCreating] = useState(false);
+
   useEffect(() => {
-    if (tasks.length > 0) return;
-    apiFetch('/api/tasks').then(setTasks).catch(() => {});
+    if (tasks.length === 0) apiFetch('/api/tasks').then(setTasks).catch(() => {});
+    if (projects.length === 0) apiFetch('/api/projects').then((p) => setProjects(p || [])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -602,7 +646,49 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
       .slice(0, 30);
   }, [tasks, search]);
 
+  // Show the "create new" hint only when nothing matches the user's text.
+  const noMatches = search.trim().length > 0 && filtered.length === 0;
+
+  const filteredProjects = useMemo(
+    () => (newAreaId ? projects.filter((p) => p.area_id === newAreaId) : projects),
+    [projects, newAreaId]
+  );
+  const filteredFronts = useMemo(
+    () => (newProjectId ? fronts.filter((f) => f.project_id === newProjectId) : []),
+    [fronts, newProjectId]
+  );
+
   const durationSeconds = calcDurationSeconds(date, startTime, date, endTime);
+
+  const createNewTask = async () => {
+    setError('');
+    const title = (createMode ? newTitle : search).trim();
+    if (!title) return setError('Informe o título da nova tarefa.');
+    setCreating(true);
+    try {
+      const payload = {
+        title,
+        status: 'doing',
+        project_id: newProjectId || null,
+        front_id: newFrontId || null,
+      };
+      const created = await apiFetch('/api/tasks', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      // Refresh tasks list and select the new one.
+      const updated = await apiFetch('/api/tasks');
+      setTasks(updated);
+      setTaskId(created.id);
+      setSearch(created.title);
+      setCreateMode(false);
+      setNewTitle('');
+    } catch (e) {
+      setError(String((e && e.message) || e) || 'Falha ao criar tarefa.');
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const save = async () => {
     setError('');
@@ -646,26 +732,96 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
             <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>
           )}
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-ink2">Tarefa</span>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscar tarefa..."
-              className="input"
-            />
-            <select
-              value={taskId}
-              onChange={(e) => setTaskId(e.target.value)}
-              size={Math.min(6, Math.max(3, filtered.length))}
-              className="input mt-1 w-full"
-            >
-              {filtered.length === 0 && <option value="">Nenhuma tarefa</option>}
-              {filtered.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.title}{t.status === 'done' ? ' · concluída' : ''}
-                </option>
-              ))}
-            </select>
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs font-medium text-ink2">Tarefa</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreateMode((v) => !v);
+                  if (!createMode) setNewTitle(search);
+                }}
+                className="flex items-center gap-1 text-[11px] font-medium text-accent hover:underline"
+              >
+                <Plus className="h-3 w-3" /> {createMode ? 'Selecionar existente' : 'Nova tarefa'}
+              </button>
+            </div>
+            {!createMode && (
+              <>
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar tarefa..."
+                  className="input"
+                />
+                <select
+                  value={taskId}
+                  onChange={(e) => setTaskId(e.target.value)}
+                  size={Math.min(6, Math.max(3, filtered.length || 1))}
+                  className="input mt-1 w-full"
+                >
+                  {filtered.length === 0 && <option value="">Nenhuma tarefa</option>}
+                  {filtered.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.title}{t.status === 'done' ? ' · concluída' : ''}
+                    </option>
+                  ))}
+                </select>
+                {noMatches && (
+                  <button
+                    type="button"
+                    onClick={() => { setNewTitle(search); setCreateMode(true); }}
+                    className="mt-1 flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-accent/40 bg-accent/5 px-2 py-1.5 text-[11px] font-medium text-accent hover:bg-accent/10"
+                  >
+                    <Plus className="h-3 w-3" /> Criar tarefa &ldquo;{search.trim()}&rdquo;
+                  </button>
+                )}
+              </>
+            )}
+            {createMode && (
+              <div className="space-y-2 rounded-lg border border-line bg-surface2/40 p-2">
+                <input
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  placeholder="Título da nova tarefa"
+                  className="input"
+                />
+                <div className="grid grid-cols-3 gap-2">
+                  <select
+                    value={newAreaId}
+                    onChange={(e) => { setNewAreaId(e.target.value); setNewProjectId(''); setNewFrontId(''); }}
+                    className="input"
+                  >
+                    <option value="">Área (opcional)</option>
+                    {areas.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                  <select
+                    value={newProjectId}
+                    onChange={(e) => { setNewProjectId(e.target.value); setNewFrontId(''); }}
+                    className="input"
+                  >
+                    <option value="">Projeto (opcional)</option>
+                    {filteredProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <select
+                    value={newFrontId}
+                    onChange={(e) => setNewFrontId(e.target.value)}
+                    className="input"
+                    disabled={!newProjectId}
+                  >
+                    <option value="">Frente (opcional)</option>
+                    {filteredFronts.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={createNewTask}
+                  disabled={creating || !newTitle.trim()}
+                  className="w-full rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-60"
+                >
+                  {creating ? 'Criando...' : 'Criar tarefa e selecionar'}
+                </button>
+              </div>
+            )}
           </label>
 
           <div className="grid grid-cols-3 gap-2">

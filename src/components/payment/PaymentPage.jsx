@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, FileText, Check, Clock, Pencil, Plus, X, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileText, Check, Clock, Pencil, Plus, X, Trash2, RefreshCw } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { formatEuro, formatBrl } from '../../lib/time';
@@ -195,6 +195,13 @@ export default function PaymentPage() {
             <span className="w-20 text-center text-sm font-medium text-ink">{monthLabel(month)}</span>
             <button onClick={() => setMonth(shiftMonth(month, 1))} className="rounded-lg border border-line p-1.5 text-ink2 hover:bg-surface2"><ChevronRight className="h-4 w-4" /></button>
           </div>
+          <button
+            onClick={() => load(month)}
+            className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2"
+            title="Recarregar entradas do mês"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Atualizar
+          </button>
           <button onClick={generatePdf} className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent-hover">
             <FileText className="h-4 w-4" /> Gerar Relatório PDF
           </button>
@@ -332,7 +339,19 @@ export default function PaymentPage() {
           </thead>
           <tbody>
             {summary.entries.length === 0 ? (
-              <tr><td colSpan={isOwner ? 10 : 9} className="py-6 text-center text-muted">Nenhum registro neste mês.</td></tr>
+              <tr>
+                <td colSpan={isOwner ? 10 : 9} className="py-8 text-center">
+                  <div className="text-sm text-muted">
+                    Nenhum registro de tempo em {monthLabel(month)}.
+                  </div>
+                  <a
+                    href="/tasks"
+                    className="mt-1 inline-block text-xs text-accent hover:underline"
+                  >
+                    → Iniciar timer na aba Tarefas
+                  </a>
+                </td>
+              </tr>
             ) : (() => {
               const sorted = [...summary.entries].sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
               let lastDateKey = null;

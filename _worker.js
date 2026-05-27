@@ -809,9 +809,22 @@ async function stopActiveEntry(env, userId, now) {
     'SELECT * FROM time_entries WHERE user_id = ? AND ended_at IS NULL'
   ).bind(userId).first();
   if (!active) return null;
+
+  // Garante que a entrada saia com uma taxa: se já tinha (>0), preserva;
+  // senão, copia a taxa padrão atual de availability.hourly_rate_brl (BRL).
+  let rate = active.hourly_rate || 0;
+  if (!rate) {
+    try {
+      const av = await env.DB.prepare(
+        'SELECT hourly_rate_brl, hourly_rate FROM availability WHERE user_id = ?'
+      ).bind(userId).first();
+      rate = (av && (av.hourly_rate_brl || av.hourly_rate)) || 0;
+    } catch { /* tabela ausente — mantém 0 */ }
+  }
+
   await env.DB.prepare(
-    'UPDATE time_entries SET ended_at = ?, duration_seconds = ? WHERE id = ?'
-  ).bind(now, now - active.started_at, active.id).run();
+    'UPDATE time_entries SET ended_at = ?, duration_seconds = ?, hourly_rate = ? WHERE id = ?'
+  ).bind(now, now - active.started_at, rate, active.id).run();
   return active.id;
 }
 
@@ -1155,6 +1168,7 @@ function shapeWeeklySlot(row) {
   return {
     id: row.id,
     user_id: row.user_id,
+    slot_type: row.slot_type || 'available',
     day_of_week: row.day_of_week,
     start_time: row.start_time,
     end_time: row.end_time,
@@ -1173,11 +1187,15 @@ function shapeScheduledSlot(row) {
   };
 }
 
-async function fetchWeeklyForUser(env, userId) {
+async function fetchWeeklyForUser(env, userId, slotType = null) {
   try {
-    const { results } = await env.DB.prepare(
-      'SELECT * FROM weekly_availability WHERE user_id = ? AND active = 1 ORDER BY day_of_week, start_time'
-    ).bind(userId).all();
+    const sql = slotType
+      ? 'SELECT * FROM weekly_availability WHERE user_id = ? AND slot_type = ? AND active = 1 ORDER BY day_of_week, start_time'
+      : 'SELECT * FROM weekly_availability WHERE user_id = ? AND active = 1 ORDER BY day_of_week, start_time';
+    const stmt = slotType
+      ? env.DB.prepare(sql).bind(userId, slotType)
+      : env.DB.prepare(sql).bind(userId);
+    const { results } = await stmt.all();
     return (results || []).map(shapeWeeklySlot);
   } catch {
     return [];
@@ -1208,12 +1226,14 @@ function addDaysISOInternal(iso, days) {
 async function handleAvailabilityWeekly(request, env, user) {
   if (request.method === 'GET') {
     const slots = await fetchWeeklyForUser(env, user.id);
-    // Agrupado por day_of_week para conveniência do cliente.
+    const available = slots.filter((s) => s.slot_type === 'available');
+    const planned = slots.filter((s) => s.slot_type === 'planned');
+    // Compat: slots + by_day mantidos para clientes antigos.
     const byDay = {};
-    for (const s of slots) {
+    for (const s of available) {
       (byDay[s.day_of_week] = byDay[s.day_of_week] || []).push(s);
     }
-    return json({ slots, by_day: byDay });
+    return json({ slots, available, planned, by_day: byDay });
   }
 
   if (request.method === 'PUT') {
@@ -1221,29 +1241,55 @@ async function handleAvailabilityWeekly(request, env, user) {
     const incoming = Array.isArray(body.slots) ? body.slots : [];
     const now = Math.floor(Date.now() / 1000);
 
-    await env.DB.prepare('DELETE FROM weekly_availability WHERE user_id = ?').bind(user.id).run();
+    // Se o body especifica um único slot_type (todos com mesmo tipo, ou via
+    // body.slot_type), apaga só esse tipo. Caso contrário, apaga ambos.
+    const declaredType = (body.slot_type === 'planned' || body.slot_type === 'available')
+      ? body.slot_type
+      : null;
+    const typesInBody = new Set(
+      incoming.map((s) => (s.slot_type === 'planned' ? 'planned' : 'available'))
+    );
+    if (declaredType) {
+      await env.DB.prepare(
+        'DELETE FROM weekly_availability WHERE user_id = ? AND slot_type = ?'
+      ).bind(user.id, declaredType).run();
+    } else if (typesInBody.size === 1) {
+      const t = [...typesInBody][0];
+      await env.DB.prepare(
+        'DELETE FROM weekly_availability WHERE user_id = ? AND slot_type = ?'
+      ).bind(user.id, t).run();
+    } else {
+      await env.DB.prepare(
+        'DELETE FROM weekly_availability WHERE user_id = ?'
+      ).bind(user.id).run();
+    }
 
-    const inserted = [];
     for (const s of incoming) {
       const day = Number(s.day_of_week);
       if (Number.isNaN(day) || day < 0 || day > 6) continue;
       if (!s.start_time || !s.end_time) continue;
+      const slotType = (s.slot_type === 'planned' || s.slot_type === 'available')
+        ? s.slot_type
+        : (declaredType || 'available');
       const id = crypto.randomUUID();
       try {
         await env.DB.prepare(
           `INSERT INTO weekly_availability
-            (id, user_id, day_of_week, start_time, end_time, active, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?)`
+            (id, user_id, slot_type, day_of_week, start_time, end_time, active, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?)`
         ).bind(
-          id, user.id, day, String(s.start_time), String(s.end_time),
+          id, user.id, slotType, day, String(s.start_time), String(s.end_time),
           s.active === false ? 0 : 1, now, now
         ).run();
-        inserted.push(id);
       } catch { /* duplicate or other constraint — skip */ }
     }
 
     const slots = await fetchWeeklyForUser(env, user.id);
-    return json({ slots });
+    return json({
+      slots,
+      available: slots.filter((s) => s.slot_type === 'available'),
+      planned: slots.filter((s) => s.slot_type === 'planned'),
+    });
   }
 
   return json({ error: 'Método não permitido' }, 405);
@@ -1258,7 +1304,12 @@ async function handleAvailabilitySchedule(request, env, user) {
       fetchScheduleForUser(env, user.id, weekStart),
       fetchWeeklyForUser(env, user.id),
     ]);
-    return json({ scheduled, recurring });
+    return json({
+      scheduled,
+      recurring,
+      available: recurring.filter((s) => s.slot_type === 'available'),
+      planned: recurring.filter((s) => s.slot_type === 'planned'),
+    });
   }
 
   if (request.method === 'POST') {
@@ -1318,7 +1369,14 @@ async function handleAvailabilityAll(request, env, user) {
       fetchScheduleForUser(env, u.id, weekStart),
       fetchWeeklyForUser(env, u.id),
     ]);
-    out[u.id] = { name: u.name, role: u.role, scheduled, recurring };
+    out[u.id] = {
+      name: u.name,
+      role: u.role,
+      scheduled,
+      recurring,
+      available: recurring.filter((s) => s.slot_type === 'available'),
+      planned: recurring.filter((s) => s.slot_type === 'planned'),
+    };
   }
   return json(out);
 }

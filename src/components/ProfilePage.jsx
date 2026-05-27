@@ -34,20 +34,24 @@ export default function ProfilePage() {
   const [extraPairs, setExtraPairs] = useState([]);
   const [savingPersonal, setSavingPersonal] = useState(false);
 
-  // Disponibilidade semanal (recorrente) — array editável local
-  // Cada item: { day_of_week, start_time, end_time, active }
-  const [weeklyDraft, setWeeklyDraft] = useState([]);
+  // Dois drafts paralelos, um para cada slot_type ('available' / 'planned')
+  const [availDraft, setAvailDraft] = useState([]);
+  const [plannedDraft, setPlannedDraft] = useState([]);
+  const [savingPlanned, setSavingPlanned] = useState(false);
 
   // Horário planejado da semana — controlado pela navegação
   const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
   const [busySchedule, setBusySchedule] = useState(false);
 
+  // Carrega tanto availability quanto planned recorrentes
   useEffect(() => {
     apiFetch('/api/availability/weekly')
       .then((d) => {
-        const slots = d.slots || [];
-        setWeeklyAvailability(slots);
-        setWeeklyDraft(slots);
+        const available = d.available || (d.slots || []).filter((s) => (s.slot_type || 'available') === 'available');
+        const planned = d.planned || (d.slots || []).filter((s) => s.slot_type === 'planned');
+        setWeeklyAvailability(d.slots || []);
+        setAvailDraft(available);
+        setPlannedDraft(planned);
       })
       .catch(() => {});
     apiFetch('/api/profile/personal')
@@ -67,33 +71,37 @@ export default function ProfilePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekStart]);
 
-  // Agrupado por dia (0..6) para o grid recorrente
-  const slotsByDay = useMemo(() => {
+  // Helpers genéricos para editar qualquer um dos drafts
+  const groupByDay = (arr) => {
     const m = {};
-    for (const s of weeklyDraft) (m[s.day_of_week] = m[s.day_of_week] || []).push(s);
+    for (const s of arr) (m[s.day_of_week] = m[s.day_of_week] || []).push(s);
     return m;
-  }, [weeklyDraft]);
+  };
+  const availByDay = useMemo(() => groupByDay(availDraft), [availDraft]);
+  const plannedByDay = useMemo(() => groupByDay(plannedDraft), [plannedDraft]);
 
-  const addWeeklySlot = (day) => {
-    setWeeklyDraft((cur) => [
+  const addSlot = (setter) => (day) => {
+    setter((cur) => [
       ...cur,
-      { day_of_week: day, start_time: '09:00', end_time: '17:00', active: true, __new: true, _key: Math.random() },
+      { day_of_week: day, start_time: '09:00', end_time: '17:00', active: true, _key: Math.random() },
     ]);
   };
-  const updateWeeklySlot = (idx, patch) => {
-    setWeeklyDraft((cur) => cur.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
+  const updateSlot = (setter) => (idx, patch) => {
+    setter((cur) => cur.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
   };
-  const removeWeeklySlot = (idx) => {
-    setWeeklyDraft((cur) => cur.filter((_, i) => i !== idx));
+  const removeSlot = (setter) => (idx) => {
+    setter((cur) => cur.filter((_, i) => i !== idx));
   };
 
-  const saveWeekly = async () => {
-    setSavingWeekly(true);
+  const saveWeeklyOfType = async (draft, slotType, setBusy) => {
+    setBusy(true);
     try {
       const payload = {
-        slots: weeklyDraft
+        slot_type: slotType,
+        slots: draft
           .filter((s) => s.start_time && s.end_time && s.active !== false)
           .map((s) => ({
+            slot_type: slotType,
             day_of_week: Number(s.day_of_week),
             start_time: s.start_time,
             end_time: s.end_time,
@@ -105,11 +113,15 @@ export default function ProfilePage() {
         body: JSON.stringify(payload),
       });
       setWeeklyAvailability(r.slots || []);
-      setWeeklyDraft(r.slots || []);
+      if (slotType === 'available') setAvailDraft(r.available || []);
+      else setPlannedDraft(r.planned || []);
     } finally {
-      setSavingWeekly(false);
+      setBusy(false);
     }
   };
+
+  const saveAvailable = () => saveWeeklyOfType(availDraft, 'available', setSavingWeekly);
+  const savePlanned = () => saveWeeklyOfType(plannedDraft, 'planned', setSavingPlanned);
 
   const days = useMemo(() => weekDays(weekStart), [weekStart]);
 
@@ -142,15 +154,17 @@ export default function ProfilePage() {
     }
   };
 
-  const copyFromRecurring = async () => {
-    if (!window.confirm('Preencher esta semana com a disponibilidade semanal recorrente?')) return;
+  const copyPattern = async (fromType) => {
+    const src = fromType === 'planned' ? plannedDraft : availDraft;
+    if (src.length === 0) return;
+    const label = fromType === 'planned' ? 'planejamento semanal padrão' : 'disponibilidade semanal';
+    if (!window.confirm(`Preencher esta semana com base no ${label}?`)) return;
     setBusySchedule(true);
     try {
-      // day_of_week (0..6, Dom..Sáb) → para cada dia da semana, copiar slots ativos
       for (let i = 0; i < 7; i += 1) {
         const dateISO = days[i];
         const dow = new Date(`${dateISO}T00:00:00`).getDay();
-        const slots = weeklyAvailability.filter((s) => s.day_of_week === dow && s.active !== false);
+        const slots = src.filter((s) => s.day_of_week === dow && s.active !== false);
         for (const s of slots) {
           // eslint-disable-next-line no-await-in-loop
           await apiFetch('/api/availability/schedule', {
@@ -256,89 +270,47 @@ export default function ProfilePage() {
         </div>
       </section>
 
-      {/* Disponibilidade Semanal (recorrente) */}
-      <section className="rounded-xl border border-line bg-surface p-5">
-        <h2 className="mb-1 text-base font-bold text-ink">Disponibilidade Semanal</h2>
-        <p className="mb-3 text-xs text-muted">
-          Horários recorrentes em que você pode trabalhar. Use múltiplos slots por dia
-          (ex.: manhã 09:00–12:00 + tarde 14:00–18:00).
-        </p>
-        <div className="space-y-2">
-          {DAYS_OF_WEEK.map(([dow, label]) => {
-            const slots = (slotsByDay[dow] || []);
-            const active = slots.length > 0;
-            return (
-              <div
-                key={dow}
-                className="rounded-lg border border-line p-3"
-                style={active ? { background: '#F0FDF4' } : undefined}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-ink">{label}</span>
-                  <button
-                    onClick={() => addWeeklySlot(dow)}
-                    className="flex items-center gap-1 rounded-md border border-line bg-surface px-2 py-1 text-[11px] font-medium text-ink2 hover:bg-surface2"
-                  >
-                    <Plus className="h-3 w-3" /> Adicionar horário
-                  </button>
-                </div>
-                {slots.length === 0 ? (
-                  <p className="mt-1 text-[11px] text-muted">Indisponível</p>
-                ) : (
-                  <div className="mt-2 space-y-1.5">
-                    {weeklyDraft.map((s, idx) => {
-                      if (s.day_of_week !== dow) return null;
-                      return (
-                        <div key={s.id || s._key || idx} className="flex items-center gap-2">
-                          <input
-                            type="time"
-                            value={s.start_time}
-                            onChange={(e) => updateWeeklySlot(idx, { start_time: e.target.value })}
-                            className="input"
-                            style={{ width: 110 }}
-                          />
-                          <span className="text-xs text-ink2">–</span>
-                          <input
-                            type="time"
-                            value={s.end_time}
-                            onChange={(e) => updateWeeklySlot(idx, { end_time: e.target.value })}
-                            className="input"
-                            style={{ width: 110 }}
-                          />
-                          <button
-                            onClick={() => removeWeeklySlot(idx)}
-                            className="ml-auto rounded-md border border-line p-1 text-danger hover:bg-danger/10"
-                            title="Remover"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <div className="mt-4 flex items-center gap-2">
-          <button
-            onClick={saveWeekly}
-            disabled={savingWeekly}
-            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover disabled:opacity-60"
-          >
-            {savingWeekly ? 'Salvando...' : 'Salvar disponibilidade semanal'}
-          </button>
-          <p className="text-[11px] text-muted">
-            Taxa padrão por hora em <a href="/payment" className="text-accent hover:underline">Pagamentos</a>.
-          </p>
-        </div>
-      </section>
+      {/* Disponibilidade Semanal — slots quando o usuário PODE trabalhar (verde) */}
+      <RecurringSlotsGrid
+        title="Disponibilidade Semanal"
+        helper="Horários recorrentes em que você pode trabalhar. Use múltiplos slots por dia (ex.: manhã 09:00–12:00 + tarde 14:00–18:00)."
+        accentBg="#F0FDF4"
+        draft={availDraft}
+        byDay={availByDay}
+        onAdd={addSlot(setAvailDraft)}
+        onUpdate={updateSlot(setAvailDraft)}
+        onRemove={removeSlot(setAvailDraft)}
+        onSave={saveAvailable}
+        saving={savingWeekly}
+        saveLabel="Salvar disponibilidade semanal"
+        footer={<p className="text-[11px] text-muted">Taxa padrão por hora em <a href="/payment" className="text-accent hover:underline">Pagamentos</a>.</p>}
+      />
 
-      {/* Horário Planejado (esta semana) */}
+      {/* Planejamento Semanal Padrão — horas que o usuário PLANEJA trabalhar (indigo) */}
+      <RecurringSlotsGrid
+        title="Planejamento Semanal Padrão"
+        helper="Horário padrão de trabalho por semana. Ajustes para semanas específicas ficam abaixo."
+        accentBg="#EEF2FF"
+        accentBorder="#6366F1"
+        draft={plannedDraft}
+        byDay={plannedByDay}
+        onAdd={addSlot(setPlannedDraft)}
+        onUpdate={updateSlot(setPlannedDraft)}
+        onRemove={removeSlot(setPlannedDraft)}
+        onSave={savePlanned}
+        saving={savingPlanned}
+        saveLabel="Salvar planejamento semanal"
+      />
+
+      {/* Ajustes desta semana (overrides para datas específicas) */}
       <section className="rounded-xl border border-line bg-surface p-5">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-bold text-ink">Horário Planejado</h2>
+          <div>
+            <h2 className="text-base font-bold text-ink">Ajustes desta semana</h2>
+            <p className="text-[11px] text-muted">
+              Sobrescreve o planejamento padrão para datas específicas, sem afetar a recorrência.
+            </p>
+          </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setWeekStart(addDaysISO(weekStart, -7))}
@@ -367,28 +339,52 @@ export default function ProfilePage() {
         </div>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <button
-            onClick={copyFromRecurring}
-            disabled={busySchedule || weeklyAvailability.length === 0}
+            onClick={() => copyPattern('planned')}
+            disabled={busySchedule || plannedDraft.length === 0}
             className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2 disabled:opacity-60"
           >
-            <Copy className="h-3 w-3" /> Copiar da disponibilidade semanal
+            <Copy className="h-3 w-3" /> Copiar do planejamento padrão
+          </button>
+          <button
+            onClick={() => copyPattern('available')}
+            disabled={busySchedule || availDraft.length === 0}
+            className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2 disabled:opacity-60"
+          >
+            <Copy className="h-3 w-3" /> Copiar da disponibilidade
           </button>
         </div>
         <div className="grid grid-cols-1 gap-2 md:grid-cols-7">
           {days.map((dayISO) => {
             const slots = scheduleByDate[dayISO] || [];
             const isToday = dayISO === toISODate(new Date());
+            const dow = new Date(`${dayISO}T00:00:00`).getDay();
+            // Slots planejados do padrão semanal para este dia (mostrados como fantasmas
+            // se não houver override). Clicar adiciona como override.
+            const plannedHints = plannedDraft.filter((s) => s.day_of_week === dow && s.active !== false);
+            const hasOverride = slots.length > 0;
             return (
               <div
                 key={dayISO}
                 className={`rounded-lg border p-2 ${isToday ? 'border-accent' : 'border-line'}`}
-                style={slots.length > 0 ? { background: '#EEF2FF' } : undefined}
+                style={hasOverride ? { background: '#EEF2FF' } : undefined}
               >
                 <div className="mb-1 text-[11px] font-semibold text-ink">{weekdayLabel(dayISO)}</div>
                 <div className="space-y-1">
-                  {slots.length === 0 && (
+                  {!hasOverride && plannedHints.length === 0 && (
                     <p className="text-[11px] text-muted">—</p>
                   )}
+                  {!hasOverride && plannedHints.map((s, i) => (
+                    <button
+                      key={`hint-${i}`}
+                      onClick={() => addScheduledSlot(dayISO, s.start_time, s.end_time, '')}
+                      disabled={busySchedule}
+                      title="Adicionar como ajuste desta semana"
+                      className="w-full rounded-md border border-dashed px-1.5 py-1 text-[11px] hover:bg-surface2 disabled:opacity-60"
+                      style={{ borderColor: '#6366F1', color: '#6366F1', background: 'rgba(99,102,241,0.04)' }}
+                    >
+                      {s.start_time}–{s.end_time} <span className="opacity-70">(padrão)</span>
+                    </button>
+                  ))}
                   {slots.map((s) => (
                     <div key={s.id} className="rounded-md border border-line bg-surface px-1.5 py-1 text-[11px]">
                       <div className="flex items-center justify-between gap-1">
@@ -409,7 +405,8 @@ export default function ProfilePage() {
                 </div>
                 <button
                   onClick={() => addScheduledSlot(dayISO)}
-                  className="mt-1 flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-line py-0.5 text-[11px] text-ink2 hover:bg-surface2"
+                  disabled={busySchedule}
+                  className="mt-1 flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-line py-0.5 text-[11px] text-ink2 hover:bg-surface2 disabled:opacity-60"
                 >
                   <Plus className="h-3 w-3" /> Adicionar
                 </button>
@@ -545,6 +542,99 @@ export default function ProfilePage() {
         </button>
       </section>
     </div>
+  );
+}
+
+// Reused for both "Disponibilidade Semanal" (verde) e "Planejamento Semanal Padrão" (indigo).
+// `draft` é o array completo; `byDay` é o mesmo agrupado por day_of_week (0..6).
+function RecurringSlotsGrid({
+  title,
+  helper,
+  accentBg,
+  accentBorder,
+  draft,
+  byDay,
+  onAdd,
+  onUpdate,
+  onRemove,
+  onSave,
+  saving,
+  saveLabel,
+  footer,
+}) {
+  return (
+    <section className="rounded-xl border border-line bg-surface p-5">
+      <h2 className="mb-1 text-base font-bold text-ink">{title}</h2>
+      {helper && <p className="mb-3 text-xs text-muted">{helper}</p>}
+      <div className="space-y-2">
+        {DAYS_OF_WEEK.map(([dow, label]) => {
+          const slots = byDay[dow] || [];
+          const active = slots.length > 0;
+          return (
+            <div
+              key={dow}
+              className="rounded-lg border border-line p-3"
+              style={active ? { background: accentBg, borderLeft: accentBorder ? `3px solid ${accentBorder}` : undefined } : undefined}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium text-ink">{label}</span>
+                <button
+                  onClick={() => onAdd(dow)}
+                  className="flex items-center gap-1 rounded-md border border-line bg-surface px-2 py-1 text-[11px] font-medium text-ink2 hover:bg-surface2"
+                >
+                  <Plus className="h-3 w-3" /> Adicionar horário
+                </button>
+              </div>
+              {slots.length === 0 ? (
+                <p className="mt-1 text-[11px] text-muted">—</p>
+              ) : (
+                <div className="mt-2 space-y-1.5">
+                  {draft.map((s, idx) => {
+                    if (s.day_of_week !== dow) return null;
+                    return (
+                      <div key={s.id || s._key || idx} className="flex items-center gap-2">
+                        <input
+                          type="time"
+                          value={s.start_time}
+                          onChange={(e) => onUpdate(idx, { start_time: e.target.value })}
+                          className="input"
+                          style={{ width: 110 }}
+                        />
+                        <span className="text-xs text-ink2">–</span>
+                        <input
+                          type="time"
+                          value={s.end_time}
+                          onChange={(e) => onUpdate(idx, { end_time: e.target.value })}
+                          className="input"
+                          style={{ width: 110 }}
+                        />
+                        <button
+                          onClick={() => onRemove(idx)}
+                          className="ml-auto rounded-md border border-line p-1 text-danger hover:bg-danger/10"
+                          title="Remover"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-4 flex items-center gap-2">
+        <button
+          onClick={onSave}
+          disabled={saving}
+          className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover disabled:opacity-60"
+        >
+          {saving ? 'Salvando...' : saveLabel}
+        </button>
+        {footer}
+      </div>
+    </section>
   );
 }
 

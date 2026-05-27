@@ -25,6 +25,20 @@ function hhmmToHours(s) {
 }
 
 const CAL_STORAGE_KEY = 'aide_selected_calendars';
+const TOGGLES_STORAGE_KEY = 'aide-calendar-toggles';
+
+function loadToggles() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TOGGLES_STORAGE_KEY) || '{}');
+    return {
+      available: raw.available !== false,
+      planned: raw.planned !== false,
+      events: raw.events !== false,
+    };
+  } catch {
+    return { available: true, planned: true, events: true };
+  }
+}
 
 // Events synced from AIDE tasks carry this description prefix (see worker
 // syncTaskToCalendar). Used to show a small "AIDE" badge in the calendar.
@@ -66,6 +80,14 @@ export default function CalendarPage() {
   const [selectedDay, setSelectedDay] = useState(toISODate(new Date()));
   const [editor, setEditor] = useState(undefined); // undefined=closed, {date} new, event=edit
   const [syncing, setSyncing] = useState(false);
+  const [toggles, setToggles] = useState(loadToggles);
+  const updateToggle = (key) => {
+    setToggles((cur) => {
+      const next = { ...cur, [key]: !cur[key] };
+      localStorage.setItem(TOGGLES_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
 
   // Calendar list (once).
   useEffect(() => {
@@ -247,20 +269,26 @@ export default function CalendarPage() {
         </div>
       )}
 
-      {/* Legenda */}
-      <div className="flex flex-wrap items-center gap-3 text-[11px] text-ink2">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: '#22C55E' }} />
-          Disponibilidade
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: '#6366F1' }} />
-          Horário planejado
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: '#3B82F6' }} />
-          Eventos do calendário
-        </span>
+      {/* Camadas: legenda + toggle ao mesmo tempo */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <TogglePill
+          on={toggles.available}
+          onClick={() => updateToggle('available')}
+          label="Disponibilidade"
+          color="#22C55E"
+        />
+        <TogglePill
+          on={toggles.planned}
+          onClick={() => updateToggle('planned')}
+          label="Planejado"
+          color="#6366F1"
+        />
+        <TogglePill
+          on={toggles.events}
+          onClick={() => updateToggle('events')}
+          label="Eventos"
+          color="#3B82F6"
+        />
       </div>
 
       <div className="flex flex-col gap-4 lg:flex-row">
@@ -272,6 +300,7 @@ export default function CalendarPage() {
               selectedDay={selectedDay}
               onSelectDay={setSelectedDay}
               allUsersSchedule={allUsersSchedule}
+              toggles={toggles}
             />
           ) : (
             <WeekView
@@ -279,6 +308,7 @@ export default function CalendarPage() {
               events={calendarEvents}
               onSelectEvent={(ev) => setEditor(ev)}
               allUsersSchedule={allUsersSchedule}
+              toggles={toggles}
             />
           )}
           {loading && <p className="mt-2 text-center text-xs text-muted">Carregando eventos...</p>}
@@ -339,8 +369,27 @@ export default function CalendarPage() {
   );
 }
 
-// Para um dado dia ISO, retorna { hasAvailability, hasPlanned } olhando todas
-// as agendas de usuários. Recurring (weekly_availability) é matched por dow.
+function TogglePill({ on, onClick, label, color }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition"
+      style={{
+        height: 28,
+        borderRadius: 14,
+        background: on ? color : 'transparent',
+        borderColor: on ? color : '#E8E3DB',
+        color: on ? '#fff' : '#9E9890',
+      }}
+    >
+      <span className="inline-block h-2 w-2 rounded-full" style={{ background: on ? '#fff' : color }} />
+      {label}
+    </button>
+  );
+}
+
+// Indicadores por dia (mês). Recurring 'available' (slot_type=available) → ponto verde;
+// scheduled (daily overrides) OU recurring 'planned' → ponto indigo.
 function scheduleIndicators(allUsersSchedule, dateISO) {
   let hasAvail = false;
   let hasPlanned = false;
@@ -348,13 +397,16 @@ function scheduleIndicators(allUsersSchedule, dateISO) {
   for (const userId in allUsersSchedule || {}) {
     const u = allUsersSchedule[userId];
     if (!u) continue;
-    if ((u.recurring || []).some((s) => s.day_of_week === dow && s.active !== false)) hasAvail = true;
+    const availList = u.available || (u.recurring || []).filter((s) => (s.slot_type || 'available') === 'available');
+    const plannedList = u.planned || (u.recurring || []).filter((s) => s.slot_type === 'planned');
+    if (availList.some((s) => s.day_of_week === dow && s.active !== false)) hasAvail = true;
+    if (plannedList.some((s) => s.day_of_week === dow && s.active !== false)) hasPlanned = true;
     if ((u.scheduled || []).some((s) => s.work_date === dateISO)) hasPlanned = true;
   }
   return { hasAvail, hasPlanned };
 }
 
-function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule }) {
+function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule, toggles }) {
   const cells = monthGrid(date);
   const today = new Date();
   return (
@@ -373,7 +425,13 @@ function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule }
           const inMonth = cell.getMonth() === date.getMonth();
           const isToday = isSameDate(cell, today);
           const isSelected = key === selectedDay;
-          const { hasAvail, hasPlanned } = scheduleIndicators(allUsersSchedule, key);
+          const ind = scheduleIndicators(allUsersSchedule, key);
+          const showAvail = toggles?.available !== false && ind.hasAvail;
+          const showPlanned = toggles?.planned !== false && ind.hasPlanned;
+          const showEvents = toggles?.events !== false;
+          const bg = isToday
+            ? '#EEF2FF'
+            : showPlanned ? '#EEF2FF' : showAvail ? '#F0FDF4' : undefined;
           return (
             <button
               key={i}
@@ -381,26 +439,26 @@ function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule }
               className={`min-h-[84px] border-b border-r border-line p-1 text-left align-top last:border-r-0 ${
                 isSelected ? 'ring-1 ring-inset ring-accent' : ''
               }`}
-              style={isToday ? { background: '#EEF2FF' } : hasPlanned ? { background: '#EEF2FF' } : hasAvail ? { background: '#F0FDF4' } : undefined}
+              style={bg ? { background: bg } : undefined}
             >
               <div className="mb-1 flex items-center justify-between">
                 <span className={`text-xs font-medium ${inMonth ? 'text-ink' : 'text-muted'}`}>
                   {cell.getDate()}
                 </span>
                 <span className="flex items-center gap-0.5">
-                  {hasAvail && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: '#22C55E' }} title="Disponibilidade" />}
-                  {hasPlanned && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: '#6366F1' }} title="Horário planejado" />}
+                  {showAvail && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: '#22C55E' }} title="Disponibilidade" />}
+                  {showPlanned && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: '#6366F1' }} title="Horário planejado" />}
                 </span>
               </div>
               <div className="space-y-0.5">
-                {evts.slice(0, 3).map((ev) => (
+                {showEvents && evts.slice(0, 3).map((ev) => (
                   <div key={ev.id} className="flex items-center gap-1 truncate text-[10px] text-ink2">
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
                     <span className="truncate">{ev.title}</span>
                     {isAideTask(ev) && <AideBadge />}
                   </div>
                 ))}
-                {evts.length > 3 && (
+                {showEvents && evts.length > 3 && (
                   <div className="text-[10px] font-medium text-accent">+{evts.length - 3} mais</div>
                 )}
               </div>
@@ -412,13 +470,16 @@ function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule }
   );
 }
 
-function WeekView({ date, events, onSelectEvent, allUsersSchedule }) {
+function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
   const days = weekGrid(date);
   const now = new Date();
   const hours = Array.from({ length: 24 }, (_, h) => h);
+  const showAvail = toggles?.available !== false;
+  const showPlanned = toggles?.planned !== false;
+  const showEvents = toggles?.events !== false;
 
-  // Pré-coleta blocos de disponibilidade e planejados por dia (índice de coluna 0..6).
-  // Cada bloco: { startH, endH, name, kind: 'avail' | 'planned' }
+  // Pré-coleta blocos por dia: kind = 'avail' (verde, recorrente available)
+  // ou 'planned' (indigo, recorrente planned OU daily override).
   const blocksPerDay = days.map((d) => {
     const dayISO = toISODate(d);
     const dow = d.getDay();
@@ -427,10 +488,21 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule }) {
       const u = allUsersSchedule[uid];
       if (!u) continue;
       const firstName = (u.name || '').split(' ')[0] || '';
-      for (const s of u.recurring || []) {
+      const availList = u.available || (u.recurring || []).filter((s) => (s.slot_type || 'available') === 'available');
+      const plannedList = u.planned || (u.recurring || []).filter((s) => s.slot_type === 'planned');
+      for (const s of availList) {
         if (s.day_of_week !== dow || s.active === false) continue;
         list.push({
           kind: 'avail',
+          name: firstName,
+          startH: hhmmToHours(s.start_time),
+          endH: hhmmToHours(s.end_time),
+        });
+      }
+      for (const s of plannedList) {
+        if (s.day_of_week !== dow || s.active === false) continue;
+        list.push({
+          kind: 'planned',
           name: firstName,
           startH: hhmmToHours(s.start_time),
           endH: hhmmToHours(s.end_time),
@@ -483,7 +555,7 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule }) {
                   <div key={h} className="border-b border-line" style={{ height: HOUR_PX }} />
                 ))}
                 {/* Camada 1: blocos de disponibilidade (verde, fundo) */}
-                {blocks.filter((b) => b.kind === 'avail').map((b, i) => (
+                {showAvail && blocks.filter((b) => b.kind === 'avail').map((b, i) => (
                   <div
                     key={`av-${di}-${i}`}
                     className="pointer-events-none absolute left-0 right-0 overflow-hidden px-1 py-0.5 text-[9px]"
@@ -499,7 +571,7 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule }) {
                   </div>
                 ))}
                 {/* Camada 2: blocos planejados (indigo claro, meio) */}
-                {blocks.filter((b) => b.kind === 'planned').map((b, i) => (
+                {showPlanned && blocks.filter((b) => b.kind === 'planned').map((b, i) => (
                   <div
                     key={`pl-${di}-${i}`}
                     className="pointer-events-none absolute left-0 right-0 overflow-hidden px-1 py-0.5 text-[9px]"
@@ -516,7 +588,7 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule }) {
                   </div>
                 ))}
                 {/* Camada 3: eventos Google (topo, totalmente opacos) */}
-                {dayEvents.map((ev) => (
+                {showEvents && dayEvents.map((ev) => (
                   <button
                     key={ev.id}
                     onClick={() => onSelectEvent(ev)}

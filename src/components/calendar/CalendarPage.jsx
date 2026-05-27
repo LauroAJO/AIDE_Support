@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, Plus, RefreshCw } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
-import { toISODate } from '../../lib/week';
+import { toISODate, mondayOf } from '../../lib/week';
 import {
   monthLabel,
   monthGrid,
@@ -16,6 +16,13 @@ import {
 } from '../../lib/calendar';
 import ScopeBanner, { isAuthScopeError } from '../shared/ScopeBanner';
 import EventEditor from './EventEditor';
+
+// Converte "HH:MM" para hora decimal (9.5 = 09:30)
+function hhmmToHours(s) {
+  if (!s) return 0;
+  const [h, m] = s.split(':').map(Number);
+  return (h || 0) + (m || 0) / 60;
+}
 
 const CAL_STORAGE_KEY = 'aide_selected_calendars';
 
@@ -42,6 +49,8 @@ export default function CalendarPage() {
   const setCalendarView = useStore((s) => s.setCalendarView);
   const calendarDate = useStore((s) => s.calendarDate);
   const setCalendarDate = useStore((s) => s.setCalendarDate);
+  const allUsersSchedule = useStore((s) => s.allUsersSchedule);
+  const setAllUsersSchedule = useStore((s) => s.setAllUsersSchedule);
 
   const date = useMemo(() => new Date(calendarDate), [calendarDate]);
   const [calendars, setCalendars] = useState([]);
@@ -106,6 +115,17 @@ export default function CalendarPage() {
     loadEvents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range.start, range.end, selectedCalIds]);
+
+  // Carrega disponibilidade + horário planejado de TODOS os usuários para a
+  // semana visível. Em "mês", usa a segunda-feira da primeira célula como
+  // âncora — o worker retorna 7 dias, ok para destacar a semana atual.
+  const visibleWeekStart = useMemo(() => mondayOf(date), [date]);
+  useEffect(() => {
+    apiFetch(`/api/availability/all?week_start=${visibleWeekStart}`)
+      .then((d) => setAllUsersSchedule(d || {}))
+      .catch(() => setAllUsersSchedule({}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleWeekStart]);
 
   const grouped = useMemo(() => {
     const g = {};
@@ -218,11 +238,30 @@ export default function CalendarPage() {
                   style={{ background: on ? '#fff' : c.backgroundColor || '#6366f1' }}
                 />
                 {c.summary}
+                {c.sharedBy && (
+                  <span className="text-[10px] opacity-80">· {c.sharedBy}</span>
+                )}
               </button>
             );
           })}
         </div>
       )}
+
+      {/* Legenda */}
+      <div className="flex flex-wrap items-center gap-3 text-[11px] text-ink2">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: '#22C55E' }} />
+          Disponibilidade
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: '#6366F1' }} />
+          Horário planejado
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: '#3B82F6' }} />
+          Eventos do calendário
+        </span>
+      </div>
 
       <div className="flex flex-col gap-4 lg:flex-row">
         <div className="min-w-0 flex-1">
@@ -232,9 +271,15 @@ export default function CalendarPage() {
               grouped={grouped}
               selectedDay={selectedDay}
               onSelectDay={setSelectedDay}
+              allUsersSchedule={allUsersSchedule}
             />
           ) : (
-            <WeekView date={date} events={calendarEvents} onSelectEvent={(ev) => setEditor(ev)} />
+            <WeekView
+              date={date}
+              events={calendarEvents}
+              onSelectEvent={(ev) => setEditor(ev)}
+              allUsersSchedule={allUsersSchedule}
+            />
           )}
           {loading && <p className="mt-2 text-center text-xs text-muted">Carregando eventos...</p>}
         </div>
@@ -294,7 +339,22 @@ export default function CalendarPage() {
   );
 }
 
-function MonthView({ date, grouped, selectedDay, onSelectDay }) {
+// Para um dado dia ISO, retorna { hasAvailability, hasPlanned } olhando todas
+// as agendas de usuários. Recurring (weekly_availability) é matched por dow.
+function scheduleIndicators(allUsersSchedule, dateISO) {
+  let hasAvail = false;
+  let hasPlanned = false;
+  const dow = new Date(`${dateISO}T00:00:00`).getDay();
+  for (const userId in allUsersSchedule || {}) {
+    const u = allUsersSchedule[userId];
+    if (!u) continue;
+    if ((u.recurring || []).some((s) => s.day_of_week === dow && s.active !== false)) hasAvail = true;
+    if ((u.scheduled || []).some((s) => s.work_date === dateISO)) hasPlanned = true;
+  }
+  return { hasAvail, hasPlanned };
+}
+
+function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule }) {
   const cells = monthGrid(date);
   const today = new Date();
   return (
@@ -313,6 +373,7 @@ function MonthView({ date, grouped, selectedDay, onSelectDay }) {
           const inMonth = cell.getMonth() === date.getMonth();
           const isToday = isSameDate(cell, today);
           const isSelected = key === selectedDay;
+          const { hasAvail, hasPlanned } = scheduleIndicators(allUsersSchedule, key);
           return (
             <button
               key={i}
@@ -320,10 +381,16 @@ function MonthView({ date, grouped, selectedDay, onSelectDay }) {
               className={`min-h-[84px] border-b border-r border-line p-1 text-left align-top last:border-r-0 ${
                 isSelected ? 'ring-1 ring-inset ring-accent' : ''
               }`}
-              style={isToday ? { background: '#EEF2FF' } : undefined}
+              style={isToday ? { background: '#EEF2FF' } : hasPlanned ? { background: '#EEF2FF' } : hasAvail ? { background: '#F0FDF4' } : undefined}
             >
-              <div className={`mb-1 text-xs font-medium ${inMonth ? 'text-ink' : 'text-muted'}`}>
-                {cell.getDate()}
+              <div className="mb-1 flex items-center justify-between">
+                <span className={`text-xs font-medium ${inMonth ? 'text-ink' : 'text-muted'}`}>
+                  {cell.getDate()}
+                </span>
+                <span className="flex items-center gap-0.5">
+                  {hasAvail && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: '#22C55E' }} title="Disponibilidade" />}
+                  {hasPlanned && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: '#6366F1' }} title="Horário planejado" />}
+                </span>
               </div>
               <div className="space-y-0.5">
                 {evts.slice(0, 3).map((ev) => (
@@ -345,10 +412,43 @@ function MonthView({ date, grouped, selectedDay, onSelectDay }) {
   );
 }
 
-function WeekView({ date, events, onSelectEvent }) {
+function WeekView({ date, events, onSelectEvent, allUsersSchedule }) {
   const days = weekGrid(date);
   const now = new Date();
   const hours = Array.from({ length: 24 }, (_, h) => h);
+
+  // Pré-coleta blocos de disponibilidade e planejados por dia (índice de coluna 0..6).
+  // Cada bloco: { startH, endH, name, kind: 'avail' | 'planned' }
+  const blocksPerDay = days.map((d) => {
+    const dayISO = toISODate(d);
+    const dow = d.getDay();
+    const list = [];
+    for (const uid in allUsersSchedule || {}) {
+      const u = allUsersSchedule[uid];
+      if (!u) continue;
+      const firstName = (u.name || '').split(' ')[0] || '';
+      for (const s of u.recurring || []) {
+        if (s.day_of_week !== dow || s.active === false) continue;
+        list.push({
+          kind: 'avail',
+          name: firstName,
+          startH: hhmmToHours(s.start_time),
+          endH: hhmmToHours(s.end_time),
+        });
+      }
+      for (const s of u.scheduled || []) {
+        if (s.work_date !== dayISO) continue;
+        list.push({
+          kind: 'planned',
+          name: firstName,
+          startH: hhmmToHours(s.start_time),
+          endH: hhmmToHours(s.end_time),
+          notes: s.notes,
+        });
+      }
+    }
+    return list;
+  });
 
   return (
     <div className="overflow-hidden rounded-xl border border-line bg-surface">
@@ -376,11 +476,46 @@ function WeekView({ date, events, onSelectEvent }) {
               (ev) => !ev.allDay && ev.startDatetime && isSameDate(new Date(ev.startDatetime), d)
             );
             const showNowLine = isSameDate(d, now);
+            const blocks = blocksPerDay[di] || [];
             return (
               <div key={di} className="relative border-l border-line">
                 {hours.map((h) => (
                   <div key={h} className="border-b border-line" style={{ height: HOUR_PX }} />
                 ))}
+                {/* Camada 1: blocos de disponibilidade (verde, fundo) */}
+                {blocks.filter((b) => b.kind === 'avail').map((b, i) => (
+                  <div
+                    key={`av-${di}-${i}`}
+                    className="pointer-events-none absolute left-0 right-0 overflow-hidden px-1 py-0.5 text-[9px]"
+                    style={{
+                      top: b.startH * HOUR_PX,
+                      height: Math.max(12, (b.endH - b.startH) * HOUR_PX),
+                      background: '#F0FDF4',
+                      borderLeft: '3px solid #22C55E',
+                      color: '#166534',
+                    }}
+                  >
+                    Disponível — {b.name}
+                  </div>
+                ))}
+                {/* Camada 2: blocos planejados (indigo claro, meio) */}
+                {blocks.filter((b) => b.kind === 'planned').map((b, i) => (
+                  <div
+                    key={`pl-${di}-${i}`}
+                    className="pointer-events-none absolute left-0 right-0 overflow-hidden px-1 py-0.5 text-[9px]"
+                    style={{
+                      top: b.startH * HOUR_PX,
+                      height: Math.max(12, (b.endH - b.startH) * HOUR_PX),
+                      background: '#EEF2FF',
+                      borderLeft: '3px solid #6366F1',
+                      color: '#3730A3',
+                    }}
+                  >
+                    Planejado — {b.name}
+                    {b.notes && <div className="truncate opacity-80">{b.notes}</div>}
+                  </div>
+                ))}
+                {/* Camada 3: eventos Google (topo, totalmente opacos) */}
                 {dayEvents.map((ev) => (
                   <button
                     key={ev.id}

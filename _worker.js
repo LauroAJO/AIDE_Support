@@ -115,6 +115,10 @@ async function handleAPI(request, env, ctx) {
 
   // Availability
   if (path === '/api/availability') return handleAvailability(request, env, user);
+  if (path === '/api/availability/weekly') return handleAvailabilityWeekly(request, env, user);
+  if (path === '/api/availability/schedule') return handleAvailabilitySchedule(request, env, user);
+  if (path.startsWith('/api/availability/schedule/')) return handleAvailabilityScheduleItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/availability/all') return handleAvailabilityAll(request, env, user);
 
   // Calendar
   if (path === '/api/calendar/events') return handleCalendarEvents(request, env, user);
@@ -1144,6 +1148,182 @@ async function handleAvailability(request, env, user) {
 }
 
 // ---------------------------------------------------------------------------
+// Disponibilidade semanal recorrente + Horário planejado diário (v1.9.8)
+// ---------------------------------------------------------------------------
+
+function shapeWeeklySlot(row) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    day_of_week: row.day_of_week,
+    start_time: row.start_time,
+    end_time: row.end_time,
+    active: !!row.active,
+  };
+}
+
+function shapeScheduledSlot(row) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    work_date: row.work_date,
+    start_time: row.start_time,
+    end_time: row.end_time,
+    notes: row.notes || '',
+  };
+}
+
+async function fetchWeeklyForUser(env, userId) {
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT * FROM weekly_availability WHERE user_id = ? AND active = 1 ORDER BY day_of_week, start_time'
+    ).bind(userId).all();
+    return (results || []).map(shapeWeeklySlot);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchScheduleForUser(env, userId, weekStart) {
+  try {
+    const end = addDaysISOInternal(weekStart, 7);
+    const { results } = await env.DB.prepare(
+      `SELECT * FROM daily_work_schedule
+       WHERE user_id = ? AND work_date >= ? AND work_date < ?
+       ORDER BY work_date, start_time`
+    ).bind(userId, weekStart, end).all();
+    return (results || []).map(shapeScheduledSlot);
+  } catch {
+    return [];
+  }
+}
+
+function addDaysISOInternal(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+async function handleAvailabilityWeekly(request, env, user) {
+  if (request.method === 'GET') {
+    const slots = await fetchWeeklyForUser(env, user.id);
+    // Agrupado por day_of_week para conveniência do cliente.
+    const byDay = {};
+    for (const s of slots) {
+      (byDay[s.day_of_week] = byDay[s.day_of_week] || []).push(s);
+    }
+    return json({ slots, by_day: byDay });
+  }
+
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const incoming = Array.isArray(body.slots) ? body.slots : [];
+    const now = Math.floor(Date.now() / 1000);
+
+    await env.DB.prepare('DELETE FROM weekly_availability WHERE user_id = ?').bind(user.id).run();
+
+    const inserted = [];
+    for (const s of incoming) {
+      const day = Number(s.day_of_week);
+      if (Number.isNaN(day) || day < 0 || day > 6) continue;
+      if (!s.start_time || !s.end_time) continue;
+      const id = crypto.randomUUID();
+      try {
+        await env.DB.prepare(
+          `INSERT INTO weekly_availability
+            (id, user_id, day_of_week, start_time, end_time, active, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?)`
+        ).bind(
+          id, user.id, day, String(s.start_time), String(s.end_time),
+          s.active === false ? 0 : 1, now, now
+        ).run();
+        inserted.push(id);
+      } catch { /* duplicate or other constraint — skip */ }
+    }
+
+    const slots = await fetchWeeklyForUser(env, user.id);
+    return json({ slots });
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleAvailabilitySchedule(request, env, user) {
+  if (request.method === 'GET') {
+    const url = new URL(request.url);
+    const weekStart = url.searchParams.get('week_start');
+    if (!weekStart) return json({ error: 'week_start obrigatório (YYYY-MM-DD)' }, 400);
+    const [scheduled, recurring] = await Promise.all([
+      fetchScheduleForUser(env, user.id, weekStart),
+      fetchWeeklyForUser(env, user.id),
+    ]);
+    return json({ scheduled, recurring });
+  }
+
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.work_date || !body.start_time || !body.end_time) {
+      return json({ error: 'Campos obrigatórios: work_date, start_time, end_time' }, 400);
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const id = crypto.randomUUID();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO daily_work_schedule
+          (id, user_id, work_date, start_time, end_time, notes, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)
+         ON CONFLICT(user_id, work_date, start_time) DO UPDATE SET
+           end_time = excluded.end_time,
+           notes = excluded.notes,
+           updated_at = excluded.updated_at`
+      ).bind(
+        id, user.id, body.work_date, body.start_time, body.end_time,
+        body.notes || '', now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao salvar', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare(
+      'SELECT * FROM daily_work_schedule WHERE user_id = ? AND work_date = ? AND start_time = ?'
+    ).bind(user.id, body.work_date, body.start_time).first();
+    return json(row ? shapeScheduledSlot(row) : { id }, 201);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleAvailabilityScheduleItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  const row = await env.DB.prepare('SELECT * FROM daily_work_schedule WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: 'Slot não encontrado', id }, 404);
+  if (row.user_id !== user.id && user.role !== 'owner') {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+  await env.DB.prepare('DELETE FROM daily_work_schedule WHERE id = ?').bind(id).run();
+  return json({ deleted: true });
+}
+
+async function handleAvailabilityAll(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  const weekStart = new URL(request.url).searchParams.get('week_start');
+  if (!weekStart) return json({ error: 'week_start obrigatório (YYYY-MM-DD)' }, 400);
+  const { results: users } = await env.DB.prepare(
+    'SELECT id, name, role FROM users'
+  ).all();
+  const out = {};
+  for (const u of users || []) {
+    const [scheduled, recurring] = await Promise.all([
+      fetchScheduleForUser(env, u.id, weekStart),
+      fetchWeeklyForUser(env, u.id),
+    ]);
+    out[u.id] = { name: u.name, role: u.role, scheduled, recurring };
+  }
+  return json(out);
+}
+
+// ---------------------------------------------------------------------------
 // Google API access (token refresh + authed fetch)
 // ---------------------------------------------------------------------------
 
@@ -1493,34 +1673,46 @@ async function handleSharingCalendarItem(request, env, user, id) {
   return json({ deleted: true });
 }
 
-async function handleCalendarEvents(request, env, user) {
-  // The calendars belong to Lauro — always use the owner's token. Alice's
-  // visibility is constrained by calendar_access_rules.
-  const { ownerId } = await getRoleUsers(env);
-  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+// Returns a map google_calendar_id → grantor_user_id for calendars shared
+// with `user`. Used so each shared calendar is fetched with its owner's token.
+async function calendarGrantorMap(env, user) {
+  const map = new Map();
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT google_calendar_id, grantor_user_id FROM calendar_sharing_rules WHERE grantee_user_id = ?'
+    ).bind(user.id).all();
+    for (const r of results || []) map.set(r.google_calendar_id, r.grantor_user_id);
+  } catch { /* table missing */ }
+  return map;
+}
 
+async function handleCalendarEvents(request, env, user) {
   if (request.method === 'GET') {
     const url = new URL(request.url);
     const timeMin = url.searchParams.get('start') || new Date().toISOString();
     const timeMax = url.searchParams.get('end') || new Date(Date.now() + 30 * 86400000).toISOString();
     const calsParam = url.searchParams.get('calendars');
-    let calendars = calsParam ? calsParam.split(',').filter(Boolean) : ['primary'];
-    const allowedCals = await allowedCalendarIds(env, user);
-    if (allowedCals) calendars = calendars.filter((c) => allowedCals.has(c));
+    const calendars = calsParam ? calsParam.split(',').filter(Boolean) : ['primary'];
+    const shareMap = await calendarGrantorMap(env, user);
     const all = [];
     for (const cal of calendars) {
+      // Each calendar uses the token of whichever user owns it: the current
+      // user's own calendar uses their token; a shared calendar uses the
+      // grantor's token (per calendar_sharing_rules).
+      const tokenUserId = shareMap.get(cal) || user.id;
       const api =
         `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events?` +
         new URLSearchParams({ timeMin, timeMax, singleEvents: 'true', orderBy: 'startTime', maxResults: '100' });
-      const resp = await googleFetch(api, ownerId, env);
+      const resp = await googleFetch(api, tokenUserId, env);
       const guard = googleGuard(resp);
       if (guard) return guard;
-      if (!resp.ok) continue; // skip a calendar that errors individually
+      if (!resp.ok) continue;
       const data = await resp.json();
       for (const ev of data.items || []) {
         const shaped = shapeGoogleEvent(ev, cal);
+        shaped.ownerUserId = tokenUserId;
         all.push(shaped);
-        await cacheEvent(env, ownerId, shaped, ev);
+        await cacheEvent(env, tokenUserId, shaped, ev);
       }
     }
     return json(all);
@@ -1529,9 +1721,11 @@ async function handleCalendarEvents(request, env, user) {
   if (request.method === 'POST') {
     const body = (await readJson(request)) || {};
     const cal = body.calendar_id || 'primary';
+    const shareMap = await calendarGrantorMap(env, user);
+    const tokenUserId = shareMap.get(cal) || user.id;
     const resp = await googleFetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events`,
-      ownerId, env,
+      tokenUserId, env,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildGoogleEventBody(body)) }
     );
     const guard = googleGuard(resp);
@@ -1539,7 +1733,7 @@ async function handleCalendarEvents(request, env, user) {
     if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
     const ev = await resp.json();
     const shaped = shapeGoogleEvent(ev, cal);
-    await cacheEvent(env, ownerId, shaped, ev);
+    await cacheEvent(env, tokenUserId, shaped, ev);
     return json(shaped, 201);
   }
 
@@ -1549,15 +1743,21 @@ async function handleCalendarEvents(request, env, user) {
 async function handleCalendarEventItem(request, env, user, eventId) {
   if (!eventId) return json({ error: 'ID ausente' }, 400);
   const url = new URL(request.url);
-  const { ownerId } = await getRoleUsers(env);
-  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
+
+  // Determine which calendar this event belongs to and resolve its owner
+  // token (own vs shared).
+  const calFromBody = async () => {
+    const body = (await readJson(request)) || {};
+    return { body, cal: body.calendar_id || 'primary' };
+  };
+  const shareMap = await calendarGrantorMap(env, user);
 
   if (request.method === 'PUT') {
-    const body = (await readJson(request)) || {};
-    const cal = body.calendar_id || 'primary';
+    const { body, cal } = await calFromBody();
+    const tokenUserId = shareMap.get(cal) || user.id;
     const resp = await googleFetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${encodeURIComponent(eventId)}`,
-      ownerId, env,
+      tokenUserId, env,
       { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildGoogleEventBody(body)) }
     );
     const guard = googleGuard(resp);
@@ -1565,15 +1765,16 @@ async function handleCalendarEventItem(request, env, user, eventId) {
     if (!resp.ok) return json({ error: 'google_error', detail: await resp.text() }, 502);
     const ev = await resp.json();
     const shaped = shapeGoogleEvent(ev, cal);
-    await cacheEvent(env, ownerId, shaped, ev);
+    await cacheEvent(env, tokenUserId, shaped, ev);
     return json(shaped);
   }
 
   if (request.method === 'DELETE') {
     const cal = url.searchParams.get('calendarId') || 'primary';
+    const tokenUserId = shareMap.get(cal) || user.id;
     const resp = await googleFetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events/${encodeURIComponent(eventId)}`,
-      ownerId, env, { method: 'DELETE' }
+      tokenUserId, env, { method: 'DELETE' }
     );
     const guard = googleGuard(resp);
     if (guard) return guard;
@@ -1586,8 +1787,6 @@ async function handleCalendarEventItem(request, env, user, eventId) {
 }
 
 async function handleCalendarSync(request, env, user) {
-  const { ownerId } = await getRoleUsers(env);
-  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
   const end = new Date(now.getFullYear(), now.getMonth() + 2, 0, 23, 59, 59);
@@ -1600,38 +1799,59 @@ async function handleCalendarSync(request, env, user) {
       orderBy: 'startTime',
       maxResults: '250'
     });
-  const resp = await googleFetch(api, ownerId, env);
+  const resp = await googleFetch(api, user.id, env);
   const guard = googleGuard(resp);
   if (guard) return guard;
   if (!resp.ok) return json({ error: 'google_error' }, 502);
   const data = await resp.json();
   let synced = 0;
   for (const ev of data.items || []) {
-    await cacheEvent(env, ownerId, shapeGoogleEvent(ev, 'primary'), ev);
+    await cacheEvent(env, user.id, shapeGoogleEvent(ev, 'primary'), ev);
     synced += 1;
   }
   return json({ synced });
 }
 
 async function handleCalendarList(request, env, user) {
-  const { ownerId } = await getRoleUsers(env);
-  if (!ownerId) return json({ error: 'Proprietário não encontrado' }, 500);
-  const resp = await googleFetch(
+  // Each user lists their OWN calendarList. We then append shared calendars
+  // (calendar_sharing_rules) using the grantor's token to fetch metadata so
+  // the UI can render their colors and titles.
+  const ownResp = await googleFetch(
     'https://www.googleapis.com/calendar/v3/users/me/calendarList',
-    ownerId, env
+    user.id, env
   );
-  const guard = googleGuard(resp);
+  const guard = googleGuard(ownResp);
   if (guard) return guard;
-  if (!resp.ok) return json({ error: 'google_error' }, 502);
-  const data = await resp.json();
-  let list = (data.items || []).map((c) => ({
+  if (!ownResp.ok) return json({ error: 'google_error' }, 502);
+  const ownData = await ownResp.json();
+  const list = (ownData.items || []).map((c) => ({
     id: c.id,
     summary: c.summary,
     backgroundColor: c.backgroundColor || null,
-    primary: !!c.primary
+    primary: !!c.primary,
+    sharedBy: null,
   }));
-  const allowedCals = await allowedCalendarIds(env, user);
-  if (allowedCals) list = list.filter((c) => allowedCals.has(c.id));
+
+  // Merge in calendars shared with the user.
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT csr.google_calendar_id, csr.calendar_name, csr.color, csr.grantor_user_id, u.name AS grantor_name
+       FROM calendar_sharing_rules csr
+       LEFT JOIN users u ON csr.grantor_user_id = u.id
+       WHERE csr.grantee_user_id = ?`
+    ).bind(user.id).all();
+    for (const r of results || []) {
+      if (list.find((c) => c.id === r.google_calendar_id)) continue;
+      list.push({
+        id: r.google_calendar_id,
+        summary: r.calendar_name,
+        backgroundColor: r.color || '#6366f1',
+        primary: false,
+        sharedBy: r.grantor_name || null,
+      });
+    }
+  } catch { /* table missing */ }
+
   return json(list);
 }
 
@@ -1739,7 +1959,10 @@ async function handleDriveFiles(request, env, user) {
   if (!parent && !search) {
     try {
       const shared = await env.DB.prepare(
-        'SELECT google_file_id, file_name, mime_type FROM drive_sharing_rules WHERE grantee_user_id = ?'
+        `SELECT dsr.google_file_id, dsr.file_name, dsr.mime_type, u.name AS grantor_name
+         FROM drive_sharing_rules dsr
+         LEFT JOIN users u ON dsr.grantor_user_id = u.id
+         WHERE dsr.grantee_user_id = ?`
       ).bind(user.id).all();
       for (const r of shared.results || []) {
         if (!files.find((f) => f.googleFileId === r.google_file_id)) {
@@ -1754,7 +1977,8 @@ async function handleDriveFiles(request, env, user) {
             size: null,
             parents: [],
             isFavorite: favSet.has(r.google_file_id),
-            shared: true
+            shared: true,
+            sharedBy: r.grantor_name || null,
           });
         }
       }
@@ -2005,10 +2229,10 @@ function syncTaskToCalendar(env, ctx, task) {
   const job = (async () => {
     try {
       if (!task.assigned_to) return;
-      // Calendar belongs to Lauro — write the event using the owner's token
-      // even when the task is assigned to Alice. (Alice has no calendar.)
-      const { ownerId } = await getRoleUsers(env);
-      const userId = ownerId;
+      // v1.9.8: cada usuário tem o próprio Google Calendar. O evento da tarefa
+      // é gravado no calendário do USUÁRIO ATRIBUÍDO (não mais sempre no
+      // calendário do owner).
+      const userId = task.assigned_to;
       if (!userId) return;
       const cal = 'primary';
       const base = `https://www.googleapis.com/calendar/v3/calendars/${cal}/events`;

@@ -241,19 +241,43 @@ export default function DrivePage() {
             <p className="py-8 text-center text-sm text-muted">Carregando...</p>
           ) : driveFiles.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted">Nenhum item.</p>
-          ) : viewMode === 'grid' ? (
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
-              {driveFiles.map((f) => (
-                <FileCard key={f.googleFileId} file={f} onOpen={enterFolder} onToggleFav={toggleFavorite} />
-              ))}
-            </div>
-          ) : (
-            <div className="divide-y divide-line rounded-xl border border-line bg-surface">
-              {driveFiles.map((f) => (
-                <FileRow key={f.googleFileId} file={f} onOpen={enterFolder} onToggleFav={toggleFavorite} />
-              ))}
-            </div>
-          )}
+          ) : (() => {
+            const atRoot = breadcrumb.length === 1 && !driveSearch;
+            const own = atRoot ? driveFiles.filter((f) => !f.shared) : driveFiles;
+            const shared = atRoot ? driveFiles.filter((f) => f.shared) : [];
+            const renderGroup = (list) =>
+              viewMode === 'grid' ? (
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+                  {list.map((f) => (
+                    <FileCard key={f.googleFileId} file={f} onOpen={enterFolder} onToggleFav={toggleFavorite} />
+                  ))}
+                </div>
+              ) : (
+                <div className="divide-y divide-line rounded-xl border border-line bg-surface">
+                  {list.map((f) => (
+                    <FileRow key={f.googleFileId} file={f} onOpen={enterFolder} onToggleFav={toggleFavorite} />
+                  ))}
+                </div>
+              );
+            return (
+              <div className="space-y-4">
+                {atRoot && (
+                  <h3 className="text-xs font-bold uppercase tracking-wide text-ink2">Meu Drive</h3>
+                )}
+                {own.length > 0 ? renderGroup(own) : atRoot && (
+                  <p className="text-xs text-muted">Nenhum item no seu Drive.</p>
+                )}
+                {atRoot && shared.length > 0 && (
+                  <>
+                    <h3 className="mt-4 text-xs font-bold uppercase tracking-wide text-ink2">
+                      Compartilhado comigo
+                    </h3>
+                    {renderGroup(shared)}
+                  </>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>
@@ -286,6 +310,11 @@ function FileCard({ file, onOpen, onToggleFav }) {
       >
         {file.name}
       </button>
+      {file.shared && file.sharedBy && (
+        <span className="text-[10px] font-medium" style={{ color: '#6366F1' }}>
+          Compartilhado por {file.sharedBy}
+        </span>
+      )}
       <span className="mt-0.5 text-[10px] text-muted">{formatDate(file.modifiedTime)}</span>
       {!isFolder && file.webViewLink && (
         <button
@@ -310,6 +339,11 @@ function FileRow({ file, onOpen, onToggleFav }) {
         className="min-w-0 flex-1 truncate text-left text-sm text-ink hover:text-accent"
       >
         {file.name}
+        {file.shared && file.sharedBy && (
+          <span className="ml-2 text-[10px] font-medium" style={{ color: '#6366F1' }}>
+            · Compartilhado por {file.sharedBy}
+          </span>
+        )}
       </button>
       <span className="shrink-0 text-[11px] text-muted">{formatDate(file.modifiedTime)}</span>
       <button onClick={() => onToggleFav(file, !file.isFavorite)} className="shrink-0" title="Favoritar">

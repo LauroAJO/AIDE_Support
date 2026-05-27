@@ -58,6 +58,11 @@ export const useStore = create((set) => ({
   treeCollapse: {},
   taskTreeFilter: { areaId: null, projectId: null, frontId: null },
 
+  // v1.9.8 — Disponibilidade recorrente + horário planejado por semana
+  weeklyAvailability: [],   // [{ id, day_of_week, start_time, end_time, active }]
+  dailySchedule: [],        // [{ id, work_date, start_time, end_time, notes }]
+  allUsersSchedule: {},     // { [userId]: { name, role, scheduled, recurring } }
+
   setUser: (user) => set({ user }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
@@ -109,6 +114,10 @@ export const useStore = create((set) => ({
     set((state) => ({ taskTreeFilter: { ...state.taskTreeFilter, ...patch } })),
   clearTaskTreeFilter: () =>
     set({ taskTreeFilter: { areaId: null, projectId: null, frontId: null } }),
+
+  setWeeklyAvailability: (weeklyAvailability) => set({ weeklyAvailability }),
+  setDailySchedule: (dailySchedule) => set({ dailySchedule }),
+  setAllUsersSchedule: (allUsersSchedule) => set({ allUsersSchedule }),
 }));
 
 // Derived: tasks filtered by the current taskFilter.

@@ -6,6 +6,7 @@ import { apiFetch } from '../lib/api';
 import { clearToken } from '../lib/auth';
 import { registerPush } from '../lib/push';
 import { mondayOf, weekDays, addDaysISO, formatDateBR, weekdayLabel, toISODate } from '../lib/week';
+import { detectBrowserTZ, COMMON_TIMEZONES } from '../lib/tz';
 import Avatar from './shared/Avatar';
 
 const ROLE_LABELS = { owner: 'Proprietário', assistant: 'Assistente' };
@@ -217,6 +218,38 @@ export default function ProfilePage() {
     }
   };
 
+  // Fuso horário — auto-detecta na primeira carga se ainda não configurado.
+  const browserTZ = useMemo(() => detectBrowserTZ(), []);
+  const [savingTZ, setSavingTZ] = useState(false);
+  const [tzMsg, setTzMsg] = useState(null);
+  useEffect(() => {
+    if (!user) return;
+    if (!user.timezone && browserTZ) {
+      // Salva silenciosamente o fuso detectado para que o calendário já funcione.
+      apiFetch('/api/profile', { method: 'PUT', body: JSON.stringify({ timezone: browserTZ }) })
+        .then((u) => setUser(u))
+        .catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  const saveTimezone = async (tz) => {
+    setSavingTZ(true);
+    setTzMsg(null);
+    try {
+      const updated = await apiFetch('/api/profile', {
+        method: 'PUT',
+        body: JSON.stringify({ timezone: tz || null }),
+      });
+      setUser(updated);
+      setTzMsg({ kind: 'ok', text: 'Fuso horário salvo.' });
+    } catch (e) {
+      setTzMsg({ kind: 'err', text: `Falha: ${String((e && e.message) || e).slice(0, 200)}` });
+    } finally {
+      setSavingTZ(false);
+    }
+  };
+
   const enableNotifications = async () => {
     await registerPush();
     setPermission(typeof Notification !== 'undefined' ? Notification.permission : 'default');
@@ -267,6 +300,42 @@ export default function ProfilePage() {
           >
             {roleLabel}
           </span>
+        </div>
+      </section>
+
+      {/* Fuso horário */}
+      <section className="rounded-xl border border-line bg-surface p-5">
+        <h2 className="mb-1 text-base font-bold text-ink">Fuso horário</h2>
+        <p className="mb-3 text-xs text-muted">
+          Todos os horários da Disponibilidade e Planejamento são entendidos como
+          locais do seu fuso. O Calendário converte automaticamente para quem
+          estiver visualizando (ex.: Alice 09:00 BR aparece para Lauro em horário NL).
+        </p>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="block min-w-[240px]">
+            <span className="mb-1 block text-xs font-medium text-ink2">Fuso (IANA)</span>
+            <select
+              value={user.timezone || ''}
+              onChange={(e) => saveTimezone(e.target.value)}
+              disabled={savingTZ}
+              className="input"
+            >
+              <option value="">— (detectar automaticamente)</option>
+              {COMMON_TIMEZONES.map((tz) => (
+                <option key={tz} value={tz}>{tz}</option>
+              ))}
+            </select>
+          </label>
+          <div className="flex flex-col gap-1 text-[11px] text-muted">
+            <span>
+              Browser detectou: <span className="font-medium text-ink2">{browserTZ || '—'}</span>
+            </span>
+            {tzMsg && (
+              <span className={tzMsg.kind === 'ok' ? 'text-emerald-600' : 'text-danger'}>
+                {tzMsg.text}
+              </span>
+            )}
+          </div>
         </div>
       </section>
 

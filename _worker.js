@@ -418,7 +418,8 @@ function publicUser(user) {
     email: user.email,
     name: user.name,
     avatar: user.avatar,
-    role: user.role
+    role: user.role,
+    timezone: user.timezone || null,
   };
 }
 
@@ -510,10 +511,21 @@ async function readJson(request) {
 }
 
 async function handleUsers(env) {
-  const { results } = await env.DB.prepare(
-    'SELECT id, email, name, avatar, role, last_seen_at FROM users ORDER BY role DESC, name'
-  ).all();
-  return json(results || []);
+  // timezone via SELECT separado: a coluna pode não existir em ambientes onde
+  // migration 0021 ainda não rodou.
+  let cols = 'id, email, name, avatar, role, last_seen_at';
+  try {
+    cols += ', timezone';
+    const { results } = await env.DB.prepare(
+      `SELECT ${cols} FROM users ORDER BY role DESC, name`
+    ).all();
+    return json(results || []);
+  } catch {
+    const { results } = await env.DB.prepare(
+      'SELECT id, email, name, avatar, role, last_seen_at FROM users ORDER BY role DESC, name'
+    ).all();
+    return json(results || []);
+  }
 }
 
 async function handleProfileUpdate(request, env, user) {
@@ -521,6 +533,12 @@ async function handleProfileUpdate(request, env, user) {
   const body = (await readJson(request)) || {};
   const name = body.name !== undefined ? String(body.name).trim() : user.name;
   await env.DB.prepare('UPDATE users SET name = ? WHERE id = ?').bind(name || null, user.id).run();
+  if (body.timezone !== undefined) {
+    const tz = body.timezone ? String(body.timezone).trim() : null;
+    try {
+      await env.DB.prepare('UPDATE users SET timezone = ? WHERE id = ?').bind(tz, user.id).run();
+    } catch { /* coluna ausente — migration 0021 não aplicada */ }
+  }
   const updated = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first();
   return json(publicUser(updated));
 }
@@ -1360,11 +1378,16 @@ async function handleAvailabilityAll(request, env, user) {
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
   const weekStart = new URL(request.url).searchParams.get('week_start');
   if (!weekStart) return json({ error: 'week_start obrigatório (YYYY-MM-DD)' }, 400);
-  const { results: users } = await env.DB.prepare(
-    'SELECT id, name, role FROM users'
-  ).all();
+  let users = [];
+  try {
+    const r = await env.DB.prepare('SELECT id, name, role, timezone FROM users').all();
+    users = r.results || [];
+  } catch {
+    const r = await env.DB.prepare('SELECT id, name, role FROM users').all();
+    users = r.results || [];
+  }
   const out = {};
-  for (const u of users || []) {
+  for (const u of users) {
     const [scheduled, recurring] = await Promise.all([
       fetchScheduleForUser(env, u.id, weekStart),
       fetchWeeklyForUser(env, u.id),
@@ -1372,6 +1395,7 @@ async function handleAvailabilityAll(request, env, user) {
     out[u.id] = {
       name: u.name,
       role: u.role,
+      timezone: u.timezone || null,
       scheduled,
       recurring,
       available: recurring.filter((s) => s.slot_type === 'available'),

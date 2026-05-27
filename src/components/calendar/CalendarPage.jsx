@@ -16,12 +16,103 @@ import {
 } from '../../lib/calendar';
 import ScopeBanner, { isAuthScopeError } from '../shared/ScopeBanner';
 import EventEditor from './EventEditor';
+import { fromZonedTime, toZonedParts, detectBrowserTZ } from '../../lib/tz';
 
-// Converte "HH:MM" para hora decimal (9.5 = 09:30)
-function hhmmToHours(s) {
-  if (!s) return 0;
-  const [h, m] = s.split(':').map(Number);
-  return (h || 0) + (m || 0) / 60;
+function pad(n) { return String(n).padStart(2, '0'); }
+
+// "Europe/Amsterdam" → "Amsterdam" / "America/Sao_Paulo" → "São Paulo"
+function shortTZ(tz) {
+  if (!tz) return '';
+  const last = tz.split('/').pop() || tz;
+  return last.replace(/_/g, ' ');
+}
+function isoFromYMD(y, m, d) { return `${y}-${pad(m + 1)}-${pad(d)}`; }
+function isoShifted(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + days);
+  return isoFromYMD(dt.getFullYear(), dt.getMonth(), dt.getDate());
+}
+function parseHHMM(s) {
+  const [h, m] = (s || '00:00').split(':').map(Number);
+  return [h || 0, m || 0];
+}
+
+// Para cada usuário, expande slots (recurring available + planned + scheduled
+// date overrides) em instâncias com data/hora-decimal no fuso do VISUALIZADOR.
+// Retorna { [viewerDateISO]: [{ kind, role, name, startH, endH, notes, sourceTime, sourceTZ }] }.
+// `viewerDates` é a lista de datas ISO que estão visíveis (semana ou mês completo).
+function expandSlotsForUser(u, viewerTZ, viewerDates) {
+  const out = {};
+  for (const d of viewerDates) out[d] = [];
+  if (!u || viewerDates.length === 0) return out;
+  const sourceTZ = u.timezone || viewerTZ;
+  const sameTZ = sourceTZ === viewerTZ || !sourceTZ || !viewerTZ;
+  const role = u.role || 'default';
+  const name = (u.name || '').split(' ')[0];
+
+  // Janela de datas source a explorar: viewer ±1 dia (cobre shifts de até 24h).
+  const earliest = isoShifted(viewerDates[0], -1);
+  const latest = isoShifted(viewerDates[viewerDates.length - 1], +1);
+
+  // Itera todas as datas-source no intervalo
+  const dates = [];
+  for (let iso = earliest; iso <= latest; iso = isoShifted(iso, 1)) dates.push(iso);
+
+  const placeInstance = (sourceDateISO, startStr, endStr, kind, notes) => {
+    const [sy, sm, sd] = sourceDateISO.split('-').map(Number);
+    const [sh, smin] = parseHHMM(startStr);
+    const [eh, emin] = parseHHMM(endStr);
+    if (sameTZ) {
+      // Caminho rápido: source = viewer; mantém data e hora.
+      if (!(sourceDateISO in out)) return;
+      const startH = sh + smin / 60;
+      const endH = (eh < sh ? 24 : eh) + emin / 60;
+      out[sourceDateISO].push({
+        kind, role, name,
+        startH, endH,
+        notes,
+        sourceTime: `${pad(sh)}:${pad(smin)}–${pad(eh)}:${pad(emin)}`,
+        sourceTZ: null,
+      });
+      return;
+    }
+    const startUTC = fromZonedTime(sy, sm - 1, sd, sh, smin, sourceTZ);
+    const endUTC = fromZonedTime(sy, sm - 1, sd, eh, emin, sourceTZ);
+    const sParts = toZonedParts(startUTC, viewerTZ);
+    const eParts = toZonedParts(endUTC, viewerTZ);
+    if (!(sParts.dateISO in out)) return;
+    // Se a hora final cair em outro dia (para o viewer), trunca em 24:00 para
+    // não vazar o bloco. Caso comum em conversões BR↔NL nas pontas do dia.
+    const endHClamped = sParts.dateISO === eParts.dateISO ? eParts.hourDecimal : 24;
+    out[sParts.dateISO].push({
+      kind, role, name,
+      startH: sParts.hourDecimal,
+      endH: Math.max(sParts.hourDecimal + 0.25, endHClamped),
+      notes,
+      sourceTime: `${pad(sh)}:${pad(smin)}–${pad(eh)}:${pad(emin)}`,
+      sourceTZ,
+    });
+  };
+
+  for (const sourceDateISO of dates) {
+    const [y, m, d] = sourceDateISO.split('-').map(Number);
+    const dow = new Date(y, m - 1, d).getDay();
+    const availList = u.available || (u.recurring || []).filter((s) => (s.slot_type || 'available') === 'available');
+    const plannedList = u.planned || (u.recurring || []).filter((s) => s.slot_type === 'planned');
+    for (const s of availList) {
+      if (s.day_of_week !== dow || s.active === false) continue;
+      placeInstance(sourceDateISO, s.start_time, s.end_time, 'avail');
+    }
+    for (const s of plannedList) {
+      if (s.day_of_week !== dow || s.active === false) continue;
+      placeInstance(sourceDateISO, s.start_time, s.end_time, 'planned');
+    }
+    for (const s of u.scheduled || []) {
+      if (s.work_date !== sourceDateISO) continue;
+      placeInstance(sourceDateISO, s.start_time, s.end_time, 'planned', s.notes);
+    }
+  }
+  return out;
 }
 
 const CAL_STORAGE_KEY = 'aide_selected_calendars';
@@ -94,6 +185,7 @@ function AideBadge() {
 const HOUR_PX = 44;
 
 export default function CalendarPage() {
+  const user = useStore((s) => s.user);
   const calendarEvents = useStore((s) => s.calendarEvents);
   const setCalendarEvents = useStore((s) => s.setCalendarEvents);
   const calendarView = useStore((s) => s.calendarView);
@@ -102,6 +194,9 @@ export default function CalendarPage() {
   const setCalendarDate = useStore((s) => s.setCalendarDate);
   const allUsersSchedule = useStore((s) => s.allUsersSchedule);
   const setAllUsersSchedule = useStore((s) => s.setAllUsersSchedule);
+
+  // Fuso do visualizador: usa o configurado no perfil, ou o do browser.
+  const viewerTZ = useMemo(() => user?.timezone || detectBrowserTZ() || null, [user?.timezone]);
 
   const date = useMemo(() => new Date(calendarDate), [calendarDate]);
   const [calendars, setCalendars] = useState([]);
@@ -150,6 +245,27 @@ export default function CalendarPage() {
     end.setDate(end.getDate() + 1);
     return { start: start.toISOString(), end: end.toISOString() };
   }, [date, calendarView]);
+
+  // Datas visíveis (ISOs em viewer-local) — usadas pelas conversões de fuso
+  const visibleDates = useMemo(() => {
+    const cells = calendarView === 'month' ? monthGrid(date) : weekGrid(date);
+    return cells.map(toISODate);
+  }, [date, calendarView]);
+
+  // Agrega blocos de TODOS os usuários, já convertidos para o fuso do viewer.
+  const slotsByDate = useMemo(() => {
+    const merged = {};
+    for (const d of visibleDates) merged[d] = [];
+    for (const uid in allUsersSchedule || {}) {
+      const u = allUsersSchedule[uid];
+      if (!u) continue;
+      const perUser = expandSlotsForUser(u, viewerTZ, visibleDates);
+      for (const d in perUser) {
+        if (d in merged) merged[d].push(...perUser[d]);
+      }
+    }
+    return merged;
+  }, [allUsersSchedule, viewerTZ, visibleDates]);
 
   const loadEvents = async () => {
     setLoading(true);
@@ -354,6 +470,11 @@ export default function CalendarPage() {
           <span className="text-muted">
             (ponto vazado = disponível · preenchido = planejado)
           </span>
+          {viewerTZ && (
+            <span className="ml-auto text-muted">
+              Horários em <span className="font-medium text-ink2">{shortTZ(viewerTZ)}</span>
+            </span>
+          )}
         </div>
       )}
 
@@ -365,7 +486,7 @@ export default function CalendarPage() {
               grouped={grouped}
               selectedDay={selectedDay}
               onSelectDay={setSelectedDay}
-              allUsersSchedule={allUsersSchedule}
+              slotsByDate={slotsByDate}
               toggles={toggles}
             />
           ) : (
@@ -373,7 +494,7 @@ export default function CalendarPage() {
               date={date}
               events={calendarEvents}
               onSelectEvent={(ev) => setEditor(ev)}
-              allUsersSchedule={allUsersSchedule}
+              slotsByDate={slotsByDate}
               toggles={toggles}
             />
           )}
@@ -454,32 +575,20 @@ function TogglePill({ on, onClick, label, color }) {
   );
 }
 
-// Indicadores por dia (mês). Para cada usuário com slot naquele dia, retorna
-// uma "marca" { role, kinds: Set<'avail'|'planned'> } que vira um ponto colorido
-// na cor do usuário (avail = vazado, planned = preenchido).
-function scheduleIndicators(allUsersSchedule, dateISO) {
-  const marks = []; // [{ role, name, hasAvail, hasPlanned }]
-  let anyAvail = false;
-  let anyPlanned = false;
-  const dow = new Date(`${dateISO}T00:00:00`).getDay();
-  for (const userId in allUsersSchedule || {}) {
-    const u = allUsersSchedule[userId];
-    if (!u) continue;
-    const availList = u.available || (u.recurring || []).filter((s) => (s.slot_type || 'available') === 'available');
-    const plannedList = u.planned || (u.recurring || []).filter((s) => s.slot_type === 'planned');
-    const hasAvail = availList.some((s) => s.day_of_week === dow && s.active !== false);
-    let hasPlanned = plannedList.some((s) => s.day_of_week === dow && s.active !== false);
-    if ((u.scheduled || []).some((s) => s.work_date === dateISO)) hasPlanned = true;
-    if (hasAvail || hasPlanned) {
-      marks.push({ role: u.role || 'default', name: u.name || '', hasAvail, hasPlanned });
-    }
-    anyAvail = anyAvail || hasAvail;
-    anyPlanned = anyPlanned || hasPlanned;
+// Indicadores por dia (mês). Agrupa por role+kind a partir das INSTÂNCIAS já
+// convertidas para o fuso do visualizador.
+function indicatorsFromInstances(instances) {
+  const byRole = new Map(); // role → { name, hasAvail, hasPlanned }
+  for (const it of instances || []) {
+    let m = byRole.get(it.role);
+    if (!m) { m = { role: it.role, name: it.name, hasAvail: false, hasPlanned: false }; byRole.set(it.role, m); }
+    if (it.kind === 'avail') m.hasAvail = true;
+    else m.hasPlanned = true;
   }
-  return { marks, hasAvail: anyAvail, hasPlanned: anyPlanned };
+  return [...byRole.values()];
 }
 
-function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule, toggles }) {
+function MonthView({ date, grouped, selectedDay, onSelectDay, slotsByDate, toggles }) {
   const cells = monthGrid(date);
   const today = new Date();
   return (
@@ -498,12 +607,12 @@ function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule, 
           const inMonth = cell.getMonth() === date.getMonth();
           const isToday = isSameDate(cell, today);
           const isSelected = key === selectedDay;
-          const ind = scheduleIndicators(allUsersSchedule, key);
+          const marks = indicatorsFromInstances((slotsByDate || {})[key] || []);
           const showAvailLayer = toggles?.available !== false;
           const showPlannedLayer = toggles?.planned !== false;
           const showEvents = toggles?.events !== false;
           // Fundo do dia: só pinta quando há ALGO visível para esse dia.
-          const anyVisible = ind.marks.some((m) =>
+          const anyVisible = marks.some((m) =>
             (showAvailLayer && m.hasAvail) || (showPlannedLayer && m.hasPlanned)
           );
           const bg = isToday ? '#EEF2FF' : anyVisible ? '#FAF7F2' : undefined;
@@ -521,7 +630,7 @@ function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule, 
                   {cell.getDate()}
                 </span>
                 <span className="flex items-center gap-0.5">
-                  {ind.marks.map((m, mi) => {
+                  {marks.map((m, mi) => {
                     const pal = paletteForUser(m.role);
                     // Ponto preenchido = planejado (ou seja: vai trabalhar);
                     // Ponto vazado = só disponibilidade configurada.
@@ -563,7 +672,7 @@ function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule, 
   );
 }
 
-function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
+function WeekView({ date, events, onSelectEvent, slotsByDate, toggles }) {
   const days = weekGrid(date);
   const now = new Date();
   const hours = Array.from({ length: 24 }, (_, h) => h);
@@ -571,48 +680,8 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
   const showPlanned = toggles?.planned !== false;
   const showEvents = toggles?.events !== false;
 
-  // Pré-coleta blocos por dia. Cada bloco carrega role para tintar por usuário.
-  const blocksPerDay = days.map((d) => {
-    const dayISO = toISODate(d);
-    const dow = d.getDay();
-    const list = [];
-    for (const uid in allUsersSchedule || {}) {
-      const u = allUsersSchedule[uid];
-      if (!u) continue;
-      const firstName = (u.name || '').split(' ')[0] || '';
-      const role = u.role || 'default';
-      const availList = u.available || (u.recurring || []).filter((s) => (s.slot_type || 'available') === 'available');
-      const plannedList = u.planned || (u.recurring || []).filter((s) => s.slot_type === 'planned');
-      for (const s of availList) {
-        if (s.day_of_week !== dow || s.active === false) continue;
-        list.push({
-          kind: 'avail', role, name: firstName,
-          startH: hhmmToHours(s.start_time),
-          endH: hhmmToHours(s.end_time),
-        });
-      }
-      for (const s of plannedList) {
-        if (s.day_of_week !== dow || s.active === false) continue;
-        list.push({
-          kind: 'planned', role, name: firstName,
-          startH: hhmmToHours(s.start_time),
-          endH: hhmmToHours(s.end_time),
-        });
-      }
-      for (const s of u.scheduled || []) {
-        if (s.work_date !== dayISO) continue;
-        list.push({
-          kind: 'planned', role, name: firstName,
-          startH: hhmmToHours(s.start_time),
-          endH: hhmmToHours(s.end_time),
-          notes: s.notes,
-        });
-      }
-    }
-    // Quando há dois usuários com blocos no mesmo dia/mesma camada, divide a
-    // largura em colunas para que não se sobreponham.
-    return list;
-  });
+  // slotsByDate vem do parent, já convertido para o fuso do viewer.
+  const blocksPerDay = days.map((d) => slotsByDate?.[toISODate(d)] || []);
 
   return (
     <div className="overflow-hidden rounded-xl border border-line bg-surface">
@@ -665,9 +734,13 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
                     const colCount = splitting ? roles.length : 1;
                     const widthPct = 100 / colCount;
                     const leftPct = colIdx * widthPct;
+                    const tzHint = b.sourceTZ
+                      ? ` · ${b.sourceTime} ${shortTZ(b.sourceTZ)}`
+                      : '';
                     return (
                       <div
                         key={`${kind}-${di}-${i}`}
+                        title={`${kind === 'avail' ? 'Disponível' : 'Planejado'} — ${b.name}${tzHint}`}
                         className="pointer-events-none absolute overflow-hidden px-1 py-0.5 text-[9px]"
                         style={{
                           top: b.startH * HOUR_PX,
@@ -683,6 +756,11 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
                         <div className="truncate">
                           {kind === 'avail' ? 'Disp.' : 'Plan.'} — {b.name}
                         </div>
+                        {b.sourceTZ && (
+                          <div className="truncate opacity-70">
+                            {b.sourceTime} {shortTZ(b.sourceTZ)}
+                          </div>
+                        )}
                         {b.notes && <div className="truncate opacity-80">{b.notes}</div>}
                       </div>
                     );

@@ -27,6 +27,43 @@ function hhmmToHours(s) {
 const CAL_STORAGE_KEY = 'aide_selected_calendars';
 const TOGGLES_STORAGE_KEY = 'aide-calendar-toggles';
 
+// Paleta por usuário: cor base é por papel (owner=azul, assistant=rosa).
+// `avail` = tom claro + borda média; `planned` = tom mais saturado + borda escura.
+// Fallback (papel desconhecido): cinza-azulado.
+const USER_PALETTES = {
+  owner: {
+    base: '#3B82F6',
+    availFill: 'rgba(59,130,246,0.10)',
+    availBorder: '#3B82F6',
+    availText: '#1E40AF',
+    plannedFill: 'rgba(59,130,246,0.22)',
+    plannedBorder: '#1D4ED8',
+    plannedText: '#1E3A8A',
+  },
+  assistant: {
+    base: '#EC4899',
+    availFill: 'rgba(236,72,153,0.10)',
+    availBorder: '#EC4899',
+    availText: '#9D174D',
+    plannedFill: 'rgba(236,72,153,0.22)',
+    plannedBorder: '#BE185D',
+    plannedText: '#831843',
+  },
+  default: {
+    base: '#64748B',
+    availFill: 'rgba(100,116,139,0.10)',
+    availBorder: '#64748B',
+    availText: '#334155',
+    plannedFill: 'rgba(100,116,139,0.22)',
+    plannedBorder: '#334155',
+    plannedText: '#0F172A',
+  },
+};
+
+function paletteForUser(role) {
+  return USER_PALETTES[role] || USER_PALETTES.default;
+}
+
 function loadToggles() {
   try {
     const raw = JSON.parse(localStorage.getItem(TOGGLES_STORAGE_KEY) || '{}');
@@ -269,27 +306,56 @@ export default function CalendarPage() {
         </div>
       )}
 
-      {/* Camadas: legenda + toggle ao mesmo tempo */}
+      {/* Camadas (toggle de visibilidade) */}
       <div className="flex flex-wrap items-center gap-1.5">
         <TogglePill
           on={toggles.available}
           onClick={() => updateToggle('available')}
           label="Disponibilidade"
-          color="#22C55E"
+          color="#64748B"
         />
         <TogglePill
           on={toggles.planned}
           onClick={() => updateToggle('planned')}
           label="Planejado"
-          color="#6366F1"
+          color="#334155"
         />
         <TogglePill
           on={toggles.events}
           onClick={() => updateToggle('events')}
           label="Eventos"
-          color="#3B82F6"
+          color="#6366F1"
         />
       </div>
+
+      {/* Legenda de cores por usuário */}
+      {Object.keys(allUsersSchedule || {}).length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 text-[11px] text-ink2">
+          {Object.values(allUsersSchedule).map((u, i) => {
+            const pal = paletteForUser(u.role || 'default');
+            return (
+              <span key={i} className="flex items-center gap-1.5">
+                <span className="inline-flex items-center gap-1">
+                  <span
+                    className="inline-block h-2 w-2 rounded-full"
+                    style={{ border: `1.5px solid ${pal.availBorder}`, background: 'transparent' }}
+                    title="Disponível"
+                  />
+                  <span
+                    className="inline-block h-2 w-2 rounded-full"
+                    style={{ background: pal.plannedBorder }}
+                    title="Planejado"
+                  />
+                </span>
+                <span style={{ color: pal.plannedBorder }}>{(u.name || '').split(' ')[0]}</span>
+              </span>
+            );
+          })}
+          <span className="text-muted">
+            (ponto vazado = disponível · preenchido = planejado)
+          </span>
+        </div>
+      )}
 
       <div className="flex flex-col gap-4 lg:flex-row">
         <div className="min-w-0 flex-1">
@@ -388,22 +454,29 @@ function TogglePill({ on, onClick, label, color }) {
   );
 }
 
-// Indicadores por dia (mês). Recurring 'available' (slot_type=available) → ponto verde;
-// scheduled (daily overrides) OU recurring 'planned' → ponto indigo.
+// Indicadores por dia (mês). Para cada usuário com slot naquele dia, retorna
+// uma "marca" { role, kinds: Set<'avail'|'planned'> } que vira um ponto colorido
+// na cor do usuário (avail = vazado, planned = preenchido).
 function scheduleIndicators(allUsersSchedule, dateISO) {
-  let hasAvail = false;
-  let hasPlanned = false;
+  const marks = []; // [{ role, name, hasAvail, hasPlanned }]
+  let anyAvail = false;
+  let anyPlanned = false;
   const dow = new Date(`${dateISO}T00:00:00`).getDay();
   for (const userId in allUsersSchedule || {}) {
     const u = allUsersSchedule[userId];
     if (!u) continue;
     const availList = u.available || (u.recurring || []).filter((s) => (s.slot_type || 'available') === 'available');
     const plannedList = u.planned || (u.recurring || []).filter((s) => s.slot_type === 'planned');
-    if (availList.some((s) => s.day_of_week === dow && s.active !== false)) hasAvail = true;
-    if (plannedList.some((s) => s.day_of_week === dow && s.active !== false)) hasPlanned = true;
+    const hasAvail = availList.some((s) => s.day_of_week === dow && s.active !== false);
+    let hasPlanned = plannedList.some((s) => s.day_of_week === dow && s.active !== false);
     if ((u.scheduled || []).some((s) => s.work_date === dateISO)) hasPlanned = true;
+    if (hasAvail || hasPlanned) {
+      marks.push({ role: u.role || 'default', name: u.name || '', hasAvail, hasPlanned });
+    }
+    anyAvail = anyAvail || hasAvail;
+    anyPlanned = anyPlanned || hasPlanned;
   }
-  return { hasAvail, hasPlanned };
+  return { marks, hasAvail: anyAvail, hasPlanned: anyPlanned };
 }
 
 function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule, toggles }) {
@@ -426,12 +499,14 @@ function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule, 
           const isToday = isSameDate(cell, today);
           const isSelected = key === selectedDay;
           const ind = scheduleIndicators(allUsersSchedule, key);
-          const showAvail = toggles?.available !== false && ind.hasAvail;
-          const showPlanned = toggles?.planned !== false && ind.hasPlanned;
+          const showAvailLayer = toggles?.available !== false;
+          const showPlannedLayer = toggles?.planned !== false;
           const showEvents = toggles?.events !== false;
-          const bg = isToday
-            ? '#EEF2FF'
-            : showPlanned ? '#EEF2FF' : showAvail ? '#F0FDF4' : undefined;
+          // Fundo do dia: só pinta quando há ALGO visível para esse dia.
+          const anyVisible = ind.marks.some((m) =>
+            (showAvailLayer && m.hasAvail) || (showPlannedLayer && m.hasPlanned)
+          );
+          const bg = isToday ? '#EEF2FF' : anyVisible ? '#FAF7F2' : undefined;
           return (
             <button
               key={i}
@@ -446,8 +521,26 @@ function MonthView({ date, grouped, selectedDay, onSelectDay, allUsersSchedule, 
                   {cell.getDate()}
                 </span>
                 <span className="flex items-center gap-0.5">
-                  {showAvail && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: '#22C55E' }} title="Disponibilidade" />}
-                  {showPlanned && <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: '#6366F1' }} title="Horário planejado" />}
+                  {ind.marks.map((m, mi) => {
+                    const pal = paletteForUser(m.role);
+                    // Ponto preenchido = planejado (ou seja: vai trabalhar);
+                    // Ponto vazado = só disponibilidade configurada.
+                    const filled = showPlannedLayer && m.hasPlanned;
+                    const outlined = showAvailLayer && m.hasAvail && !filled;
+                    if (!filled && !outlined) return null;
+                    return (
+                      <span
+                        key={mi}
+                        className="inline-block h-2 w-2 rounded-full"
+                        style={
+                          filled
+                            ? { background: pal.plannedBorder, border: `1px solid ${pal.plannedBorder}` }
+                            : { background: 'transparent', border: `1.5px solid ${pal.availBorder}` }
+                        }
+                        title={`${m.name} — ${filled ? 'Planejado' : 'Disponível'}`}
+                      />
+                    );
+                  })}
                 </span>
               </div>
               <div className="space-y-0.5">
@@ -478,8 +571,7 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
   const showPlanned = toggles?.planned !== false;
   const showEvents = toggles?.events !== false;
 
-  // Pré-coleta blocos por dia: kind = 'avail' (verde, recorrente available)
-  // ou 'planned' (indigo, recorrente planned OU daily override).
+  // Pré-coleta blocos por dia. Cada bloco carrega role para tintar por usuário.
   const blocksPerDay = days.map((d) => {
     const dayISO = toISODate(d);
     const dow = d.getDay();
@@ -488,13 +580,13 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
       const u = allUsersSchedule[uid];
       if (!u) continue;
       const firstName = (u.name || '').split(' ')[0] || '';
+      const role = u.role || 'default';
       const availList = u.available || (u.recurring || []).filter((s) => (s.slot_type || 'available') === 'available');
       const plannedList = u.planned || (u.recurring || []).filter((s) => s.slot_type === 'planned');
       for (const s of availList) {
         if (s.day_of_week !== dow || s.active === false) continue;
         list.push({
-          kind: 'avail',
-          name: firstName,
+          kind: 'avail', role, name: firstName,
           startH: hhmmToHours(s.start_time),
           endH: hhmmToHours(s.end_time),
         });
@@ -502,8 +594,7 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
       for (const s of plannedList) {
         if (s.day_of_week !== dow || s.active === false) continue;
         list.push({
-          kind: 'planned',
-          name: firstName,
+          kind: 'planned', role, name: firstName,
           startH: hhmmToHours(s.start_time),
           endH: hhmmToHours(s.end_time),
         });
@@ -511,14 +602,15 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
       for (const s of u.scheduled || []) {
         if (s.work_date !== dayISO) continue;
         list.push({
-          kind: 'planned',
-          name: firstName,
+          kind: 'planned', role, name: firstName,
           startH: hhmmToHours(s.start_time),
           endH: hhmmToHours(s.end_time),
           notes: s.notes,
         });
       }
     }
+    // Quando há dois usuários com blocos no mesmo dia/mesma camada, divide a
+    // largura em colunas para que não se sobreponham.
     return list;
   });
 
@@ -554,39 +646,48 @@ function WeekView({ date, events, onSelectEvent, allUsersSchedule, toggles }) {
                 {hours.map((h) => (
                   <div key={h} className="border-b border-line" style={{ height: HOUR_PX }} />
                 ))}
-                {/* Camada 1: blocos de disponibilidade (verde, fundo) */}
-                {showAvail && blocks.filter((b) => b.kind === 'avail').map((b, i) => (
-                  <div
-                    key={`av-${di}-${i}`}
-                    className="pointer-events-none absolute left-0 right-0 overflow-hidden px-1 py-0.5 text-[9px]"
-                    style={{
-                      top: b.startH * HOUR_PX,
-                      height: Math.max(12, (b.endH - b.startH) * HOUR_PX),
-                      background: '#F0FDF4',
-                      borderLeft: '3px solid #22C55E',
-                      color: '#166534',
-                    }}
-                  >
-                    Disponível — {b.name}
-                  </div>
-                ))}
-                {/* Camada 2: blocos planejados (indigo claro, meio) */}
-                {showPlanned && blocks.filter((b) => b.kind === 'planned').map((b, i) => (
-                  <div
-                    key={`pl-${di}-${i}`}
-                    className="pointer-events-none absolute left-0 right-0 overflow-hidden px-1 py-0.5 text-[9px]"
-                    style={{
-                      top: b.startH * HOUR_PX,
-                      height: Math.max(12, (b.endH - b.startH) * HOUR_PX),
-                      background: '#EEF2FF',
-                      borderLeft: '3px solid #6366F1',
-                      color: '#3730A3',
-                    }}
-                  >
-                    Planejado — {b.name}
-                    {b.notes && <div className="truncate opacity-80">{b.notes}</div>}
-                  </div>
-                ))}
+                {/* Camadas 1 e 2: blocos de disponibilidade (avail) e planejado.
+                    Cada bloco usa a paleta do PRÓPRIO usuário; quando há blocos
+                    de ambos no mesmo kind no mesmo dia, divide horizontalmente
+                    em duas colunas (Lauro à esquerda, Alice à direita). */}
+                {(['avail', 'planned']).map((kind) => {
+                  if ((kind === 'avail' && !showAvail) || (kind === 'planned' && !showPlanned)) return null;
+                  const sameKind = blocks.filter((b) => b.kind === kind);
+                  if (sameKind.length === 0) return null;
+                  const roles = Array.from(new Set(sameKind.map((b) => b.role)));
+                  const splitting = roles.length > 1; // mais de um usuário → split em colunas
+                  return sameKind.map((b, i) => {
+                    const pal = paletteForUser(b.role);
+                    const fill = kind === 'avail' ? pal.availFill : pal.plannedFill;
+                    const border = kind === 'avail' ? pal.availBorder : pal.plannedBorder;
+                    const text = kind === 'avail' ? pal.availText : pal.plannedText;
+                    const colIdx = splitting ? roles.indexOf(b.role) : 0;
+                    const colCount = splitting ? roles.length : 1;
+                    const widthPct = 100 / colCount;
+                    const leftPct = colIdx * widthPct;
+                    return (
+                      <div
+                        key={`${kind}-${di}-${i}`}
+                        className="pointer-events-none absolute overflow-hidden px-1 py-0.5 text-[9px]"
+                        style={{
+                          top: b.startH * HOUR_PX,
+                          height: Math.max(12, (b.endH - b.startH) * HOUR_PX),
+                          left: `${leftPct}%`,
+                          width: `calc(${widthPct}% - 2px)`,
+                          background: fill,
+                          borderLeft: `${kind === 'planned' ? 4 : 3}px solid ${border}`,
+                          color: text,
+                          fontWeight: kind === 'planned' ? 600 : 500,
+                        }}
+                      >
+                        <div className="truncate">
+                          {kind === 'avail' ? 'Disp.' : 'Plan.'} — {b.name}
+                        </div>
+                        {b.notes && <div className="truncate opacity-80">{b.notes}</div>}
+                      </div>
+                    );
+                  });
+                })}
                 {/* Camada 3: eventos Google (topo, totalmente opacos) */}
                 {showEvents && dayEvents.map((ev) => (
                   <button

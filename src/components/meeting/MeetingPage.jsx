@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Video, Play, Pause, RotateCcw, ArrowRight, Square, Bell } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { canDo } from '../../lib/can';
 import { getTodayStr, scoreColor } from '../../lib/tasks';
 import { formatHMS, formatDuration } from '../../lib/time';
 import Avatar from '../shared/Avatar';
@@ -197,6 +198,7 @@ function AgendaCountdown() {
 
 export default function MeetingPage() {
   const tasks = useStore((s) => s.tasks);
+  const userGranular = useStore((s) => s.userGranular);
   const setTasks = useStore((s) => s.setTasks);
   const setProjects = useStore((s) => s.setProjects);
   const setUsers = useStore((s) => s.setUsers);
@@ -399,7 +401,7 @@ export default function MeetingPage() {
               <p className="mt-2 text-xs text-danger">{error}</p>
             )}
             <div className="mt-4 flex flex-wrap gap-2">
-              {!inMeeting ? (
+              {canDo(userGranular, 'meeting', 'start_stop') && (!inMeeting ? (
                 <button
                   type="button"
                   onClick={startMeeting}
@@ -419,7 +421,7 @@ export default function MeetingPage() {
                 >
                   <Square className="h-4 w-4" /> Encerrar Reunião
                 </button>
-              )}
+              ))}
             </div>
           </div>
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Send, Paperclip } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { canDo } from '../../lib/can';
 import Avatar from '../shared/Avatar';
 import MentionText from '../tasks/MentionText';
 
@@ -34,7 +35,9 @@ function dateLabel(unix) {
 
 export default function ChatPage() {
   const user = useStore((s) => s.user);
+  const userGranular = useStore((s) => s.userGranular);
   const setChatUnread = useStore((s) => s.setChatUnread);
+  const canWrite = canDo(userGranular, 'chat', 'write');
 
   const [messages, setMessages] = useState([]);          // ascending order (oldest first)
   const [users, setUsers] = useState([]);
@@ -300,7 +303,12 @@ export default function ChatPage() {
           </button>
         )}
 
-        {/* Input area */}
+        {/* Input area — hidden when chat.write is denied (read-only view). */}
+        {!canWrite ? (
+          <div className="border-t border-line bg-surface2/40 px-3 py-3 text-center text-xs text-muted">
+            Você só pode ler este canal. Permissão de envio não concedida.
+          </div>
+        ) : (
         <div className="relative border-t border-line bg-surface2/40 px-3 py-2">
           {mentionQuery && mentionCandidates.length > 0 && (
             <div className="absolute bottom-full left-3 right-3 mb-1 max-h-44 overflow-y-auto rounded-lg border border-line bg-surface shadow-soft">
@@ -345,6 +353,7 @@ export default function ChatPage() {
             </button>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

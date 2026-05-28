@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { canDo } from '../../lib/can';
 import LoadingSpinner from '../shared/LoadingSpinner';
 
 const DEFAULT_COLOR = '#6366f1';
@@ -46,6 +47,7 @@ const PRESET_COLORS = [
 
 export default function AreasPage() {
   const areas = useStore((s) => s.areas);
+  const userGranular = useStore((s) => s.userGranular);
   const setAreas = useStore((s) => s.setAreas);
   const projects = useStore((s) => s.projects);
   const setProjects = useStore((s) => s.setProjects);
@@ -118,12 +120,14 @@ export default function AreasPage() {
           <Layers className="h-6 w-6 text-accent" />
           Áreas &amp; Projetos
         </h1>
-        <button
-          onClick={() => setEditor({ kind: 'area', mode: 'create', payload: { name: '', color: DEFAULT_COLOR, description: '' } })}
-          className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent-hover"
-        >
-          <Plus className="h-4 w-4" /> Nova Área
-        </button>
+        {canDo(userGranular, 'areas', 'manage_areas') && (
+          <button
+            onClick={() => setEditor({ kind: 'area', mode: 'create', payload: { name: '', color: DEFAULT_COLOR, description: '' } })}
+            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+          >
+            <Plus className="h-4 w-4" /> Nova Área
+          </button>
+        )}
       </div>
 
       {areas.length === 0 ? (

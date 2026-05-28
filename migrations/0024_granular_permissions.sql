@@ -1,0 +1,136 @@
+-- 0024_granular_permissions.sql
+-- Action-level permission grid layered on top of the preset model from 0022.
+-- A user's effective state = preset_granular_permissions(preset_id) overlaid
+-- by any rows in granular_permissions(user_id). Owner bypasses both tables.
+
+CREATE TABLE IF NOT EXISTS granular_permissions (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
+  feature    TEXT NOT NULL,
+  action     TEXT NOT NULL,
+  allowed    INTEGER DEFAULT 0,
+  updated_at INTEGER DEFAULT (unixepoch()),
+  UNIQUE(user_id, feature, action)
+);
+
+CREATE INDEX IF NOT EXISTS idx_granular_user ON granular_permissions(user_id);
+
+CREATE TABLE IF NOT EXISTS preset_granular_permissions (
+  id        TEXT PRIMARY KEY,
+  preset_id TEXT NOT NULL,
+  feature   TEXT NOT NULL,
+  action    TEXT NOT NULL,
+  allowed   INTEGER DEFAULT 0,
+  UNIQUE(preset_id, feature, action)
+);
+
+CREATE INDEX IF NOT EXISTS idx_preset_granular_preset ON preset_granular_permissions(preset_id);
+
+-- ---------------------------------------------------------------------------
+-- Seed: preset_fixed (broad access — current assistant_fixed behavior).
+-- ---------------------------------------------------------------------------
+INSERT OR IGNORE INTO preset_granular_permissions (id, preset_id, feature, action, allowed) VALUES
+('pgp_f_t1', 'preset_fixed', 'tasks',      'view_assigned',    1),
+('pgp_f_t2', 'preset_fixed', 'tasks',      'view_all',         1),
+('pgp_f_t3', 'preset_fixed', 'tasks',      'create',           1),
+('pgp_f_t4', 'preset_fixed', 'tasks',      'edit_own',         1),
+('pgp_f_t5', 'preset_fixed', 'tasks',      'edit_all',         1),
+('pgp_f_t6', 'preset_fixed', 'tasks',      'delete',           0),
+('pgp_f_t7', 'preset_fixed', 'tasks',      'assign',           1),
+('pgp_f_t8', 'preset_fixed', 'tasks',      'view_comments',    1),
+('pgp_f_t9', 'preset_fixed', 'tasks',      'add_comments',     1),
+('pgp_f_p1', 'preset_fixed', 'planning',   'view',             1),
+('pgp_f_p2', 'preset_fixed', 'planning',   'edit_own',         1),
+('pgp_f_p3', 'preset_fixed', 'planning',   'edit_all',         0),
+('pgp_f_p4', 'preset_fixed', 'planning',   'view_strategic',   1),
+('pgp_f_p5', 'preset_fixed', 'planning',   'edit_strategic',   0),
+('pgp_f_c1', 'preset_fixed', 'calendar',   'view',             1),
+('pgp_f_c2', 'preset_fixed', 'calendar',   'create',           1),
+('pgp_f_c3', 'preset_fixed', 'calendar',   'edit_own',         1),
+('pgp_f_c4', 'preset_fixed', 'calendar',   'edit_all',         0),
+('pgp_f_c5', 'preset_fixed', 'calendar',   'delete',           0),
+('pgp_f_d1', 'preset_fixed', 'drive',      'view',             1),
+('pgp_f_d2', 'preset_fixed', 'drive',      'upload',           1),
+('pgp_f_d3', 'preset_fixed', 'drive',      'download',         1),
+('pgp_f_d4', 'preset_fixed', 'drive',      'delete',           0),
+('pgp_f_n1', 'preset_fixed', 'notes',      'view_own',         1),
+('pgp_f_n2', 'preset_fixed', 'notes',      'view_all',         1),
+('pgp_f_n3', 'preset_fixed', 'notes',      'create',           1),
+('pgp_f_n4', 'preset_fixed', 'notes',      'edit_own',         1),
+('pgp_f_n5', 'preset_fixed', 'notes',      'edit_all',         0),
+('pgp_f_n6', 'preset_fixed', 'notes',      'delete',           0),
+('pgp_f_n7', 'preset_fixed', 'notes',      'add_images',       1),
+('pgp_f_a1', 'preset_fixed', 'areas',      'view',             1),
+('pgp_f_a2', 'preset_fixed', 'areas',      'manage_fronts',    1),
+('pgp_f_a3', 'preset_fixed', 'areas',      'manage_projects',  0),
+('pgp_f_a4', 'preset_fixed', 'areas',      'manage_areas',     0),
+('pgp_f_nw1','preset_fixed', 'networking', 'view',             1),
+('pgp_f_nw2','preset_fixed', 'networking', 'edit_contacts',    0),
+('pgp_f_nw3','preset_fixed', 'networking', 'view_map',         1),
+('pgp_f_nw4','preset_fixed', 'networking', 'link_entities',    0),
+('pgp_f_pay1','preset_fixed','payment',    'view_own',         1),
+('pgp_f_pay2','preset_fixed','payment',    'view_all',         0),
+('pgp_f_pay3','preset_fixed','payment',    'edit',             0),
+('pgp_f_pay4','preset_fixed','payment',    'mark_paid',        0),
+('pgp_f_pay5','preset_fixed','payment',    'generate_report',  1),
+('pgp_f_ch1','preset_fixed', 'chat',       'read',             1),
+('pgp_f_ch2','preset_fixed', 'chat',       'write',            1),
+('pgp_f_ch3','preset_fixed', 'chat',       'delete',           0),
+('pgp_f_m1', 'preset_fixed', 'meeting',    'view_link',        1),
+('pgp_f_m2', 'preset_fixed', 'meeting',    'start_stop',       1),
+('pgp_f_m3', 'preset_fixed', 'meeting',    'view_notes',       1),
+('pgp_f_m4', 'preset_fixed', 'meeting',    'edit_notes',       1),
+
+-- ---------------------------------------------------------------------------
+-- Seed: preset_external (restricted — contractors only see what's theirs).
+-- ---------------------------------------------------------------------------
+('pgp_e_t1', 'preset_external', 'tasks',      'view_assigned',    1),
+('pgp_e_t2', 'preset_external', 'tasks',      'view_all',         0),
+('pgp_e_t3', 'preset_external', 'tasks',      'create',           0),
+('pgp_e_t4', 'preset_external', 'tasks',      'edit_own',         1),
+('pgp_e_t5', 'preset_external', 'tasks',      'edit_all',         0),
+('pgp_e_t6', 'preset_external', 'tasks',      'delete',           0),
+('pgp_e_t7', 'preset_external', 'tasks',      'assign',           0),
+('pgp_e_t8', 'preset_external', 'tasks',      'view_comments',    1),
+('pgp_e_t9', 'preset_external', 'tasks',      'add_comments',     1),
+('pgp_e_p1', 'preset_external', 'planning',   'view',             0),
+('pgp_e_p2', 'preset_external', 'planning',   'edit_own',         0),
+('pgp_e_p3', 'preset_external', 'planning',   'edit_all',         0),
+('pgp_e_p4', 'preset_external', 'planning',   'view_strategic',   0),
+('pgp_e_p5', 'preset_external', 'planning',   'edit_strategic',   0),
+('pgp_e_c1', 'preset_external', 'calendar',   'view',             0),
+('pgp_e_c2', 'preset_external', 'calendar',   'create',           0),
+('pgp_e_c3', 'preset_external', 'calendar',   'edit_own',         0),
+('pgp_e_c4', 'preset_external', 'calendar',   'edit_all',         0),
+('pgp_e_c5', 'preset_external', 'calendar',   'delete',           0),
+('pgp_e_d1', 'preset_external', 'drive',      'view',             0),
+('pgp_e_d2', 'preset_external', 'drive',      'upload',           0),
+('pgp_e_d3', 'preset_external', 'drive',      'download',         0),
+('pgp_e_d4', 'preset_external', 'drive',      'delete',           0),
+('pgp_e_n1', 'preset_external', 'notes',      'view_own',         1),
+('pgp_e_n2', 'preset_external', 'notes',      'view_all',         0),
+('pgp_e_n3', 'preset_external', 'notes',      'create',           1),
+('pgp_e_n4', 'preset_external', 'notes',      'edit_own',         1),
+('pgp_e_n5', 'preset_external', 'notes',      'edit_all',         0),
+('pgp_e_n6', 'preset_external', 'notes',      'delete',           0),
+('pgp_e_n7', 'preset_external', 'notes',      'add_images',       0),
+('pgp_e_a1', 'preset_external', 'areas',      'view',             0),
+('pgp_e_a2', 'preset_external', 'areas',      'manage_fronts',    0),
+('pgp_e_a3', 'preset_external', 'areas',      'manage_projects',  0),
+('pgp_e_a4', 'preset_external', 'areas',      'manage_areas',     0),
+('pgp_e_nw1','preset_external', 'networking', 'view',             0),
+('pgp_e_nw2','preset_external', 'networking', 'edit_contacts',    0),
+('pgp_e_nw3','preset_external', 'networking', 'view_map',         0),
+('pgp_e_nw4','preset_external', 'networking', 'link_entities',    0),
+('pgp_e_pay1','preset_external','payment',    'view_own',         1),
+('pgp_e_pay2','preset_external','payment',    'view_all',         0),
+('pgp_e_pay3','preset_external','payment',    'edit',             0),
+('pgp_e_pay4','preset_external','payment',    'mark_paid',        0),
+('pgp_e_pay5','preset_external','payment',    'generate_report',  0),
+('pgp_e_ch1','preset_external', 'chat',       'read',             1),
+('pgp_e_ch2','preset_external', 'chat',       'write',            1),
+('pgp_e_ch3','preset_external', 'chat',       'delete',           0),
+('pgp_e_m1', 'preset_external', 'meeting',    'view_link',        1),
+('pgp_e_m2', 'preset_external', 'meeting',    'start_stop',       0),
+('pgp_e_m3', 'preset_external', 'meeting',    'view_notes',       1),
+('pgp_e_m4', 'preset_external', 'meeting',    'edit_notes',       0);

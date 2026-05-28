@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { canDo } from '../../lib/can';
 import { needsDate } from '../../lib/tasks';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import TaskCard from './TaskCard';
@@ -23,6 +24,7 @@ const STATUS_TABS = [
 
 export default function TasksPage() {
   const user = useStore((s) => s.user);
+  const userGranular = useStore((s) => s.userGranular);
   const tasks = useStore((s) => s.tasks);
   const users = useStore((s) => s.users);
   const setTasks = useStore((s) => s.setTasks);
@@ -201,14 +203,16 @@ export default function TasksPage() {
             <Upload className="h-4 w-4" />
             Importar Lista
           </button>
-          <button
-            type="button"
-            onClick={() => setEditorTask(null)}
-            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
-          >
-            <Plus className="h-4 w-4" />
-            Nova Tarefa
-          </button>
+          {canDo(userGranular, 'tasks', 'create') && (
+            <button
+              type="button"
+              onClick={() => setEditorTask(null)}
+              className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
+            >
+              <Plus className="h-4 w-4" />
+              Nova Tarefa
+            </button>
+          )}
         </div>
       </div>
 

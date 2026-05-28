@@ -7,6 +7,8 @@ export const useStore = create((set) => ({
 
   // v1.10 — multi-user permission + admin + chat state
   userPermissions: {},   // resolved permission map (mirrors user.permissions)
+  // v2.1 — granular: null for owner, or `{ "feature.action": boolean }` map.
+  userGranular: null,
   allUsers: [],          // owner-only: hydrated list from /api/users/all
   pendingUsers: [],      // owner-only: users with status='pending'
   chatMessages: [],      // most recent chat_messages from /api/chat/messages
@@ -70,17 +72,19 @@ export const useStore = create((set) => ({
   dailySchedule: [],        // [{ id, work_date, start_time, end_time, notes }]
   allUsersSchedule: {},     // { [userId]: { name, role, scheduled, recurring } }
 
-  // Setting user also mirrors its embedded permissions into the top-level
-  // userPermissions slice so components can read either field. Callers that
-  // already pass a permissions object inside `user` get it propagated for free.
+  // Setting user also mirrors its embedded permissions + granular into the
+  // top-level slices so components can read either field. Callers that already
+  // pass these objects inside `user` get them propagated for free.
   setUser: (user) => set({
     user,
     userPermissions: (user && user.permissions) || {},
+    userGranular: user ? (user.granular === undefined ? null : user.granular) : null,
   }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
 
   setUserPermissions: (userPermissions) => set({ userPermissions: userPermissions || {} }),
+  setUserGranular: (userGranular) => set({ userGranular: userGranular === undefined ? null : userGranular }),
   setAllUsers: (allUsers) => set({ allUsers: allUsers || [] }),
   setPendingUsers: (pendingUsers) => set({ pendingUsers: pendingUsers || [] }),
   setChatMessages: (chatMessages) => set({ chatMessages: chatMessages || [] }),

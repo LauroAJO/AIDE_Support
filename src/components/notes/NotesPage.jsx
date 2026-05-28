@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Plus, Pin, PinOff, Trash2, ArrowLeft, Search } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { canDo } from '../../lib/can';
 import { formatDate } from '../../lib/tasks';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
@@ -14,6 +15,7 @@ function preview(note) {
 
 export default function NotesPage() {
   const notes = useStore((s) => s.notes);
+  const userGranular = useStore((s) => s.userGranular);
   const setNotes = useStore((s) => s.setNotes);
   const selectedNote = useStore((s) => s.selectedNote);
   const setSelectedNote = useStore((s) => s.setSelectedNote);
@@ -131,12 +133,14 @@ export default function NotesPage() {
       <div className={`${selectedNote ? 'hidden md:flex' : 'flex'} min-h-0 w-full flex-col md:w-[35%]`}>
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-ink">Notas</h1>
-          <button
-            onClick={createNote}
-            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
-          >
-            <Plus className="h-4 w-4" /> Nova Nota
-          </button>
+          {canDo(userGranular, 'notes', 'create') && (
+            <button
+              onClick={createNote}
+              className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:bg-accent-hover"
+            >
+              <Plus className="h-4 w-4" /> Nova Nota
+            </button>
+          )}
         </div>
 
         <div className="relative mt-3">

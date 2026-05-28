@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, Plus, RefreshCw } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { canDo } from '../../lib/can';
 import { toISODate, mondayOf } from '../../lib/week';
 import {
   monthLabel,
@@ -186,6 +187,7 @@ const HOUR_PX = 44;
 
 export default function CalendarPage() {
   const user = useStore((s) => s.user);
+  const userGranular = useStore((s) => s.userGranular);
   const calendarEvents = useStore((s) => s.calendarEvents);
   const setCalendarEvents = useStore((s) => s.setCalendarEvents);
   const calendarView = useStore((s) => s.calendarView);
@@ -385,12 +387,14 @@ export default function CalendarPage() {
           <button onClick={sync} className="rounded-lg border border-line p-1.5 text-ink2 hover:bg-surface2" title="Sincronizar">
             <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
           </button>
-          <button
-            onClick={() => setEditor({ date: selectedDay })}
-            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition hover:bg-accent-hover"
-          >
-            <Plus className="h-4 w-4" /> Novo Evento
-          </button>
+          {canDo(userGranular, 'calendar', 'create') && (
+            <button
+              onClick={() => setEditor({ date: selectedDay })}
+              className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition hover:bg-accent-hover"
+            >
+              <Plus className="h-4 w-4" /> Novo Evento
+            </button>
+          )}
         </div>
       </div>
 

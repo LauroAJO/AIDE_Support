@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, FileText, Check, Clock, Pencil, Plus, X, Trash2, RefreshCw } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { canDo } from '../../lib/can';
 import { formatEuro, formatBrl } from '../../lib/time';
 import Avatar from '../shared/Avatar';
 import LoadingSpinner from '../shared/LoadingSpinner';
@@ -59,6 +60,7 @@ function durationLabel(sec) {
 
 export default function PaymentPage() {
   const user = useStore((s) => s.user);
+  const userGranular = useStore((s) => s.userGranular);
   const summary = useStore((s) => s.paymentSummary);
   const setSummary = useStore((s) => s.setPaymentSummary);
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
@@ -287,12 +289,16 @@ export default function PaymentPage() {
           >
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Atualizar
           </button>
-          <button onClick={generatePdf} className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent-hover">
-            <FileText className="h-4 w-4" /> Gerar Relatório PDF
-          </button>
-          <button onClick={markAllPaid} className="rounded-lg px-3 py-2 text-sm font-medium text-white" style={{ background: '#22C55E' }}>
-            Marcar todos como pagos
-          </button>
+          {canDo(userGranular, 'payment', 'generate_report') && (
+            <button onClick={generatePdf} className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-accent-hover">
+              <FileText className="h-4 w-4" /> Gerar Relatório PDF
+            </button>
+          )}
+          {canDo(userGranular, 'payment', 'mark_paid') && (
+            <button onClick={markAllPaid} className="rounded-lg px-3 py-2 text-sm font-medium text-white" style={{ background: '#22C55E' }}>
+              Marcar todos como pagos
+            </button>
+          )}
         </div>
       </div>
 

@@ -67,7 +67,7 @@ async function handleAPI(request, env, ctx) {
   // Multi-user admin (owner-only — guard lives inside each handler).
   if (path === '/api/users/all') return handleUsersAll(request, env, user);
   if (path === '/api/users/pending') return handleUsersPending(request, env, user);
-  if (path.match(/^\/api\/users\/[^/]+\/(approve|role|permissions|archive)$/)) {
+  if (path.match(/^\/api\/users\/[^/]+\/(approve|role|permissions|archive|granular-permissions)$/)) {
     const parts = path.split('/');
     return handleUserAction(request, env, user, parts[3], parts[4]);
   }
@@ -514,7 +514,8 @@ async function getUserFromRequest(request, env) {
   // resolvePermissions has its own try/catch around the perm tables so a
   // missing migration degrades to the external-preset defaults.
   const permissions = await resolvePermissions(session.id, env);
-  return { ...session, permissions };
+  const granular = await resolveGranularPermissions(session.id, env);
+  return { ...session, permissions, granular };
 }
 
 function publicUser(user) {
@@ -529,6 +530,7 @@ function publicUser(user) {
     display_name: user.display_name || '',
     timezone: user.timezone || null,
     permissions: user.permissions || null,
+    granular: user.granular === undefined ? null : user.granular,
   };
 }
 
@@ -586,6 +588,53 @@ async function resolvePermissions(userId, env) {
   try { overrides = JSON.parse((up && up.overrides) || '{}'); } catch { overrides = {}; }
 
   return { ...DEFAULT_EXTERNAL_PERMISSIONS, ...preset, ...overrides };
+}
+
+// Action-level permission resolver (v2.1). Returns null for the owner
+// (canDo will short-circuit to true), or a flat map keyed `feature.action`
+// for everyone else. Falls back to an empty map if migration 0024 hasn't
+// landed in this environment — callers should treat missing keys as denied.
+async function resolveGranularPermissions(userId, env) {
+  let role = null;
+  try {
+    const u = await env.DB.prepare('SELECT role FROM users WHERE id = ?').bind(userId).first();
+    role = u && u.role;
+  } catch { /* ignore */ }
+  if (role === 'owner') return null;
+
+  let presetId = 'preset_external';
+  try {
+    const up = await env.DB.prepare(
+      'SELECT preset_id FROM user_permissions WHERE user_id = ?'
+    ).bind(userId).first();
+    if (up && up.preset_id) presetId = up.preset_id;
+  } catch { /* tables missing — proceed with default preset */ }
+
+  let presetPerms = { results: [] };
+  let userPerms = { results: [] };
+  try {
+    presetPerms = await env.DB.prepare(
+      'SELECT feature, action, allowed FROM preset_granular_permissions WHERE preset_id = ?'
+    ).bind(presetId).all();
+  } catch { /* migration 0024 not applied yet */ }
+  try {
+    userPerms = await env.DB.prepare(
+      'SELECT feature, action, allowed FROM granular_permissions WHERE user_id = ?'
+    ).bind(userId).all();
+  } catch { /* migration 0024 not applied yet */ }
+
+  const perms = {};
+  for (const p of presetPerms.results || []) perms[`${p.feature}.${p.action}`] = !!p.allowed;
+  // Per-user overrides take precedence over preset defaults.
+  for (const p of userPerms.results || []) perms[`${p.feature}.${p.action}`] = !!p.allowed;
+  return perms;
+}
+
+// Boolean gate: true if the user may perform the (feature, action) pair.
+// Owner always returns true. Missing key = denied (default-deny).
+function canDo(granular, feature, action) {
+  if (granular === null || granular === undefined) return true;
+  return !!granular[`${feature}.${action}`];
 }
 
 // Permission guard for route handlers. Returns true if `user` may use
@@ -726,9 +775,21 @@ async function handleTasksCollection(request, env, user, ctx) {
   if (!requirePermission(user, 'tasks', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
   }
+  // v2.1 granular: GET needs view_assigned OR view_all. POST needs create.
+  if (request.method === 'GET') {
+    if (!canDo(user.granular, 'tasks', 'view_assigned') &&
+        !canDo(user.granular, 'tasks', 'view_all')) {
+      return json({ error: 'Sem permissão para visualizar tarefas' }, 403);
+    }
+  }
+  if (request.method === 'POST' && !canDo(user.granular, 'tasks', 'create')) {
+    return json({ error: 'Sem permissão para criar tarefas' }, 403);
+  }
   // assigned_only users only see tasks assigned to themselves on list reads.
+  // v2.1: also enforced via granular tasks.view_all=false (most restrictive wins).
   const tasksLevel = (user.permissions && user.permissions.tasks) || 'full';
-  const assignedOnly = tasksLevel === 'assigned_only';
+  const granularViewAllDenied = user.granular && !canDo(user.granular, 'tasks', 'view_all');
+  const assignedOnly = tasksLevel === 'assigned_only' || granularViewAllDenied;
 
   if (request.method === 'GET') {
     if (new URL(request.url).searchParams.get('completed_today') === 'true') {
@@ -818,9 +879,19 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
     return json(shapeTask(row));
   }
 
+  if (request.method === 'DELETE' && !canDo(user.granular, 'tasks', 'delete')) {
+    return json({ error: 'Sem permissão para deletar tarefas' }, 403);
+  }
+
   if (request.method === 'PUT') {
     const existing = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(taskId).first();
     if (!existing) return json({ error: 'Tarefa não encontrada' }, 404);
+    // v2.1 granular: PUT requires edit_all OR (edit_own AND user owns the task).
+    const canEditAll = canDo(user.granular, 'tasks', 'edit_all');
+    const canEditOwn = canDo(user.granular, 'tasks', 'edit_own');
+    if (!canEditAll && !(canEditOwn && existing.created_by === user.id)) {
+      return json({ error: 'Sem permissão para editar esta tarefa' }, 403);
+    }
 
     const body = await readJson(request);
     if (!body) return json({ error: 'JSON inválido' }, 400);
@@ -911,6 +982,9 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
 }
 
 async function handleProjectsCollection(request, env, user) {
+  if (request.method === 'POST' && !canDo(user.granular, 'areas', 'manage_projects')) {
+    return json({ error: 'Sem permissão para gerenciar projetos' }, 403);
+  }
   if (request.method === 'GET') {
     let rows = [];
     try {
@@ -961,6 +1035,10 @@ async function handleProjectsCollection(request, env, user) {
 
 async function handleProjectItem(request, env, user, projectId) {
   if (!projectId) return json({ error: 'ID ausente' }, 400);
+  if ((request.method === 'PUT' || request.method === 'DELETE') &&
+      !canDo(user.granular, 'areas', 'manage_projects')) {
+    return json({ error: 'Sem permissão para gerenciar projetos' }, 403);
+  }
   if (request.method === 'PUT') {
     const body = (await readJson(request)) || {};
     const existing = await env.DB.prepare('SELECT * FROM projects WHERE id = ?').bind(projectId).first();
@@ -1967,6 +2045,9 @@ async function handleCalendarEvents(request, env, user) {
   if (!requirePermission(user, 'calendar', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
   }
+  if (request.method === 'POST' && !canDo(user.granular, 'calendar', 'create')) {
+    return json({ error: 'Sem permissão para criar eventos' }, 403);
+  }
   if (request.method === 'GET') {
     const url = new URL(request.url);
     const timeMin = url.searchParams.get('start') || new Date().toISOString();
@@ -2022,6 +2103,17 @@ async function handleCalendarEvents(request, env, user) {
 
 async function handleCalendarEventItem(request, env, user, eventId) {
   if (!eventId) return json({ error: 'ID ausente' }, 400);
+  // v2.1 granular: PUT requires edit_own/edit_all; DELETE requires delete.
+  // We can't cheaply detect Google event ownership here, so edit_own is treated
+  // permissively (assumes own-Google-calendar = own event).
+  if (request.method === 'PUT' &&
+      !canDo(user.granular, 'calendar', 'edit_all') &&
+      !canDo(user.granular, 'calendar', 'edit_own')) {
+    return json({ error: 'Sem permissão para editar eventos' }, 403);
+  }
+  if (request.method === 'DELETE' && !canDo(user.granular, 'calendar', 'delete')) {
+    return json({ error: 'Sem permissão para deletar eventos' }, 403);
+  }
   const url = new URL(request.url);
 
   // Determine which calendar this event belongs to and resolve its owner
@@ -2344,6 +2436,9 @@ async function handleNotes(request, env, user) {
   if (!requirePermission(user, 'notes', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
   }
+  if (request.method === 'POST' && !canDo(user.granular, 'notes', 'create')) {
+    return json({ error: 'Sem permissão para criar notas' }, 403);
+  }
   const notesLevel = (user.permissions && user.permissions.notes) || 'full';
 
   if (request.method === 'GET') {
@@ -2407,9 +2502,19 @@ async function handleNoteItem(request, env, user, id) {
     return json(shapeNote(row));
   }
 
+  if (request.method === 'DELETE' && !canDo(user.granular, 'notes', 'delete')) {
+    return json({ error: 'Sem permissão para deletar notas' }, 403);
+  }
+
   if (request.method === 'PUT') {
     const existing = await env.DB.prepare('SELECT * FROM notes WHERE id = ?').bind(id).first();
     if (!existing) return json({ error: 'Nota não encontrada' }, 404);
+    // v2.1 granular: PUT requires edit_all OR (edit_own AND user is author).
+    const canEditAll = canDo(user.granular, 'notes', 'edit_all');
+    const canEditOwn = canDo(user.granular, 'notes', 'edit_own');
+    if (!canEditAll && !(canEditOwn && existing.created_by === user.id)) {
+      return json({ error: 'Sem permissão para editar esta nota' }, 403);
+    }
     const body = (await readJson(request)) || {};
     const title = body.title !== undefined ? body.title : existing.title;
     const noteBody = body.body !== undefined ? body.body : existing.body;
@@ -4191,6 +4296,11 @@ async function handlePaymentSummary(request, env, user) {
   if (!requirePermission(user, 'payment', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
   }
+  // v2.1 granular: need view_own OR view_all.
+  if (!canDo(user.granular, 'payment', 'view_own') &&
+      !canDo(user.granular, 'payment', 'view_all')) {
+    return json({ error: 'Sem permissão para visualizar pagamentos' }, 403);
+  }
   const url = new URL(request.url);
   const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7);
   const requestedUserId = url.searchParams.get('user_id');
@@ -4281,6 +4391,9 @@ async function handlePaymentDefaultRate(request, env, user) {
 async function handlePaymentEntryPaid(request, env, user, id) {
   if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
   if (!id) return json({ error: 'ID ausente' }, 400);
+  if (!canDo(user.granular, 'payment', 'mark_paid')) {
+    return json({ error: 'Sem permissão para marcar pagamentos' }, 403);
+  }
   const body = (await readJson(request)) || {};
   const paid = body.paid ? 1 : 0;
   const paidAt = paid ? (body.paid_at ? Math.floor(new Date(body.paid_at).getTime() / 1000) : Math.floor(Date.now() / 1000)) : null;
@@ -4500,6 +4613,9 @@ async function findOrCreateMeetingTask(env, user) {
 
 async function handleMeetingStart(request, env, user) {
   if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!canDo(user.granular, 'meeting', 'start_stop')) {
+    return json({ error: 'Sem permissão para iniciar reuniões' }, 403);
+  }
   const taskId = await findOrCreateMeetingTask(env, user);
   const now = Math.floor(Date.now() / 1000);
 
@@ -4521,6 +4637,9 @@ async function handleMeetingStart(request, env, user) {
 
 async function handleMeetingStop(request, env, user) {
   if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!canDo(user.granular, 'meeting', 'start_stop')) {
+    return json({ error: 'Sem permissão para encerrar reuniões' }, 403);
+  }
   const now = Math.floor(Date.now() / 1000);
   const active = await env.DB.prepare(
     `${ENTRY_SELECT} WHERE e.user_id = ? AND e.ended_at IS NULL`
@@ -4560,6 +4679,9 @@ async function handleAreas(request, env, user) {
   if (!requirePermission(user, 'areas', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
   }
+  if (request.method === 'POST' && !canDo(user.granular, 'areas', 'manage_areas')) {
+    return json({ error: 'Sem permissão para gerenciar áreas' }, 403);
+  }
   if (request.method === 'GET') {
     try {
       const { results } = await env.DB.prepare(
@@ -4591,6 +4713,10 @@ async function handleAreas(request, env, user) {
 
 async function handleAreaItem(request, env, user, id) {
   if (!id) return json({ error: 'ID ausente' }, 400);
+  if ((request.method === 'PUT' || request.method === 'DELETE') &&
+      !canDo(user.granular, 'areas', 'manage_areas')) {
+    return json({ error: 'Sem permissão para gerenciar áreas' }, 403);
+  }
   if (request.method === 'PUT') {
     const body = (await readJson(request)) || {};
     const existing = await env.DB.prepare('SELECT * FROM areas WHERE id = ?').bind(id).first();
@@ -4617,6 +4743,9 @@ async function handleAreaItem(request, env, user, id) {
 }
 
 async function handleFronts(request, env, user) {
+  if (request.method === 'POST' && !canDo(user.granular, 'areas', 'manage_fronts')) {
+    return json({ error: 'Sem permissão para gerenciar frentes' }, 403);
+  }
   if (request.method === 'GET') {
     const projectId = new URL(request.url).searchParams.get('project_id');
     try {
@@ -4655,6 +4784,10 @@ async function handleFronts(request, env, user) {
 
 async function handleFrontItem(request, env, user, id) {
   if (!id) return json({ error: 'ID ausente' }, 400);
+  if ((request.method === 'PUT' || request.method === 'DELETE') &&
+      !canDo(user.granular, 'areas', 'manage_fronts')) {
+    return json({ error: 'Sem permissão para gerenciar frentes' }, 403);
+  }
   if (request.method === 'PUT') {
     const body = (await readJson(request)) || {};
     const existing = await env.DB.prepare('SELECT * FROM fronts WHERE id = ?').bind(id).first();
@@ -4884,6 +5017,9 @@ async function handleNetworkPeople(request, env, user) {
   if (!requirePermission(user, 'networking', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
   }
+  if (request.method === 'POST' && !canDo(user.granular, 'networking', 'edit_contacts')) {
+    return json({ error: 'Sem permissão para editar contatos' }, 403);
+  }
   if (request.method === 'GET') {
     try {
       const { results } = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
@@ -4927,6 +5063,10 @@ async function handleNetworkPeople(request, env, user) {
 
 async function handleNetworkPersonItem(request, env, user, id) {
   if (!id) return json({ error: 'ID ausente' }, 400);
+  if ((request.method === 'PUT' || request.method === 'DELETE') &&
+      !canDo(user.granular, 'networking', 'edit_contacts')) {
+    return json({ error: 'Sem permissão para editar contatos' }, 403);
+  }
   if (request.method === 'PUT') {
     const body = (await readJson(request)) || {};
     const existing = await env.DB.prepare('SELECT * FROM network_people WHERE id = ?').bind(id).first();
@@ -5096,6 +5236,16 @@ function shapeAttachmentRow(r) {
 
 async function handleAttachmentFiles(request, env, user, kind, entityId) {
   if (!entityId) return json({ error: 'ID ausente' }, 400);
+  // v2.1 granular: uploads go through Drive — gate behind drive.upload.
+  // Notes uploading images also requires notes.add_images.
+  if (request.method === 'POST') {
+    if (!canDo(user.granular, 'drive', 'upload')) {
+      return json({ error: 'Sem permissão para enviar arquivos ao Drive' }, 403);
+    }
+    if (kind === 'note' && !canDo(user.granular, 'notes', 'add_images')) {
+      return json({ error: 'Sem permissão para anexar arquivos a notas' }, 403);
+    }
+  }
   const table = ATTACHMENT_TABLES[kind];
   const fk = ATTACHMENT_FK[kind];
   const { ownerId } = await getRoleUsers(env);
@@ -5225,6 +5375,9 @@ async function handleAttachmentLink(request, env, user, kind, entityId) {
 async function handleAttachmentItem(request, env, user, kind, entityId, fileId) {
   if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
   if (!entityId || !fileId) return json({ error: 'IDs ausentes' }, 400);
+  if (!canDo(user.granular, 'drive', 'delete')) {
+    return json({ error: 'Sem permissão para deletar arquivos' }, 403);
+  }
   const table = ATTACHMENT_TABLES[kind];
   const fk = ATTACHMENT_FK[kind];
 
@@ -5531,11 +5684,12 @@ async function handleUserAction(request, env, user, targetUserId, action) {
   if (user.role !== 'owner') return json({ error: 'Apenas owner' }, 403);
   if (!targetUserId) return json({ error: 'ID ausente' }, 400);
   switch (action) {
-    case 'approve':     return handleUserApprove(request, env, user, targetUserId);
-    case 'role':        return handleUserRole(request, env, user, targetUserId);
-    case 'permissions': return handleUserPermissions(request, env, user, targetUserId);
-    case 'archive':     return handleUserArchive(request, env, user, targetUserId);
-    default:            return json({ error: 'Ação desconhecida' }, 404);
+    case 'approve':              return handleUserApprove(request, env, user, targetUserId);
+    case 'role':                 return handleUserRole(request, env, user, targetUserId);
+    case 'permissions':          return handleUserPermissions(request, env, user, targetUserId);
+    case 'archive':              return handleUserArchive(request, env, user, targetUserId);
+    case 'granular-permissions': return handleUserGranularPermissions(request, env, user, targetUserId);
+    default:                     return json({ error: 'Ação desconhecida' }, 404);
   }
 }
 
@@ -5714,6 +5868,79 @@ async function handleUserArchive(request, env, user, targetUserId) {
   return json({ archived: true, user_id: targetUserId, archived_at: now });
 }
 
+// GET    /api/users/:id/granular-permissions → { preset, presetPerms, userOverrides, resolved }
+// PUT    /api/users/:id/granular-permissions → upsert one (feature, action, allowed) row
+// DELETE /api/users/:id/granular-permissions → remove override (revert to preset)
+async function handleUserGranularPermissions(request, env, user, targetUserId) {
+  if (request.method === 'GET') {
+    let presetId = 'preset_external';
+    try {
+      const up = await env.DB.prepare(
+        'SELECT preset_id FROM user_permissions WHERE user_id = ?'
+      ).bind(targetUserId).first();
+      if (up && up.preset_id) presetId = up.preset_id;
+    } catch { /* user_permissions missing */ }
+    let presetPerms = [];
+    let userOverrides = [];
+    try {
+      const r = await env.DB.prepare(
+        'SELECT feature, action, allowed FROM preset_granular_permissions WHERE preset_id = ?'
+      ).bind(presetId).all();
+      presetPerms = r.results || [];
+    } catch { /* table missing */ }
+    try {
+      const r = await env.DB.prepare(
+        'SELECT feature, action, allowed FROM granular_permissions WHERE user_id = ?'
+      ).bind(targetUserId).all();
+      userOverrides = r.results || [];
+    } catch { /* table missing */ }
+    const resolved = await resolveGranularPermissions(targetUserId, env);
+    return json({ preset: presetId, presetPerms, userOverrides, resolved });
+  }
+
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const feature = String(body.feature || '').trim();
+    const action = String(body.action || '').trim();
+    if (!feature || !action) return json({ error: 'feature e action são obrigatórios' }, 400);
+    const allowed = body.allowed ? 1 : 0;
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO granular_permissions (id, user_id, feature, action, allowed, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, feature, action) DO UPDATE SET
+           allowed = excluded.allowed,
+           updated_at = excluded.updated_at`
+      ).bind(crypto.randomUUID(), targetUserId, feature, action, allowed, now).run();
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/no such table/i.test(msg)) {
+        return json({ error: 'Tabela granular_permissions não existe — aplique 0024_granular_permissions.sql' }, 503);
+      }
+      return json({ error: 'Falha ao salvar permissão', detail: msg }, 500);
+    }
+    return json({ ok: true, feature, action, allowed: !!allowed });
+  }
+
+  if (request.method === 'DELETE') {
+    const body = (await readJson(request)) || {};
+    const feature = String(body.feature || '').trim();
+    const action = String(body.action || '').trim();
+    if (!feature || !action) return json({ error: 'feature e action são obrigatórios' }, 400);
+    try {
+      await env.DB.prepare(
+        'DELETE FROM granular_permissions WHERE user_id = ? AND feature = ? AND action = ?'
+      ).bind(targetUserId, feature, action).run();
+    } catch (e) {
+      return json({ error: 'Falha ao remover override', detail: String((e && e.message) || e) }, 500);
+    }
+    return json({ deleted: true, feature, action });
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
 // ---------------------------------------------------------------------------
 // Chat — general channel (v1.10 multi-user)
 // ---------------------------------------------------------------------------
@@ -5766,6 +5993,10 @@ async function handleChatMessages(request, env, user, ctx) {
     if (!requirePermission(user, 'chat', 'full')) {
       // chat='view' users can read but not post.
       return json({ error: 'Sem permissão para postar' }, 403);
+    }
+    // v2.1 granular: explicit chat.write check on top of the coarse gate.
+    if (!canDo(user.granular, 'chat', 'write')) {
+      return json({ error: 'Sem permissão para enviar mensagens' }, 403);
     }
     const body = (await readJson(request)) || {};
     const content = String(body.content || '').trim();
@@ -5838,6 +6069,11 @@ async function handleChatMessageItem(request, env, user, id) {
   if (row.deleted_at) return json({ ok: true, already_deleted: true });
   if (row.user_id !== user.id && user.role !== 'owner') {
     return json({ error: 'Apenas o autor ou o owner pode apagar' }, 403);
+  }
+  // v2.1 granular: even the author needs chat.delete to remove their own msg.
+  // Owner bypasses (canDo returns true for null granular).
+  if (!canDo(user.granular, 'chat', 'delete')) {
+    return json({ error: 'Sem permissão para deletar mensagens' }, 403);
   }
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare('UPDATE chat_messages SET deleted_at = ? WHERE id = ?').bind(now, id).run();

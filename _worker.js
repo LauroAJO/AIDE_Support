@@ -590,44 +590,54 @@ async function resolvePermissions(userId, env) {
   return { ...DEFAULT_EXTERNAL_PERMISSIONS, ...preset, ...overrides };
 }
 
-// Action-level permission resolver (v2.1). Returns null for the owner
-// (canDo will short-circuit to true), or a flat map keyed `feature.action`
-// for everyone else. Falls back to an empty map if migration 0024 hasn't
-// landed in this environment — callers should treat missing keys as denied.
+// Action-level permission resolver (v2.1.1). Returns null for the owner
+// (canDo short-circuits to true), or a flat map keyed `feature.action` for
+// everyone else. Single JOIN query + a smarter preset fallback so users
+// whose `user_permissions` row is missing still get sensible defaults
+// derived from their role / user_type. Failures fall open at the GET layer
+// (route handlers return empty data) — this function fails closed because
+// some routes still need the granular map to authorize writes.
 async function resolveGranularPermissions(userId, env) {
-  let role = null;
   try {
-    const u = await env.DB.prepare('SELECT role FROM users WHERE id = ?').bind(userId).first();
-    role = u && u.role;
-  } catch { /* ignore */ }
-  if (role === 'owner') return null;
-
-  let presetId = 'preset_external';
-  try {
-    const up = await env.DB.prepare(
-      'SELECT preset_id FROM user_permissions WHERE user_id = ?'
+    const row = await env.DB.prepare(
+      `SELECT u.role, u.user_type, u.status, up.preset_id
+         FROM users u
+         LEFT JOIN user_permissions up ON up.user_id = u.id
+        WHERE u.id = ?`
     ).bind(userId).first();
-    if (up && up.preset_id) presetId = up.preset_id;
-  } catch { /* tables missing — proceed with default preset */ }
+    if (!row) return {};
+    if (row.role === 'owner') return null;
+    if (row.status && row.status !== 'active') return {};
 
-  let presetPerms = { results: [] };
-  let userPerms = { results: [] };
-  try {
-    presetPerms = await env.DB.prepare(
-      'SELECT feature, action, allowed FROM preset_granular_permissions WHERE preset_id = ?'
-    ).bind(presetId).all();
-  } catch { /* migration 0024 not applied yet */ }
-  try {
-    userPerms = await env.DB.prepare(
-      'SELECT feature, action, allowed FROM granular_permissions WHERE user_id = ?'
-    ).bind(userId).all();
-  } catch { /* migration 0024 not applied yet */ }
+    // Preset fallback when no user_permissions row exists: use role/user_type
+    // to pick a sensible default rather than always defaulting to external.
+    const presetId = row.preset_id
+      || (row.role === 'assistant_fixed' || row.user_type === 'fixed'
+          ? 'preset_fixed'
+          : 'preset_external');
 
-  const perms = {};
-  for (const p of presetPerms.results || []) perms[`${p.feature}.${p.action}`] = !!p.allowed;
-  // Per-user overrides take precedence over preset defaults.
-  for (const p of userPerms.results || []) perms[`${p.feature}.${p.action}`] = !!p.allowed;
-  return perms;
+    const [presetPerms, userOverrides] = await Promise.all([
+      env.DB.prepare(
+        'SELECT feature, action, allowed FROM preset_granular_permissions WHERE preset_id = ?'
+      ).bind(presetId).all().catch(() => ({ results: [] })),
+      env.DB.prepare(
+        'SELECT feature, action, allowed FROM granular_permissions WHERE user_id = ?'
+      ).bind(userId).all().catch(() => ({ results: [] })),
+    ]);
+
+    const perms = {};
+    for (const p of presetPerms.results || []) perms[`${p.feature}.${p.action}`] = !!p.allowed;
+    // Per-user overrides take precedence over preset defaults.
+    for (const p of userOverrides.results || []) perms[`${p.feature}.${p.action}`] = !!p.allowed;
+    return perms;
+  } catch (e) {
+    // Log so production traffic that's hitting this path shows up in
+    // Cloudflare Worker logs. Empty map → granular gates fail closed for
+    // writes; GET route handlers convert that to empty-data responses.
+    // eslint-disable-next-line no-console
+    console.error('resolveGranularPermissions error:', String((e && e.message) || e));
+    return {};
+  }
 }
 
 // Boolean gate: true if the user may perform the (feature, action) pair.
@@ -772,14 +782,17 @@ async function handleProfileUpdate(request, env, user) {
 }
 
 async function handleTasksCollection(request, env, user, ctx) {
-  if (!requirePermission(user, 'tasks', 'view')) {
+  // v2.1.1 — GET is fail-open: when the user has no view permission, return
+  // [] instead of 403 so the page renders an empty state rather than crashing.
+  // Writes still 403 to keep the security boundary.
+  if (request.method !== 'GET' && !requirePermission(user, 'tasks', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
   }
-  // v2.1 granular: GET needs view_assigned OR view_all. POST needs create.
   if (request.method === 'GET') {
+    if (!requirePermission(user, 'tasks', 'view')) return json([]);
     if (!canDo(user.granular, 'tasks', 'view_assigned') &&
         !canDo(user.granular, 'tasks', 'view_all')) {
-      return json({ error: 'Sem permissão para visualizar tarefas' }, 403);
+      return json([]);
     }
   }
   if (request.method === 'POST' && !canDo(user.granular, 'tasks', 'create')) {
@@ -1310,10 +1323,16 @@ function shapeWeekPlan(row) {
 }
 
 async function handleWeekPlanGet(request, env, user) {
-  if (!requirePermission(user, 'planning', 'view')) {
-    return json({ error: 'Sem permissão' }, 403);
-  }
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  // v2.1.1 — GET fails open: return an empty-but-valid plan shape so the UI
+  // renders without crashing instead of seeing a 403.
+  if (!requirePermission(user, 'planning', 'view')) {
+    return json({
+      id: null, user_id: user.id, week_start: '',
+      day_plans: {}, weekly_goal: '', weekly_review: '',
+      short_term: '', tactical: '', strategic: '',
+    });
+  }
   const date = new URL(request.url).searchParams.get('date');
   const weekStart = mondayOf(date);
   let row = await env.DB.prepare(
@@ -2042,8 +2061,12 @@ async function calendarGrantorMap(env, user) {
 }
 
 async function handleCalendarEvents(request, env, user) {
-  if (!requirePermission(user, 'calendar', 'view')) {
+  // v2.1.1 — GET fails open (empty list); writes still 403.
+  if (request.method !== 'GET' && !requirePermission(user, 'calendar', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
+  }
+  if (request.method === 'GET' && !requirePermission(user, 'calendar', 'view')) {
+    return json([]);
   }
   if (request.method === 'POST' && !canDo(user.granular, 'calendar', 'create')) {
     return json({ error: 'Sem permissão para criar eventos' }, 403);
@@ -2267,10 +2290,9 @@ async function cacheDriveItem(env, userId, f) {
 }
 
 async function handleDriveFiles(request, env, user) {
-  if (!requirePermission(user, 'drive', 'view')) {
-    return json({ error: 'Sem permissão' }, 403);
-  }
+  // v2.1.1 — GET fails open (empty list) for unauthorized users.
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  if (!requirePermission(user, 'drive', 'view')) return json([]);
   const url = new URL(request.url);
   const parent = url.searchParams.get('parent');
   const search = url.searchParams.get('search');
@@ -2433,8 +2455,12 @@ function shapeNote(row) {
 }
 
 async function handleNotes(request, env, user) {
-  if (!requirePermission(user, 'notes', 'view')) {
+  // v2.1.1 — GET fails open (empty list); writes still 403.
+  if (request.method !== 'GET' && !requirePermission(user, 'notes', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
+  }
+  if (request.method === 'GET' && !requirePermission(user, 'notes', 'view')) {
+    return json([]);
   }
   if (request.method === 'POST' && !canDo(user.granular, 'notes', 'create')) {
     return json({ error: 'Sem permissão para criar notas' }, 403);
@@ -4293,13 +4319,21 @@ async function computePaymentSummary(env, month, overrideUserId = null) {
 }
 
 async function handlePaymentSummary(request, env, user) {
-  if (!requirePermission(user, 'payment', 'view')) {
-    return json({ error: 'Sem permissão' }, 403);
-  }
-  // v2.1 granular: need view_own OR view_all.
+  // v2.1.1 — GET fails open: return an empty summary shape so the page
+  // renders without crashing instead of seeing a 403.
+  const emptySummary = {
+    month: new URL(request.url).searchParams.get('month') || new Date().toISOString().slice(0, 7),
+    totalHours: 0, totalDue: 0, totalPaid: 0, balance: 0,
+    totalDueBrl: 0, totalPaidBrl: 0, balanceBrl: 0,
+    totalDueEur: 0, totalPaidEur: 0, balanceEur: 0,
+    brlRate: 0, brlRateUpdatedAt: null,
+    defaultRate: 0, aliceRate: 0,
+    entries: [], alicePixKey: '', alicePixKeyType: '', aliceBankName: '',
+  };
+  if (!requirePermission(user, 'payment', 'view')) return json(emptySummary);
   if (!canDo(user.granular, 'payment', 'view_own') &&
       !canDo(user.granular, 'payment', 'view_all')) {
-    return json({ error: 'Sem permissão para visualizar pagamentos' }, 403);
+    return json(emptySummary);
   }
   const url = new URL(request.url);
   const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7);
@@ -4676,8 +4710,12 @@ async function handleMeetingStatus(request, env, user) {
 // ---------------------------------------------------------------------------
 
 async function handleAreas(request, env, user) {
-  if (!requirePermission(user, 'areas', 'view')) {
+  // v2.1.1 — GET is fail-open (empty list when not authorized); writes still 403.
+  if (request.method !== 'GET' && !requirePermission(user, 'areas', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
+  }
+  if (request.method === 'GET' && !requirePermission(user, 'areas', 'view')) {
+    return json([]);
   }
   if (request.method === 'POST' && !canDo(user.granular, 'areas', 'manage_areas')) {
     return json({ error: 'Sem permissão para gerenciar áreas' }, 403);
@@ -5014,8 +5052,12 @@ function shapeInstitution(row) {
 }
 
 async function handleNetworkPeople(request, env, user) {
-  if (!requirePermission(user, 'networking', 'view')) {
+  // v2.1.1 — GET fails open (empty list); writes still 403.
+  if (request.method !== 'GET' && !requirePermission(user, 'networking', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
+  }
+  if (request.method === 'GET' && !requirePermission(user, 'networking', 'view')) {
+    return json([]);
   }
   if (request.method === 'POST' && !canDo(user.granular, 'networking', 'edit_contacts')) {
     return json({ error: 'Sem permissão para editar contatos' }, 403);
@@ -5104,8 +5146,11 @@ async function handleNetworkPersonItem(request, env, user, id) {
 }
 
 async function handleNetworkInstitutions(request, env, user) {
-  if (!requirePermission(user, 'networking', 'view')) {
+  if (request.method !== 'GET' && !requirePermission(user, 'networking', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
+  }
+  if (request.method === 'GET' && !requirePermission(user, 'networking', 'view')) {
+    return json([]);
   }
   if (request.method === 'GET') {
     try {
@@ -5165,8 +5210,11 @@ async function handleNetworkInstitutionItem(request, env, user, id) {
 }
 
 async function handleNetworkConnections(request, env, user) {
-  if (!requirePermission(user, 'networking', 'view')) {
+  if (request.method !== 'GET' && !requirePermission(user, 'networking', 'view')) {
     return json({ error: 'Sem permissão' }, 403);
+  }
+  if (request.method === 'GET' && !requirePermission(user, 'networking', 'view')) {
+    return json([]);
   }
   if (request.method === 'GET') {
     try {
@@ -5574,10 +5622,11 @@ async function persistEntityLinks(env, { personId, institutionId }, links) {
 }
 
 async function handleNetworkRoutes(request, env, user) {
-  if (!requirePermission(user, 'networking', 'view')) {
-    return json({ error: 'Sem permissão' }, 403);
-  }
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  // v2.1.1 — GET fails open: empty graph payload for unauthorized users.
+  if (!requirePermission(user, 'networking', 'view')) {
+    return json({ people: [], institutions: [], connections: [], person_roles: [] });
+  }
   let peopleRows = [];
   let institutions = [];
   let connections = [];

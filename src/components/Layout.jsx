@@ -14,6 +14,8 @@ import {
   Video,
   Layers,
   Network as NetworkIcon,
+  MessageSquare,
+  Shield,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
@@ -23,20 +25,27 @@ import TimerIndicator from './timer/TimerIndicator';
 import TimerCheckMonitor from './timer/TimerCheckMonitor';
 import NotificationBell from './notifications/NotificationBell';
 
+// `feature` matches keys in user.permissions (resolved server-side). Items
+// without a `feature` are always visible. Owner always sees everything.
+// `badge` chooses which store field drives the red counter pill (if any).
 const NAV_ITEMS = [
-  { to: '/tasks', label: 'Tarefas', icon: CheckSquare },
-  { to: '/planning', label: 'Planejamento', icon: CalendarRange },
-  { to: '/timer', label: 'Timer', icon: Timer },
-  { to: '/calendar', label: 'Calendário', icon: Calendar },
-  { to: '/drive', label: 'Drive', icon: HardDrive },
-  { to: '/notes', label: 'Notas', icon: FileText },
-  { to: '/payment', label: 'Pagamentos', icon: CreditCard },
-  { to: '/meeting', label: 'Reunião', icon: Video },
-  { to: '/areas', label: 'Áreas', icon: Layers },
-  { to: '/networking', label: 'Networking', icon: NetworkIcon },
+  { to: '/tasks',      label: 'Tarefas',      icon: CheckSquare,   feature: 'tasks' },
+  { to: '/planning',   label: 'Planejamento', icon: CalendarRange, feature: 'planning' },
+  { to: '/timer',      label: 'Timer',        icon: Timer,         feature: 'timer' },
+  { to: '/calendar',   label: 'Calendário',   icon: Calendar,      feature: 'calendar' },
+  { to: '/drive',      label: 'Drive',        icon: HardDrive,     feature: 'drive' },
+  { to: '/notes',      label: 'Notas',        icon: FileText,      feature: 'notes' },
+  { to: '/payment',    label: 'Pagamentos',   icon: CreditCard,    feature: 'payment' },
+  { to: '/meeting',    label: 'Reunião',      icon: Video,         feature: 'meeting' },
+  { to: '/areas',      label: 'Áreas',        icon: Layers,        feature: 'areas' },
+  { to: '/networking', label: 'Networking',   icon: NetworkIcon,   feature: 'networking' },
+  { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread' },
 ];
 
-const OWNER_NAV = [{ to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard }];
+const OWNER_NAV = [
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/admin',     label: 'Admin',     icon: Shield, ownerOnly: true, badge: 'pendingUsers' },
+];
 
 const navClass = ({ isActive }) =>
   `flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
@@ -48,13 +57,31 @@ const navClass = ({ isActive }) =>
 export default function Layout({ children }) {
   const user = useStore((s) => s.user);
   const setUser = useStore((s) => s.setUser);
+  const userPermissions = useStore((s) => s.userPermissions);
+  const pendingUsers = useStore((s) => s.pendingUsers);
   const navigate = useNavigate();
 
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
-  const navItems = user?.role === 'owner' ? [...NAV_ITEMS, ...OWNER_NAV] : NAV_ITEMS;
+  const isOwner = user?.role === 'owner';
+  // Permission-aware nav: owner sees everything; assistants drop any feature
+  // gated at 'none'. Items without a `feature` key are always visible.
+  const visibleMain = NAV_ITEMS.filter((item) => {
+    if (!item.feature) return true;
+    if (isOwner) return true;
+    const perm = userPermissions && userPermissions[item.feature];
+    return !!perm && perm !== 'none';
+  });
+  const visibleOwner = isOwner ? OWNER_NAV : [];
+  const navItems = [...visibleMain, ...visibleOwner];
+  const chatUnread = useStore((s) => s.chatUnread);
+  const badgeCount = (key) => {
+    if (key === 'pendingUsers') return pendingUsers ? pendingUsers.length : 0;
+    if (key === 'chatUnread') return chatUnread || 0;
+    return 0;
+  };
 
   const handleLogout = () => {
     clearToken();
@@ -182,12 +209,21 @@ export default function Layout({ children }) {
         {/* Sidebar (desktop) */}
         <aside className="hidden w-60 shrink-0 flex-col border-r border-line bg-surface p-3 md:flex">
           <div className="flex flex-col gap-1">
-            {navItems.map(({ to, label, icon: Icon }) => (
-              <NavLink key={to} to={to} className={navClass}>
-                <Icon className="h-5 w-5" />
-                {label}
-              </NavLink>
-            ))}
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              const count = item.badge ? badgeCount(item.badge) : 0;
+              return (
+                <NavLink key={item.to} to={item.to} className={navClass}>
+                  <Icon className="h-5 w-5" />
+                  <span className="flex-1">{item.label}</span>
+                  {count > 0 && (
+                    <span className="rounded-full bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                      {count}
+                    </span>
+                  )}
+                </NavLink>
+              );
+            })}
           </div>
 
           {/* Spacer pushes the timer + Settings to the bottom */}
@@ -207,22 +243,32 @@ export default function Layout({ children }) {
           30-min check only fires once on desktop. */}
       <TimerCheckMonitor />
 
-      {/* Bottom nav (mobile) */}
-      <nav className="fixed inset-x-0 bottom-0 z-10 flex h-16 items-stretch border-t border-line bg-surface md:hidden">
-        {navItems.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            className={({ isActive }) =>
-              `flex flex-1 flex-col items-center justify-center gap-1 text-[10px] transition ${
-                isActive ? 'text-accent' : 'text-ink2'
-              }`
-            }
-          >
-            <Icon className="h-5 w-5" />
-            {label}
-          </NavLink>
-        ))}
+      {/* Bottom nav (mobile) — horizontally scrolling because v1.10 pushes the
+          count past what fits on a phone (13 items max). */}
+      <nav className="fixed inset-x-0 bottom-0 z-10 flex h-16 items-stretch overflow-x-auto border-t border-line bg-surface md:hidden">
+        {navItems.map((item) => {
+          const Icon = item.icon;
+          const count = item.badge ? badgeCount(item.badge) : 0;
+          return (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) =>
+                `relative flex min-w-[64px] flex-1 flex-col items-center justify-center gap-1 px-2 text-[10px] transition ${
+                  isActive ? 'text-accent' : 'text-ink2'
+                }`
+              }
+            >
+              <Icon className="h-5 w-5" />
+              {item.label}
+              {count > 0 && (
+                <span className="absolute right-2 top-1 rounded-full bg-danger px-1 py-0 text-[9px] font-semibold leading-tight text-white">
+                  {count}
+                </span>
+              )}
+            </NavLink>
+          );
+        })}
       </nav>
     </div>
   );

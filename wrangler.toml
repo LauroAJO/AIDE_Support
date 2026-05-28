@@ -7,13 +7,9 @@ binding = "DB"
 database_name = "aide-db"
 database_id = "71f9338d-8664-4df1-8384-86ba8c256de9"
 
-[[kv_namespaces]]
-binding = "AIDE_TOKENS"
-id = "7c9e215fee7e4b9fa97bb1def4536e8a"
-
-[[kv_namespaces]]
-binding = "AIDE_SYNC"
-id = "5afa763feac346398319c34996a85d31"
+# KV namespaces (AIDE_TOKENS, AIDE_SYNC) were unbound in v2.0.0 — the worker
+# no longer reads or writes KV. The namespaces themselves still exist in the
+# Cloudflare account and can be re-bound later if needed.
 
 # Secrets (GOOGLE_CLIENT_ID/SECRET, ALLOWED_EMAILS, OWNER_EMAIL, VAPID_PUBLIC_KEY,
 # VAPID_PRIVATE_KEY) are NOT defined here (public repo). They live in the

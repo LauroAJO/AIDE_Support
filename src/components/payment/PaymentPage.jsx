@@ -65,6 +65,9 @@ export default function PaymentPage() {
   const [loading, setLoading] = useState(true);
   const [alice, setAlice] = useState(null);
   const [lauro, setLauro] = useState(null);
+  const [assistants, setAssistants] = useState([]);  // owner tabs source
+  const [tabUserId, setTabUserId] = useState(null);  // null=default(Alice), 'all'=merged, or specific id
+  const [allEntries, setAllEntries] = useState([]);  // populated only on the 'all' tab
   const [editRate, setEditRate] = useState(null); // { taskId, type, value }
   const [editEntry, setEditEntry] = useState(null); // time_entry payload
   const [showManual, setShowManual] = useState(false);
@@ -74,20 +77,77 @@ export default function PaymentPage() {
   const [defaultRateMsg, setDefaultRateMsg] = useState(null);
 
   const isOwner = user?.role === 'owner';
+  const isAllTab = tabUserId === 'all';
+  // The default rate / PIX editor only makes sense on the legacy Alice view —
+  // it writes specifically to Alice's availability row server-side.
+  const showAliceEditor = !isOwner || (tabUserId === null);
 
-  const load = async (m) => {
+  const load = async (m, tabOverride = undefined) => {
     setLoading(true);
+    const tab = tabOverride === undefined ? tabUserId : tabOverride;
     try {
-      const [sum, users] = await Promise.all([
-        apiFetch(`/api/payment/summary?month=${m}`),
-        apiFetch('/api/users'),
-      ]);
-      setSummary(sum);
-      setAlice(users.find((u) => u.role === 'assistant') || null);
-      setLauro(users.find((u) => u.role === 'owner') || null);
-      // Seed do editor: taxa padrão é sempre a de Alice (assistant), vindo do
-      // summary.defaultRate. NÃO depende de quem está logado.
-      setDefaultRateDraft(String(sum.defaultRate ?? 0));
+      // Roster fetch is reused by both branches below to derive the tab list.
+      const usersList = await apiFetch('/api/users').catch(() => []);
+      const aliceRow = usersList.find((u) => u.role === 'assistant_fixed' || u.role === 'assistant') || null;
+      setAlice(aliceRow);
+      setLauro(usersList.find((u) => u.role === 'owner') || null);
+      // Active assistants (any non-owner role; archived users are filtered out
+      // server-side by getUserFromRequest). Sort owner-first by name for a
+      // stable tab order.
+      const team = usersList
+        .filter((u) => u.role && u.role !== 'owner')
+        .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      setAssistants(team);
+
+      if (isOwner && tab === 'all') {
+        // Aggregate: fetch each assistant's summary in parallel, merge entries
+        // into one big list with a userName label, sum totals client-side.
+        const summaries = await Promise.all(
+          team.map((u) =>
+            apiFetch(`/api/payment/summary?month=${m}&user_id=${encodeURIComponent(u.id)}`)
+              .catch(() => null)
+          )
+        );
+        const merged = { entries: [], totalHours: 0, totalDue: 0, totalPaid: 0,
+                         totalDueEur: 0, totalPaidEur: 0, balance: 0, balanceEur: 0 };
+        const allTaggedEntries = [];
+        let brlRate = 0;
+        let brlRateUpdatedAt = null;
+        for (let i = 0; i < summaries.length; i += 1) {
+          const s = summaries[i];
+          if (!s) continue;
+          const u = team[i];
+          brlRate = s.brlRate || brlRate;
+          brlRateUpdatedAt = s.brlRateUpdatedAt || brlRateUpdatedAt;
+          merged.totalHours += s.totalHours || 0;
+          merged.totalDue += s.totalDue || 0;
+          merged.totalPaid += s.totalPaid || 0;
+          merged.totalDueEur += s.totalDueEur || 0;
+          merged.totalPaidEur += s.totalPaidEur || 0;
+          for (const e of s.entries || []) {
+            allTaggedEntries.push({ ...e, userName: u.name || u.email, userId: u.id });
+          }
+        }
+        merged.balance = merged.totalDue - merged.totalPaid;
+        merged.balanceEur = merged.totalDueEur - merged.totalPaidEur;
+        merged.brlRate = brlRate;
+        merged.brlRateUpdatedAt = brlRateUpdatedAt;
+        merged.month = m;
+        merged.entries = allTaggedEntries;
+        merged.defaultRate = 0;
+        merged.alicePixKey = '';
+        merged.alicePixKeyType = '';
+        merged.aliceBankName = '';
+        setSummary(merged);
+        setAllEntries(allTaggedEntries);
+        setDefaultRateDraft('0');
+      } else {
+        const qs = isOwner && tab ? `?month=${m}&user_id=${encodeURIComponent(tab)}` : `?month=${m}`;
+        const sum = await apiFetch(`/api/payment/summary${qs}`);
+        setSummary(sum);
+        setAllEntries([]);
+        setDefaultRateDraft(String(sum.defaultRate ?? 0));
+      }
     } finally {
       setLoading(false);
     }
@@ -95,7 +155,7 @@ export default function PaymentPage() {
   useEffect(() => {
     load(month);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month]);
+  }, [month, tabUserId]);
 
   const saveDefaultRate = async () => {
     setSavingDefaultRate(true);
@@ -189,6 +249,31 @@ export default function PaymentPage() {
     <div className="mx-auto max-w-5xl space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-2xl font-bold text-ink">Pagamentos</h1>
+        {/* Owner-only: user tab strip. Single-assistant case (just Alice) is
+            unchanged — only render tabs when there's more than one user to
+            switch between. */}
+        {isOwner && assistants.length > 1 && (
+          <div className="flex w-full flex-wrap items-center gap-1 border-b border-line">
+            <TabBtn
+              active={tabUserId === null}
+              onClick={() => setTabUserId(null)}
+              label={alice?.name?.split(' ')[0] || 'Padrão'}
+            />
+            {assistants.map((a) => (
+              <TabBtn
+                key={a.id}
+                active={tabUserId === a.id}
+                onClick={() => setTabUserId(a.id)}
+                label={(a.display_name || a.name || a.email || 'Usuário').split(' ')[0]}
+              />
+            ))}
+            <TabBtn
+              active={tabUserId === 'all'}
+              onClick={() => setTabUserId('all')}
+              label="Todos"
+            />
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-1">
             <button onClick={() => setMonth(shiftMonth(month, -1))} className="rounded-lg border border-line p-1.5 text-ink2 hover:bg-surface2"><ChevronLeft className="h-4 w-4" /></button>
@@ -211,7 +296,9 @@ export default function PaymentPage() {
         </div>
       </div>
 
-      {/* Alice info */}
+      {/* Alice info — only on the legacy default tab (the per-user tabs and
+          the aggregated 'Todos' view don't have a single PIX/profile target). */}
+      {showAliceEditor && (
       <div className="flex items-center gap-3 rounded-xl border border-line bg-surface p-4">
         <Avatar user={alice || {}} size={48} />
         <div className="min-w-0 flex-1">
@@ -227,9 +314,20 @@ export default function PaymentPage() {
         </div>
         <a href="/profile" className="text-xs text-accent hover:underline">Editar dados → Perfil</a>
       </div>
+      )}
+
+      {/* Per-user / 'Todos' banner — explains what the owner is looking at. */}
+      {isOwner && tabUserId !== null && (
+        <div className="rounded-lg border border-line bg-surface2 px-3 py-2 text-xs text-ink2">
+          {tabUserId === 'all'
+            ? 'Visão agregada de todos os assistentes — entradas combinadas com coluna de usuário.'
+            : `Visualizando pagamentos de ${assistants.find((a) => a.id === tabUserId)?.name || 'usuário'}.`}
+        </div>
+      )}
 
       {/* Editor da taxa padrão — único local. Escreve em Alice.hourly_rate_brl
           via /api/payment/default-rate independente do papel do usuário logado. */}
+      {showAliceEditor && (
       <div className="rounded-xl border border-line bg-surface p-4">
         <div className="flex flex-wrap items-end gap-3">
           <label className="block min-w-[200px]">
@@ -270,6 +368,7 @@ export default function PaymentPage() {
           </p>
         </div>
       </div>
+      )}
 
       {/* Exchange rate banner — owner only */}
       {isOwner && brlRate > 0 && (
@@ -326,6 +425,7 @@ export default function PaymentPage() {
           <thead>
             <tr className="border-b border-line text-muted">
               <th className="py-2 pr-2 font-medium">Data</th>
+              {isAllTab && <th className="py-2 pr-2 font-medium">Usuário</th>}
               <th className="py-2 pr-2 font-medium">Tarefa</th>
               <th className="py-2 pr-2 font-medium">Projeto</th>
               <th className="py-2 pr-2 font-medium">Tipo</th>
@@ -340,7 +440,7 @@ export default function PaymentPage() {
           <tbody>
             {summary.entries.length === 0 ? (
               <tr>
-                <td colSpan={isOwner ? 10 : 9} className="py-8 text-center">
+                <td colSpan={(isOwner ? 10 : 9) + (isAllTab ? 1 : 0)} className="py-8 text-center">
                   <div className="text-sm text-muted">
                     Nenhum registro de tempo em {monthLabel(month)}.
                   </div>
@@ -361,7 +461,7 @@ export default function PaymentPage() {
                 if (k !== lastDateKey) {
                   rows.push(
                     <tr key={`hdr-${k}`} className="bg-surface2/60">
-                      <td colSpan={isOwner ? 10 : 9} className="py-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-ink2">
+                      <td colSpan={(isOwner ? 10 : 9) + (isAllTab ? 1 : 0)} className="py-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-ink2">
                         {formatEntryDate(e.started_at)}
                       </td>
                     </tr>
@@ -371,6 +471,7 @@ export default function PaymentPage() {
                 rows.push(
                   <tr key={e.id} className="border-b border-line/60 text-ink">
                     <td className="py-2 pr-2 text-ink2">{formatEntryDate(e.started_at)}</td>
+                    {isAllTab && <td className="py-2 pr-2 text-ink2">{e.userName || '—'}</td>}
                     <td className="py-2 pr-2">{e.taskTitle}</td>
                     <td className="py-2 pr-2 text-ink2">{e.projectName || '—'}</td>
                     <td className="py-2 pr-2">{e.rateType === 'fixed' ? 'Fixo' : 'Por hora'}</td>
@@ -489,6 +590,22 @@ export default function PaymentPage() {
         />
       )}
     </div>
+  );
+}
+
+function TabBtn({ active, onClick, label }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition ${
+        active
+          ? 'border-accent text-accent'
+          : 'border-transparent text-ink2 hover:text-ink'
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 

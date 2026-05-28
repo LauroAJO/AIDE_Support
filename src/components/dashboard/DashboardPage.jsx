@@ -48,7 +48,7 @@ export default function DashboardPage() {
         apiFetch('/api/tasks'),
       ]);
       setAliceTimer(timer);
-      setAlice(users.find((u) => u.role === 'assistant') || null);
+      setAlice(users.find((u) => u.role === 'assistant_fixed' || u.role === 'assistant') || null);
       setCompletedToday(completed);
       setAllTasks(tasks);
     } finally {

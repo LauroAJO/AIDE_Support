@@ -64,6 +64,13 @@ async function handleAPI(request, env, ctx) {
   }
 
   if (path === '/api/users') return handleUsers(env);
+  // Multi-user admin (owner-only — guard lives inside each handler).
+  if (path === '/api/users/all') return handleUsersAll(request, env, user);
+  if (path === '/api/users/pending') return handleUsersPending(request, env, user);
+  if (path.match(/^\/api\/users\/[^/]+\/(approve|role|permissions|archive)$/)) {
+    const parts = path.split('/');
+    return handleUserAction(request, env, user, parts[3], parts[4]);
+  }
   if (path === '/api/profile') return handleProfileUpdate(request, env, user);
 
   // Exports
@@ -217,6 +224,12 @@ async function handleAPI(request, env, ctx) {
   // Dashboard
   if (path === '/api/dashboard/alice-timer') return handleAliceTimer(env, user);
 
+  // Chat — general channel (v1.10 multi-user).
+  if (path === '/api/chat/messages') return handleChatMessages(request, env, user, ctx);
+  if (path.match(/^\/api\/chat\/messages\/[^/]+$/)) {
+    return handleChatMessageItem(request, env, user, path.split('/')[4]);
+  }
+
   return json({ error: 'Rota não encontrada' }, 404);
 }
 
@@ -337,52 +350,127 @@ async function handleCallback(request, env) {
   const userId = profile.id;
   const now = Math.floor(Date.now() / 1000);
 
-  // 2b. Access control — only allowed emails may sign in.
-  if (!isEmailAllowed(profile.email, env)) {
-    const dest = new URL('/', new URL(getRedirectUri(request, env)).origin);
-    dest.searchParams.set('error', 'acesso_negado');
-    return Response.redirect(dest.toString(), 302);
+  // 2b. Multi-user role/status resolution (v1.10).
+  //   - OWNER_EMAIL match            → role='owner',             status='active'.
+  //   - ALLOWED_EMAILS match         → role='assistant_fixed',   status='active'.
+  //   - Anyone else                  → role='assistant_external',status='pending'.
+  // Pending users have a session row created in D1 but the redirect below
+  // omits the token, so they can't call any API until the owner approves.
+  const ownerEmail = (env.OWNER_EMAIL || '').trim().toLowerCase();
+  const incomingEmail = (profile.email || '').toLowerCase();
+  const isOwnerEmail = !!ownerEmail && incomingEmail === ownerEmail;
+  const rawAllow = (env.ALLOWED_EMAILS || '').trim();
+  const allowedList = rawAllow
+    ? rawAllow.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean)
+    : [];
+  // If ALLOWED_EMAILS is unset, treat every Google sign-in as allowed (the
+  // pre-multi-user "everyone gets in" behavior). When set, only listed
+  // emails count as allowed; the rest become pending.
+  const isAllowedEmail = allowedList.length === 0 || allowedList.includes(incomingEmail);
+
+  let newRole;
+  let newStatus;
+  let newUserType;
+  if (isOwnerEmail) {
+    newRole = 'owner'; newStatus = 'active'; newUserType = 'fixed';
+  } else if (isAllowedEmail) {
+    newRole = 'assistant_fixed'; newStatus = 'active'; newUserType = 'fixed';
+  } else {
+    newRole = 'assistant_external'; newStatus = 'pending'; newUserType = 'external';
   }
 
-  const role = roleForEmail(profile.email, env);
+  // 3. Existing users keep their stored role/status/user_type — only profile
+  //    fields + Google tokens get refreshed. New users get the computed
+  //    multi-user shape from step 2b.
+  let existing = null;
+  try {
+    existing = await env.DB.prepare(
+      'SELECT role, status, user_type FROM users WHERE id = ?'
+    ).bind(userId).first();
+  } catch {
+    try {
+      existing = await env.DB.prepare('SELECT role FROM users WHERE id = ?').bind(userId).first();
+    } catch { existing = null; }
+  }
 
-  // 3. Upsert user in D1. Role is recomputed from OWNER_EMAIL on every login.
-  await env.DB.prepare(
-    `INSERT OR REPLACE INTO users
-       (id, email, name, avatar, role, google_access_token, google_refresh_token, google_token_expires_at, created_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?,
-       COALESCE((SELECT created_at FROM users WHERE id = ?), ?),
-       ?)`
-  ).bind(
-    userId,
-    profile.email,
-    profile.name || null,
-    profile.picture || null,
-    role,
-    access_token,
-    refresh_token || null,
-    expires_at,
-    userId,
-    now,
-    now
-  ).run();
+  if (existing) {
+    await env.DB.prepare(
+      `UPDATE users SET email = ?, name = ?, avatar = ?,
+         google_access_token = ?, google_refresh_token = ?, google_token_expires_at = ?,
+         last_seen_at = ? WHERE id = ?`
+    ).bind(
+      profile.email, profile.name || null, profile.picture || null,
+      access_token, refresh_token || null, expires_at, now, userId
+    ).run();
+    // Owner promotion: a returning user whose email now matches OWNER_EMAIL
+    // but whose stored role drifted (e.g. seeded as assistant before
+    // OWNER_EMAIL was configured) gets upgraded. We never demote here.
+    if (isOwnerEmail && existing.role !== 'owner') {
+      try {
+        await env.DB.prepare(
+          "UPDATE users SET role = 'owner', status = 'active', user_type = 'fixed' WHERE id = ?"
+        ).bind(userId).run();
+      } catch {
+        await env.DB.prepare("UPDATE users SET role = 'owner' WHERE id = ?").bind(userId).run();
+      }
+    }
+  } else {
+    // Brand-new user — insert with full multi-user shape. Fall back to the
+    // legacy column set if migration 0022 hasn't landed in this environment.
+    try {
+      await env.DB.prepare(
+        `INSERT INTO users
+           (id, email, name, avatar, role, user_type, status,
+            google_access_token, google_refresh_token, google_token_expires_at,
+            created_at, last_seen_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        userId, profile.email, profile.name || null, profile.picture || null,
+        newRole, newUserType, newStatus,
+        access_token, refresh_token || null, expires_at, now, now
+      ).run();
+    } catch {
+      await env.DB.prepare(
+        `INSERT INTO users
+           (id, email, name, avatar, role,
+            google_access_token, google_refresh_token, google_token_expires_at,
+            created_at, last_seen_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        userId, profile.email, profile.name || null, profile.picture || null,
+        newRole, access_token, refresh_token || null, expires_at, now, now
+      ).run();
+    }
+  }
+
+  // Decide the effective status AFTER the upsert (handles both new + returning
+  // users uniformly). Legacy schema without a status column → treat as active.
+  let effectiveStatus = 'active';
+  try {
+    const row = await env.DB.prepare('SELECT status FROM users WHERE id = ?').bind(userId).first();
+    if (row && row.status) effectiveStatus = row.status;
+  } catch { /* legacy schema */ }
 
   // 4. Tokens are persisted in the users table above (no KV write — KV write
   //    limits are shared with Lifegame).
 
-  // 5. Create session in D1 (30 days)
+  // 5. Create session in D1 (30 days). Pending users also get a session row,
+  //    but the token is withheld in step 6 below.
   const sessionToken = crypto.randomUUID();
   const sessionExpires = now + 60 * 60 * 24 * 30;
   await env.DB.prepare(
     'INSERT INTO sessions (id, user_id, token, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
   ).bind(crypto.randomUUID(), userId, sessionToken, sessionExpires, now).run();
 
-  // 6. Return token + user.
-  // The browser hit this URL directly via redirect, so bounce back to the
-  // frontend with the token as a query param (frontend stores it).
+  // 6. Bounce back to the frontend. Pending users land at /?pending=true with
+  //    no token; everyone else gets the standard /?token=... handoff.
   const redirectBase = new URL(getRedirectUri(request, env)).origin;
   const dest = new URL('/', redirectBase);
-  dest.searchParams.set('token', sessionToken);
+  if (effectiveStatus === 'pending') {
+    dest.searchParams.set('pending', 'true');
+  } else {
+    dest.searchParams.set('token', sessionToken);
+  }
   return Response.redirect(dest.toString(), 302);
 }
 
@@ -404,12 +492,29 @@ async function getUserFromRequest(request, env) {
   if (!auth || !auth.startsWith('Bearer ')) return null;
   const token = auth.slice(7);
   const now = Math.floor(Date.now() / 1000);
-  const session = await env.DB.prepare(
-    `SELECT u.* FROM sessions s
-       JOIN users u ON s.user_id = u.id
-      WHERE s.token = ? AND s.expires_at > ?`
-  ).bind(token, now).first();
-  return session || null;
+  // Archived users keep their D1 row but cannot use sessions. The `status`
+  // column may not exist if migration 0022 hasn't been applied yet — fall
+  // back to the legacy query so old environments keep working.
+  let session = null;
+  try {
+    session = await env.DB.prepare(
+      `SELECT u.* FROM sessions s
+         JOIN users u ON s.user_id = u.id
+        WHERE s.token = ? AND s.expires_at > ?
+          AND (u.status IS NULL OR u.status != 'archived')`
+    ).bind(token, now).first();
+  } catch {
+    session = await env.DB.prepare(
+      `SELECT u.* FROM sessions s
+         JOIN users u ON s.user_id = u.id
+        WHERE s.token = ? AND s.expires_at > ?`
+    ).bind(token, now).first();
+  }
+  if (!session) return null;
+  // resolvePermissions has its own try/catch around the perm tables so a
+  // missing migration degrades to the external-preset defaults.
+  const permissions = await resolvePermissions(session.id, env);
+  return { ...session, permissions };
 }
 
 function publicUser(user) {
@@ -419,8 +524,82 @@ function publicUser(user) {
     name: user.name,
     avatar: user.avatar,
     role: user.role,
+    user_type: user.user_type || null,
+    status: user.status || null,
+    display_name: user.display_name || '',
     timezone: user.timezone || null,
+    permissions: user.permissions || null,
   };
+}
+
+// Flat permission map: feature → level. Levels are
+// full | view | own | assigned_only | own_and_tagged | none.
+const ALL_NONE_PERMISSIONS = {
+  tasks: 'none', planning: 'none', timer: 'none', calendar: 'none',
+  drive: 'none', notes: 'none', payment: 'none', meeting: 'none',
+  areas: 'none', networking: 'none', alerts: 'none', settings: 'none',
+  chat: 'none', dashboard: 'none',
+};
+
+const ALL_FULL_PERMISSIONS = {
+  tasks: 'full', planning: 'full', timer: 'full', calendar: 'full',
+  drive: 'full', notes: 'full', payment: 'full', meeting: 'full',
+  areas: 'full', networking: 'full', alerts: 'full', settings: 'full',
+  chat: 'full', dashboard: 'full',
+};
+
+// Mirrors the 'preset_external' seed in migration 0022 — kept inline so the
+// function still resolves sensibly before that migration lands.
+const DEFAULT_EXTERNAL_PERMISSIONS = {
+  tasks: 'assigned_only', planning: 'none', timer: 'full', calendar: 'none',
+  drive: 'none', notes: 'own_and_tagged', payment: 'own', meeting: 'full',
+  areas: 'none', networking: 'none', alerts: 'none', settings: 'none',
+  chat: 'full', dashboard: 'none',
+};
+
+async function resolvePermissions(userId, env) {
+  let userRow = null;
+  try {
+    userRow = await env.DB.prepare('SELECT role, status FROM users WHERE id = ?').bind(userId).first();
+  } catch {
+    try {
+      userRow = await env.DB.prepare('SELECT role FROM users WHERE id = ?').bind(userId).first();
+    } catch { /* DB unreachable — fall through to ALL_NONE */ }
+  }
+  if (!userRow) return { ...ALL_NONE_PERMISSIONS };
+  if (userRow.status && userRow.status !== 'active') return { ...ALL_NONE_PERMISSIONS };
+  if (userRow.role === 'owner') return { ...ALL_FULL_PERMISSIONS };
+
+  let up = null;
+  try {
+    up = await env.DB.prepare(
+      `SELECT up.overrides, pp.permissions
+         FROM user_permissions up
+         LEFT JOIN permission_presets pp ON up.preset_id = pp.id
+        WHERE up.user_id = ?`
+    ).bind(userId).first();
+  } catch { up = null; /* tables not migrated yet */ }
+
+  let preset = {};
+  let overrides = {};
+  try { preset = JSON.parse((up && up.permissions) || '{}'); } catch { preset = {}; }
+  try { overrides = JSON.parse((up && up.overrides) || '{}'); } catch { overrides = {}; }
+
+  return { ...DEFAULT_EXTERNAL_PERMISSIONS, ...preset, ...overrides };
+}
+
+// Permission guard for route handlers. Returns true if `user` may use
+// `feature` at `minLevel`. Owner bypasses. The level ordering matches the
+// spec's array (none < view < own < assigned_only < own_and_tagged < full).
+function requirePermission(user, feature, minLevel = 'view') {
+  if (!user) return false;
+  if (user.role === 'owner') return true;
+  const levels = ['none', 'view', 'own', 'assigned_only', 'own_and_tagged', 'full'];
+  const userLevel = (user.permissions && user.permissions[feature]) || 'none';
+  if (userLevel === 'none') return false;
+  if (userLevel === 'full') return true;
+  if (minLevel === 'view') return userLevel !== 'none';
+  return levels.indexOf(userLevel) >= levels.indexOf(minLevel);
 }
 
 // ---------------------------------------------------------------------------
@@ -544,19 +723,32 @@ async function handleProfileUpdate(request, env, user) {
 }
 
 async function handleTasksCollection(request, env, user, ctx) {
+  if (!requirePermission(user, 'tasks', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+  // assigned_only users only see tasks assigned to themselves on list reads.
+  const tasksLevel = (user.permissions && user.permissions.tasks) || 'full';
+  const assignedOnly = tasksLevel === 'assigned_only';
+
   if (request.method === 'GET') {
     if (new URL(request.url).searchParams.get('completed_today') === 'true') {
       const midnight = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000);
+      const filter = assignedOnly ? ' AND t.assigned_to = ?' : '';
+      const binds = assignedOnly ? [midnight, user.id] : [midnight];
       const { results } = await env.DB.prepare(
-        `${TASK_SELECT} WHERE t.status = 'done' AND t.updated_at >= ? ORDER BY t.updated_at DESC`
-      ).bind(midnight).all();
+        `${TASK_SELECT} WHERE t.status = 'done' AND t.updated_at >= ?${filter} ORDER BY t.updated_at DESC`
+      ).bind(...binds).all();
       return json((results || []).map(shapeTask));
     }
     const onlyFav = new URL(request.url).searchParams.get('favorited') === 'true';
-    const where = onlyFav ? 'WHERE t.favorited = 1 ' : '';
+    const conds = [];
+    const binds = [];
+    if (onlyFav) conds.push('t.favorited = 1');
+    if (assignedOnly) { conds.push('t.assigned_to = ?'); binds.push(user.id); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')} ` : '';
     const { results } = await env.DB.prepare(
       `${TASK_SELECT} ${where}ORDER BY (t.urgency + t.importance) DESC, t.created_at DESC`
-    ).all();
+    ).bind(...binds).all();
     return json((results || []).map(shapeTask));
   }
 
@@ -1040,6 +1232,9 @@ function shapeWeekPlan(row) {
 }
 
 async function handleWeekPlanGet(request, env, user) {
+  if (!requirePermission(user, 'planning', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
   const date = new URL(request.url).searchParams.get('date');
   const weekStart = mondayOf(date);
@@ -1769,6 +1964,9 @@ async function calendarGrantorMap(env, user) {
 }
 
 async function handleCalendarEvents(request, env, user) {
+  if (!requirePermission(user, 'calendar', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
   if (request.method === 'GET') {
     const url = new URL(request.url);
     const timeMin = url.searchParams.get('start') || new Date().toISOString();
@@ -1977,6 +2175,9 @@ async function cacheDriveItem(env, userId, f) {
 }
 
 async function handleDriveFiles(request, env, user) {
+  if (!requirePermission(user, 'drive', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
   const url = new URL(request.url);
   const parent = url.searchParams.get('parent');
@@ -2140,6 +2341,11 @@ function shapeNote(row) {
 }
 
 async function handleNotes(request, env, user) {
+  if (!requirePermission(user, 'notes', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+  const notesLevel = (user.permissions && user.permissions.notes) || 'full';
+
   if (request.method === 'GET') {
     const url = new URL(request.url);
     const search = url.searchParams.get('search');
@@ -2158,6 +2364,16 @@ async function handleNotes(request, env, user) {
     if (tag) {
       where.push('n.tags LIKE ?');
       binds.push(`%"${tag}"%`);
+    }
+    // own_and_tagged: notes the user created OR notes whose tags JSON contains
+    // their user id (best-effort substring match — notes have no first-class
+    // mention column).
+    if (notesLevel === 'own_and_tagged') {
+      where.push('(n.created_by = ? OR n.tags LIKE ?)');
+      binds.push(user.id, `%${user.id}%`);
+    } else if (notesLevel === 'own') {
+      where.push('n.created_by = ?');
+      binds.push(user.id);
     }
     const sql = `${NOTE_SELECT}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY n.pinned DESC, n.updated_at DESC`;
     const { results } = await env.DB.prepare(sql).bind(...binds).all();
@@ -3722,7 +3938,11 @@ async function handleAlertRuleTest(request, env, user, id) {
 async function getRoleUsers(env) {
   const { results } = await env.DB.prepare('SELECT id, role FROM users').all();
   const owner = (results || []).find((u) => u.role === 'owner');
-  const assistant = (results || []).find((u) => u.role === 'assistant');
+  // Migration 0022 renamed the legacy 'assistant' role to 'assistant_fixed'.
+  // Accept either name — preferring the new one — so alert targeting and the
+  // payment summary keep working across the rename.
+  const assistant = (results || []).find((u) => u.role === 'assistant_fixed')
+    || (results || []).find((u) => u.role === 'assistant');
   return { ownerId: owner ? owner.id : null, assistantId: assistant ? assistant.id : null };
 }
 
@@ -3856,9 +4076,10 @@ function monthRange(month) {
   return { start, end };
 }
 
-async function computePaymentSummary(env, month) {
+async function computePaymentSummary(env, month, overrideUserId = null) {
   const { start, end } = monthRange(month);
-  const { assistantId } = await getRoleUsers(env);
+  const { assistantId: legacyAssistantId } = await getRoleUsers(env);
+  const assistantId = overrideUserId || legacyAssistantId;
   const { results } = await env.DB.prepare(
     `SELECT e.*, t.title AS task_title, t.project_id, t.rate_type AS t_rate_type, t.rate_value AS t_rate_value,
             p.name AS project_name, p.rate_type AS p_rate_type, p.rate_value AS p_rate_value
@@ -3967,8 +4188,25 @@ async function computePaymentSummary(env, month) {
 }
 
 async function handlePaymentSummary(request, env, user) {
-  const month = new URL(request.url).searchParams.get('month') || new Date().toISOString().slice(0, 7);
-  return json(await computePaymentSummary(env, month));
+  if (!requirePermission(user, 'payment', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+  const url = new URL(request.url);
+  const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7);
+  const requestedUserId = url.searchParams.get('user_id');
+  // Override priority:
+  //   payment='own' (non-owner) → always self.
+  //   owner + explicit ?user_id=X → that user (lets the owner tab through
+  //     each team member's payments without logging in as them).
+  //   anything else → null (legacy "always Alice" computePaymentSummary path).
+  const paymentLevel = (user.permissions && user.permissions.payment) || 'full';
+  let overrideUserId = null;
+  if (paymentLevel === 'own' && user.role !== 'owner') {
+    overrideUserId = user.id;
+  } else if (user.role === 'owner' && requestedUserId) {
+    overrideUserId = requestedUserId;
+  }
+  return json(await computePaymentSummary(env, month, overrideUserId));
 }
 
 // GET retorna a taxa padrão (BRL) atualmente configurada para Alice.
@@ -4319,6 +4557,9 @@ async function handleMeetingStatus(request, env, user) {
 // ---------------------------------------------------------------------------
 
 async function handleAreas(request, env, user) {
+  if (!requirePermission(user, 'areas', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
   if (request.method === 'GET') {
     try {
       const { results } = await env.DB.prepare(
@@ -4640,6 +4881,9 @@ function shapeInstitution(row) {
 }
 
 async function handleNetworkPeople(request, env, user) {
+  if (!requirePermission(user, 'networking', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
   if (request.method === 'GET') {
     try {
       const { results } = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
@@ -4720,6 +4964,9 @@ async function handleNetworkPersonItem(request, env, user, id) {
 }
 
 async function handleNetworkInstitutions(request, env, user) {
+  if (!requirePermission(user, 'networking', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
   if (request.method === 'GET') {
     try {
       const { results } = await env.DB.prepare('SELECT * FROM network_institutions ORDER BY name').all();
@@ -4778,6 +5025,9 @@ async function handleNetworkInstitutionItem(request, env, user, id) {
 }
 
 async function handleNetworkConnections(request, env, user) {
+  if (!requirePermission(user, 'networking', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
   if (request.method === 'GET') {
     try {
       const { results } = await env.DB.prepare('SELECT * FROM network_connections ORDER BY created_at DESC').all();
@@ -5171,6 +5421,9 @@ async function persistEntityLinks(env, { personId, institutionId }, links) {
 }
 
 async function handleNetworkRoutes(request, env, user) {
+  if (!requirePermission(user, 'networking', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
   let peopleRows = [];
   let institutions = [];
@@ -5203,6 +5456,392 @@ async function handleNetworkRoutes(request, env, user) {
     }
   }
   return json({ people, institutions, connections, person_roles });
+}
+
+// ---------------------------------------------------------------------------
+// User management (owner-only) — multi-user admin (v1.10)
+// ---------------------------------------------------------------------------
+
+// Hydrates a users row with preset/overrides metadata + resolved permissions.
+async function shapeAdminUser(env, row) {
+  if (!row) return null;
+  let preset_id = null;
+  let overrides = null;
+  try {
+    const up = await env.DB.prepare(
+      'SELECT preset_id, overrides FROM user_permissions WHERE user_id = ?'
+    ).bind(row.id).first();
+    if (up) {
+      preset_id = up.preset_id || null;
+      try { overrides = JSON.parse(up.overrides || '{}'); } catch { overrides = {}; }
+    }
+  } catch { /* user_permissions not migrated */ }
+  const permissions = await resolvePermissions(row.id, env);
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    display_name: row.display_name || '',
+    avatar: row.avatar,
+    role: row.role,
+    user_type: row.user_type || null,
+    status: row.status || 'active',
+    last_seen_at: row.last_seen_at || null,
+    archived_at: row.archived_at || null,
+    invited_by: row.invited_by || null,
+    approved_at: row.approved_at || null,
+    timezone: row.timezone || null,
+    preset_id,
+    overrides,
+    permissions,
+  };
+}
+
+async function handleUsersAll(request, env, user) {
+  if (user.role !== 'owner') return json({ error: 'Apenas owner' }, 403);
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  let results = [];
+  try {
+    const r = await env.DB.prepare('SELECT * FROM users ORDER BY role DESC, name').all();
+    results = r.results || [];
+  } catch (e) {
+    return json({ error: 'Falha ao listar usuários', detail: String(e) }, 500);
+  }
+  const out = [];
+  for (const u of results) out.push(await shapeAdminUser(env, u));
+  return json(out);
+}
+
+async function handleUsersPending(request, env, user) {
+  if (user.role !== 'owner') return json({ error: 'Apenas owner' }, 403);
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT * FROM users WHERE status = 'pending' ORDER BY created_at DESC"
+    ).all();
+    const out = [];
+    for (const u of results || []) out.push(await shapeAdminUser(env, u));
+    return json(out);
+  } catch (e) {
+    return json({ error: 'Falha ao listar pendentes', detail: String(e) }, 500);
+  }
+}
+
+async function handleUserAction(request, env, user, targetUserId, action) {
+  if (user.role !== 'owner') return json({ error: 'Apenas owner' }, 403);
+  if (!targetUserId) return json({ error: 'ID ausente' }, 400);
+  switch (action) {
+    case 'approve':     return handleUserApprove(request, env, user, targetUserId);
+    case 'role':        return handleUserRole(request, env, user, targetUserId);
+    case 'permissions': return handleUserPermissions(request, env, user, targetUserId);
+    case 'archive':     return handleUserArchive(request, env, user, targetUserId);
+    default:            return json({ error: 'Ação desconhecida' }, 404);
+  }
+}
+
+async function handleUserApprove(request, env, user, targetUserId) {
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  const target = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(targetUserId).first();
+  if (!target) return json({ error: 'Usuário não encontrado' }, 404);
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      "UPDATE users SET status = 'active', approved_at = ?, invited_by = ? WHERE id = ?"
+    ).bind(now, user.id, targetUserId).run();
+  } catch (e) {
+    return json({ error: 'Falha ao aprovar', detail: String(e) }, 500);
+  }
+  // Bind the default preset based on user_type. Don't overwrite an existing
+  // bind so manual permission edits survive a re-approve.
+  const presetId = (target.user_type === 'external') ? 'preset_external' : 'preset_fixed';
+  try {
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO user_permissions (user_id, preset_id, updated_at, updated_by)
+       VALUES (?, ?, ?, ?)`
+    ).bind(targetUserId, presetId, now, user.id).run();
+  } catch { /* user_permissions not migrated */ }
+  const fresh = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(targetUserId).first();
+  return json(await shapeAdminUser(env, fresh));
+}
+
+async function handleUserRole(request, env, user, targetUserId) {
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  const body = (await readJson(request)) || {};
+  const allowedRoles = ['owner', 'assistant_fixed', 'assistant_external', 'pending'];
+  const allowedTypes = ['fixed', 'external'];
+  if (!allowedRoles.includes(body.role)) {
+    return json({ error: 'role inválido', allowed: allowedRoles }, 400);
+  }
+  const userType = body.user_type && allowedTypes.includes(body.user_type)
+    ? body.user_type
+    : (body.role === 'assistant_external' ? 'external' : 'fixed');
+  try {
+    await env.DB.prepare(
+      'UPDATE users SET role = ?, user_type = ? WHERE id = ?'
+    ).bind(body.role, userType, targetUserId).run();
+  } catch (e) {
+    return json({ error: 'Falha ao atualizar role', detail: String(e) }, 500);
+  }
+  const fresh = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(targetUserId).first();
+  if (!fresh) return json({ error: 'Usuário não encontrado' }, 404);
+  return json(await shapeAdminUser(env, fresh));
+}
+
+async function handleUserPermissions(request, env, user, targetUserId) {
+  if (request.method === 'GET') {
+    let upRow = null;
+    try {
+      upRow = await env.DB.prepare(
+        'SELECT preset_id, overrides FROM user_permissions WHERE user_id = ?'
+      ).bind(targetUserId).first();
+    } catch { /* table missing */ }
+    let presetRow = null;
+    if (upRow && upRow.preset_id) {
+      try {
+        presetRow = await env.DB.prepare(
+          'SELECT * FROM permission_presets WHERE id = ?'
+        ).bind(upRow.preset_id).first();
+      } catch { /* missing */ }
+    }
+    let overrides = {};
+    try { overrides = JSON.parse((upRow && upRow.overrides) || '{}'); } catch { overrides = {}; }
+    let presetPerms = {};
+    if (presetRow) {
+      try { presetPerms = JSON.parse(presetRow.permissions || '{}'); } catch { presetPerms = {}; }
+    }
+    const resolved = await resolvePermissions(targetUserId, env);
+    return json({
+      preset: presetRow ? { id: presetRow.id, name: presetRow.name, permissions: presetPerms } : null,
+      overrides,
+      resolved,
+    });
+  }
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const presetId = body.preset_id !== undefined ? (body.preset_id || null) : null;
+    const overridesJson = JSON.stringify(body.overrides || {});
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO user_permissions (user_id, preset_id, overrides, updated_at, updated_by)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           preset_id = excluded.preset_id,
+           overrides = excluded.overrides,
+           updated_at = excluded.updated_at,
+           updated_by = excluded.updated_by`
+      ).bind(targetUserId, presetId, overridesJson, now, user.id).run();
+    } catch (e) {
+      return json({ error: 'Falha ao salvar permissões', detail: String(e) }, 500);
+    }
+    const resolved = await resolvePermissions(targetUserId, env);
+    return json({ ok: true, resolved });
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleUserArchive(request, env, user, targetUserId) {
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  if (targetUserId === user.id) {
+    return json({ error: 'Você não pode arquivar a si mesmo' }, 400);
+  }
+  const target = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(targetUserId).first();
+  if (!target) return json({ error: 'Usuário não encontrado' }, 404);
+  const now = Math.floor(Date.now() / 1000);
+
+  // Pre-archival stats — preserved in user_profiles_archive so the historical
+  // identity survives the soft-delete.
+  let totalTasksCompleted = 0;
+  try {
+    const r = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM tasks WHERE assigned_to = ? AND status = 'done'"
+    ).bind(targetUserId).first();
+    totalTasksCompleted = (r && r.n) || 0;
+  } catch { /* tasks query failed */ }
+
+  let totalHoursWorked = 0;
+  try {
+    const r = await env.DB.prepare(
+      'SELECT COALESCE(SUM(duration_seconds), 0) AS s FROM time_entries WHERE user_id = ?'
+    ).bind(targetUserId).first();
+    totalHoursWorked = ((r && r.s) || 0) / 3600;
+  } catch { /* time_entries query failed */ }
+
+  let totalPaid = 0;
+  try {
+    const r = await env.DB.prepare(
+      'SELECT COALESCE(SUM(duration_seconds * hourly_rate / 3600.0), 0) AS s FROM time_entries WHERE user_id = ? AND paid = 1'
+    ).bind(targetUserId).first();
+    totalPaid = (r && r.s) || 0;
+  } catch { /* paid query failed */ }
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO user_profiles_archive
+         (user_id, email, name, avatar, user_type, total_tasks_completed,
+          total_hours_worked, total_paid, first_seen_at, last_seen_at,
+          archived_at, archived_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         email = excluded.email, name = excluded.name, avatar = excluded.avatar,
+         user_type = excluded.user_type,
+         total_tasks_completed = excluded.total_tasks_completed,
+         total_hours_worked = excluded.total_hours_worked,
+         total_paid = excluded.total_paid,
+         last_seen_at = excluded.last_seen_at,
+         archived_at = excluded.archived_at,
+         archived_by = excluded.archived_by`
+    ).bind(
+      target.id, target.email, target.name || '', target.avatar || '',
+      target.user_type || 'fixed',
+      totalTasksCompleted,
+      Math.round(totalHoursWorked * 100) / 100,
+      Math.round(totalPaid * 100) / 100,
+      target.created_at || null, target.last_seen_at || null,
+      now, user.id
+    ).run();
+  } catch { /* archive table missing — soft-delete proceeds anyway */ }
+
+  try {
+    await env.DB.prepare(
+      "UPDATE users SET status = 'archived', archived_at = ? WHERE id = ?"
+    ).bind(now, targetUserId).run();
+  } catch (e) {
+    return json({ error: 'Falha ao arquivar', detail: String(e) }, 500);
+  }
+  // Wipe sessions so the archived user immediately loses access.
+  await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(targetUserId).run().catch(() => {});
+  return json({ archived: true, user_id: targetUserId, archived_at: now });
+}
+
+// ---------------------------------------------------------------------------
+// Chat — general channel (v1.10 multi-user)
+// ---------------------------------------------------------------------------
+
+async function handleChatMessages(request, env, user, ctx) {
+  if (!requirePermission(user, 'chat', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+
+  if (request.method === 'GET') {
+    const url = new URL(request.url);
+    const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
+    const before = parseInt(url.searchParams.get('before') || '0', 10) || 0;
+    try {
+      const sql = before
+        ? `SELECT m.*, u.name AS user_name, u.avatar AS user_avatar
+             FROM chat_messages m
+             LEFT JOIN users u ON m.user_id = u.id
+            WHERE m.deleted_at IS NULL AND m.created_at < ?
+            ORDER BY m.created_at DESC LIMIT ?`
+        : `SELECT m.*, u.name AS user_name, u.avatar AS user_avatar
+             FROM chat_messages m
+             LEFT JOIN users u ON m.user_id = u.id
+            WHERE m.deleted_at IS NULL
+            ORDER BY m.created_at DESC LIMIT ?`;
+      const binds = before ? [before, limit] : [limit];
+      const { results } = await env.DB.prepare(sql).bind(...binds).all();
+      const out = (results || []).map((r) => {
+        let mentions = [];
+        try { mentions = JSON.parse(r.mentions || '[]'); } catch { mentions = []; }
+        return {
+          id: r.id,
+          user_id: r.user_id,
+          user_name: r.user_name || null,
+          user_avatar: r.user_avatar || null,
+          content: r.content,
+          mentions,
+          created_at: r.created_at,
+          edited_at: r.edited_at || null,
+        };
+      });
+      return json(out);
+    } catch {
+      // chat_messages table not migrated yet — return empty list instead of 500.
+      return json([]);
+    }
+  }
+
+  if (request.method === 'POST') {
+    if (!requirePermission(user, 'chat', 'full')) {
+      // chat='view' users can read but not post.
+      return json({ error: 'Sem permissão para postar' }, 403);
+    }
+    const body = (await readJson(request)) || {};
+    const content = String(body.content || '').trim();
+    if (!content) return json({ error: 'content obrigatório' }, 400);
+    const mentions = Array.isArray(body.mentions) ? body.mentions.filter(Boolean) : [];
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO chat_messages (id, user_id, content, mentions, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      ).bind(id, user.id, content, JSON.stringify(mentions), now).run();
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/no such table/i.test(msg)) {
+        return json({ error: 'Tabela chat_messages não existe — aplique 0022_multiuser.sql' }, 503);
+      }
+      return json({ error: 'Falha ao postar', detail: msg }, 500);
+    }
+    // @-mention notifications: in-app + push for each unique mentioned user.
+    const seen = new Set();
+    for (const uid of mentions) {
+      if (!uid || uid === user.id || seen.has(uid)) continue;
+      seen.add(uid);
+      try {
+        await createNotification(env, ctx, {
+          from_user_id: user.id,
+          to_user_id: uid,
+          type: 'mention',
+          title: `${user.name || 'Alguém'} mencionou você no chat`,
+          body: content.length > 120 ? `${content.slice(0, 120)}…` : content,
+        });
+      } catch { /* createNotification has its own resilience */ }
+    }
+    const row = await env.DB.prepare(
+      `SELECT m.*, u.name AS user_name, u.avatar AS user_avatar
+         FROM chat_messages m LEFT JOIN users u ON m.user_id = u.id
+        WHERE m.id = ?`
+    ).bind(id).first();
+    let outMentions = [];
+    try { outMentions = JSON.parse((row && row.mentions) || '[]'); } catch { outMentions = []; }
+    return json({
+      id: row.id,
+      user_id: row.user_id,
+      user_name: row.user_name || null,
+      user_avatar: row.user_avatar || null,
+      content: row.content,
+      mentions: outMentions,
+      created_at: row.created_at,
+      edited_at: row.edited_at || null,
+    }, 201);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleChatMessageItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  if (!requirePermission(user, 'chat', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+  let row = null;
+  try {
+    row = await env.DB.prepare('SELECT user_id, deleted_at FROM chat_messages WHERE id = ?').bind(id).first();
+  } catch {
+    return json({ error: 'Tabela chat_messages não existe' }, 503);
+  }
+  if (!row) return json({ error: 'Mensagem não encontrada' }, 404);
+  if (row.deleted_at) return json({ ok: true, already_deleted: true });
+  if (row.user_id !== user.id && user.role !== 'owner') {
+    return json({ error: 'Apenas o autor ou o owner pode apagar' }, 403);
+  }
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare('UPDATE chat_messages SET deleted_at = ? WHERE id = ?').bind(now, id).run();
+  return json({ ok: true, deleted_at: now });
 }
 
 function json(data, status = 200) {

@@ -5,6 +5,13 @@ export const useStore = create((set) => ({
   isLoading: true,
   currentView: 'tasks',
 
+  // v1.10 — multi-user permission + admin + chat state
+  userPermissions: {},   // resolved permission map (mirrors user.permissions)
+  allUsers: [],          // owner-only: hydrated list from /api/users/all
+  pendingUsers: [],      // owner-only: users with status='pending'
+  chatMessages: [],      // most recent chat_messages from /api/chat/messages
+  chatUnread: 0,         // count of messages newer than last_read_at
+
   // Phase 1 — tasks
   tasks: [],
   projects: [],
@@ -63,9 +70,21 @@ export const useStore = create((set) => ({
   dailySchedule: [],        // [{ id, work_date, start_time, end_time, notes }]
   allUsersSchedule: {},     // { [userId]: { name, role, scheduled, recurring } }
 
-  setUser: (user) => set({ user }),
+  // Setting user also mirrors its embedded permissions into the top-level
+  // userPermissions slice so components can read either field. Callers that
+  // already pass a permissions object inside `user` get it propagated for free.
+  setUser: (user) => set({
+    user,
+    userPermissions: (user && user.permissions) || {},
+  }),
   setLoading: (isLoading) => set({ isLoading }),
   setView: (currentView) => set({ currentView }),
+
+  setUserPermissions: (userPermissions) => set({ userPermissions: userPermissions || {} }),
+  setAllUsers: (allUsers) => set({ allUsers: allUsers || [] }),
+  setPendingUsers: (pendingUsers) => set({ pendingUsers: pendingUsers || [] }),
+  setChatMessages: (chatMessages) => set({ chatMessages: chatMessages || [] }),
+  setChatUnread: (chatUnread) => set({ chatUnread: Number(chatUnread) || 0 }),
 
   setTasks: (tasks) => set({ tasks }),
   setProjects: (projects) => set({ projects }),

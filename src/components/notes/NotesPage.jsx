@@ -32,10 +32,17 @@ export default function NotesPage() {
   const load = async () => {
     try {
       const [n, p] = await Promise.all([apiFetch('/api/notes'), apiFetch('/api/projects')]);
+      // Temporary debug instrumentation (v2.1.2) — surfaces what /api/notes
+      // actually returns for non-owner users so we can diagnose empty-state
+      // issues without server access. Remove once the multi-user notes
+      // visibility is verified end-to-end.
+      // eslint-disable-next-line no-console
+      console.log('[NotesPage] /api/notes returned', Array.isArray(n) ? `${n.length} notes` : n);
       setNotes(n);
       setProjects(p);
-    } catch {
-      /* ignore */
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[NotesPage] fetch failed:', err);
     } finally {
       setLoading(false);
     }

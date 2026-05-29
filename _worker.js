@@ -807,8 +807,11 @@ async function handleTasksCollection(request, env, user, ctx) {
   if (request.method === 'GET') {
     if (new URL(request.url).searchParams.get('completed_today') === 'true') {
       const midnight = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000);
-      const filter = assignedOnly ? ' AND t.assigned_to = ?' : '';
-      const binds = assignedOnly ? [midnight, user.id] : [midnight];
+      // v2.1.2 — assigned_only sees tasks assigned to them OR authored by them.
+      // Without the OR, the user couldn't see tasks they just created if those
+      // weren't also auto-assigned to themselves.
+      const filter = assignedOnly ? ' AND (t.assigned_to = ? OR t.created_by = ?)' : '';
+      const binds = assignedOnly ? [midnight, user.id, user.id] : [midnight];
       const { results } = await env.DB.prepare(
         `${TASK_SELECT} WHERE t.status = 'done' AND t.updated_at >= ?${filter} ORDER BY t.updated_at DESC`
       ).bind(...binds).all();
@@ -818,7 +821,10 @@ async function handleTasksCollection(request, env, user, ctx) {
     const conds = [];
     const binds = [];
     if (onlyFav) conds.push('t.favorited = 1');
-    if (assignedOnly) { conds.push('t.assigned_to = ?'); binds.push(user.id); }
+    if (assignedOnly) {
+      conds.push('(t.assigned_to = ? OR t.created_by = ?)');
+      binds.push(user.id, user.id);
+    }
     const where = conds.length ? `WHERE ${conds.join(' AND ')} ` : '';
     const { results } = await env.DB.prepare(
       `${TASK_SELECT} ${where}ORDER BY (t.urgency + t.importance) DESC, t.created_at DESC`
@@ -2465,9 +2471,16 @@ async function handleNotes(request, env, user) {
   if (request.method === 'POST' && !canDo(user.granular, 'notes', 'create')) {
     return json({ error: 'Sem permissão para criar notas' }, 403);
   }
-  const notesLevel = (user.permissions && user.permissions.notes) || 'full';
 
   if (request.method === 'GET') {
+    // v2.1.2 — Notes visibility is decided by GRANULAR perms (notes.view_all
+    // > notes.view_own), not by the legacy coarse `notesLevel`. The previous
+    // logic blocked users whose preset said 'own_and_tagged' even when they
+    // had a granular override granting notes.view_all=1.
+    const canViewAll = canDo(user.granular, 'notes', 'view_all');
+    const canViewOwn = canDo(user.granular, 'notes', 'view_own');
+    if (!canViewAll && !canViewOwn) return json([]);
+
     const url = new URL(request.url);
     const search = url.searchParams.get('search');
     const projectId = url.searchParams.get('project_id');
@@ -2486,13 +2499,7 @@ async function handleNotes(request, env, user) {
       where.push('n.tags LIKE ?');
       binds.push(`%"${tag}"%`);
     }
-    // own_and_tagged: notes the user created OR notes whose tags JSON contains
-    // their user id (best-effort substring match — notes have no first-class
-    // mention column).
-    if (notesLevel === 'own_and_tagged') {
-      where.push('(n.created_by = ? OR n.tags LIKE ?)');
-      binds.push(user.id, `%${user.id}%`);
-    } else if (notesLevel === 'own') {
+    if (!canViewAll && canViewOwn) {
       where.push('n.created_by = ?');
       binds.push(user.id);
     }

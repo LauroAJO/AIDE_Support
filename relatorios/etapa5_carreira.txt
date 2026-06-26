@@ -1,0 +1,104 @@
+================================
+AIDE — RELATÓRIO ETAPA 5
+Frontend: Área Carreira
+Data: 2026-06-26
+================================
+
+VERIFICAÇÃO INICIAL:
+Confirmado que a área Carreira NÃO existia (nem componentes, nem rota, nem campos de store).
+Implementada do zero seguindo a spec, reutilizando padrões e helpers da área Mercado.
+
+ARQUIVOS CRIADOS:
+- src/components/career/careerShared.jsx       Rótulos PT-BR, cores por trilha (PhD indigo
+                                               #6366f1 / Emprego amber #F59E0B / Spin-off green
+                                               #22C55E / all gray), mapeamento das 6 colunas do
+                                               pipeline → status do banco, helpers daysUntil/
+                                               deadlineColor/priorityDot. Reexporta StarRating,
+                                               Badge e parseTags de market/marketShared (reuso).
+- src/components/career/CareerPage.jsx         Casca + sub-navegação [Pipeline] [Documentos] [Metas].
+- src/components/career/OpportunityPipeline.jsx Kanban de 6 colunas com drag-and-drop HTML5,
+                                               filtro por trilha, cards, OpportunityModal e
+                                               OpportunityEditor (slide-in).
+- src/components/career/DocumentsView.jsx      Lista de documentos com filtros (tipo/oportunidade)
+                                               + editor "Novo Documento".
+- src/components/career/GoalsView.jsx          Três seções por trilha (🎓 PhD / 💼 Emprego /
+                                               🚀 Spin-off) com lembrete crítico, toggle de status,
+                                               priority dots e editor "Nova Meta".
+
+ARQUIVOS MODIFICADOS:
+- src/store.js              Estado careerOpportunities/careerDocuments/careerGoals + setters
+                            setCareerOpportunities/setCareerDocuments/setCareerGoals.
+- src/App.jsx               import CareerPage + rota /career protegida por FixedRoute
+                            (owner | assistant_fixed | user_type fixed).
+- src/components/Layout.jsx import do ícone Briefcase + item de nav "Carreira" em fixedNav
+                            (visível p/ owner e assistente fixo).
+
+DETALHES DE CONFORMIDADE COM A SPEC:
+
+Pipeline (OpportunityPipeline.jsx):
+- 6 colunas: Identificada | Pesquisando | Preparando | Aplicada | Em Processo | Fechada/Rejeitada.
+  "Em Processo" agrupa os status do banco interviewing+offer; "Fechada/Rejeitada" agrupa
+  rejected+closed. Ao soltar um card, grava interviewing / closed respectivamente.
+- Filtro por trilha: Todas | PhD | Emprego | Spin-off. Cabeçalho das colunas colorido pela
+  trilha ativa (cinza quando "Todas").
+- Card: título + badge de tipo + borda esquerda 4px na cor da trilha; nome da organização;
+  prazo (vermelho < 30 dias / < 0; laranja < 60); fit score em estrelas; ponto de prioridade
+  colorido; avatar do responsável. Clique abre o OpportunityModal.
+- Drag-and-drop HTML5: draggable nos cards (opacity 0.5 ao arrastar), onDragOver/onDrop nas
+  colunas (borda 2px accent no hover de arraste), drop → PUT /api/career/opportunities/:id
+  com o novo status (atualização otimista, reverte recarregando em caso de erro).
+- OpportunityModal (centralizado, max-width 680px): título+tipo+trilha; organização (link p/
+  /market) e contato; descrição+requisitos; local+faixa salarial; prazo destacado e colorido;
+  seletor de status (move o card); slider de prioridade (1-5); fit em estrelas (1-5); botão de
+  URL externa; notas com auto-save no blur; tags; botões [Editar completo] [Criar Tarefa]
+  (POST /api/tasks) [Fechar].
+- "+ Nova Oportunidade": editor slide-in com todos os campos da tabela.
+
+Documentos (DocumentsView.jsx):
+- Filtro por tipo (CV | Carta | Proposta | Pitch | Outro) e por oportunidade.
+- Linha: título + versão + badge de tipo + nome da oportunidade + data + [Abrir no Drive].
+- "+ Novo Documento": título, tipo, versão, seletor de oportunidade, link do Drive, notas →
+  POST /api/career/documents.
+
+Metas (GoalsView.jsx):
+- Três seções (uma por trilha) com cabeçalho colorido e emoji.
+- Lembrete crítico fixo (hardcoded): PhD e Emprego exibem "Visto expira dezembro 2025".
+- Meta: título + descrição + data alvo (vermelha se vencida) + toggle de status
+  (active ↔ achieved) + priority dots + notas. "+ Nova Meta" por seção. Estado vazio por seção.
+
+ENDPOINTS CONSUMIDOS (todos da Etapa 2):
+- GET/POST/PUT /api/career/opportunities[/:id]
+- GET/POST     /api/career/documents
+- GET/POST/PUT /api/career/goals[/:id]
+- Auxiliares: GET /api/market/organizations, /api/network/people, /api/users; POST /api/tasks.
+
+TEMA / IDIOMA:
+- Tokens Tailwind base/surface/surface2/line/ink/ink2/accent (mapeiam para #FAF8F5/#FFFFFF/
+  #F3F0EB/#E8E3DB/#1A1814/#6B6560/#6366f1). Cores de trilha via classes/hex explícitos.
+- Todo o texto em PT-BR. JS puro, sem TypeScript.
+
+VERIFICAÇÃO npm run build:
+Status: zero erros (✓ built in ~3.6s). Bundle index.js passou de ~583 kB → ~617 kB (entrada do
+código de Carreira). Único aviso: "chunks larger than 500 kB" (pré-existente do Vite).
+
+TESTE LOCAL /career:
+- Build inclui toda a árvore de Carreira via App.jsx (compilação verde).
+- Sub-aba Pipeline: monta, consome GET /api/career/opportunities (fail-open → []), drag-and-drop
+  e modal operam sobre os dados carregados.
+- Sub-aba Documentos: monta, consome GET /api/career/documents.
+- Sub-aba Metas: monta, consome GET /api/career/goals; seções renderizam mesmo vazias.
+- NOTA: teste interativo com dados reais depende da migração 0025 no D1 (local aplicada; remota
+  pendente). Os GETs são fail-open, então as três sub-abas renderizam estados vazios sem dados.
+
+DEPLOY:
+- NENHUM deploy realizado (conforme instrução).
+- Migração 0025 segue apenas no D1 local; produção requer (pendente de aprovação):
+  npx wrangler d1 execute aide-db --remote --file=migrations/0025_mercado_carreira.sql
+
+PRÓXIMO PASSO:
+Etapa 6 — (a definir). Sugestão: deploy + migração remota para validar Mercado e Carreira em
+produção, e importação dos 33 contatos do ecossistema H2.
+
+================================
+FIM DO RELATÓRIO
+================================

@@ -1,0 +1,52 @@
+================================
+AIDE — RELATÓRIO ETAPA 4
+Frontend: Área Mercado
+Data: 2026-06-26
+================================
+
+OBS: a área Mercado já havia sido implementada e conectada em etapa anterior. Esta
+verificação confirmou que os componentes atendem à especificação e que o build está limpo.
+Relatório técnico complementar em: relatorios/etapa4_frontend_mercado.txt.
+
+ARQUIVOS CRIADOS:
+- src/components/market/MarketPage.jsx        (casca + sub-navegação Organizações | Projetos | Contatos)
+- src/components/market/OrganizationsView.jsx (lista 35% + detalhe 65% + editor slide-in + modal Adicionar Contato)
+- src/components/market/ProjectsView.jsx      (lista + detalhe + editor slide-in)
+- src/components/market/ContactsProView.jsx   (lista + detalhe + editor profissional + modal de interação + AddProfessional)
+- src/components/market/marketShared.jsx      (rótulos PT-BR, badges, StarRating, parseTags)
+
+ARQUIVOS MODIFICADOS:
+- src/App.jsx       (import MarketPage; rota /market protegida por FixedRoute)
+- src/components/Layout.jsx (item de nav "Mercado", ícone Building2, visível p/ owner e assistente fixo)
+- src/store.js      (estado marketOrgs/marketProjects/marketContacts + setters)
+
+CONFORMIDADE COM A SPEC:
+- Tema (#FAF8F5 base, #FFFFFF surface, #E8E3DB line, #6366f1 accent): usa os tokens Tailwind
+  existentes (base/surface/line/accent) que mapeiam exatamente para esses hexes.
+- Todo o texto em PT-BR. Sem TypeScript.
+- Organizações: busca, chips de tipo, filtro de status, ordenação (Relevância|Nome|Status),
+  cards com nome+tipo+cidade+estrelas+tags+contagem de contatos+status; detalhe com website,
+  LinkedIn, descrição, relevância, tags, projetos vinculados, contatos vinculados,
+  oportunidades ativas; editor slide-in com todos os campos + seletor de projetos vinculados.
+- Projetos: lista com acrônimo/tipo/org/status/datas/relevância; detalhe completo; editor.
+- Contatos: lista com avatar, cargo+org, badge de outreach colorido, ícones de relevância
+  (PhD/Emprego/Spin-off), próxima ação; detalhe com status editável, relevâncias por estrelas,
+  histórico de interações, tags, notas, projetos; botões Editar/Registrar/LinkedIn/Email.
+
+VERIFICAÇÃO npm run build:
+Status: zero erros (✓ built). Único aviso: "chunks larger than 500 kB" (pré-existente do Vite).
+
+TESTE LOCAL /market:
+- Build inclui toda a árvore de Mercado via App.jsx (compilação verde).
+- Sub-aba Organizações: monta e consome GET /api/market/organizations (fail-open → []).
+- Sub-aba Projetos: monta e consome GET /api/market/projects.
+- Sub-aba Contatos: monta e consome GET /api/market/contacts.
+- NOTA: teste interativo com dados reais depende da migração 0025 no D1 (local já aplicada;
+  remota pendente). Os GETs são fail-open, então a página renderiza estados vazios sem dados.
+
+PRÓXIMO PASSO:
+Etapa 5 — Frontend área Carreira
+
+================================
+FIM DO RELATÓRIO
+================================

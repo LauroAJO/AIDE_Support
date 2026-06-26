@@ -20,6 +20,7 @@ const EMPTY = {
   area_id: '',
   project_id: '',
   front_id: '',
+  opportunity_id: '',
   tags: [],
   subtasks: [],
   comments: [],
@@ -41,6 +42,7 @@ function fromTask(task, initialStatus) {
     area_id: task.area_id || '',
     project_id: task.project_id || '',
     front_id: task.front_id || '',
+    opportunity_id: task.opportunity_id || '',
     tags: task.tags || [],
     subtasks: task.subtasks || [],
     comments: task.comments || [],
@@ -74,6 +76,15 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
   const areas = useStore((s) => s.areas);
   const projects = useStore((s) => s.projects);
   const fronts = useStore((s) => s.fronts);
+  // Oportunidades de carreira (Etapa 6) — para o vínculo opcional da tarefa.
+  const careerOpps = useStore((s) => s.careerOpportunities);
+  const setCareerOpps = useStore((s) => s.setCareerOpportunities);
+  useEffect(() => {
+    if (!careerOpps.length) {
+      apiFetch('/api/career/opportunities').then((r) => setCareerOpps(r || [])).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Cascading lists. Projects filter by area, fronts filter by project. When
   // no area is selected, all projects show (so legacy projects without an area
   // remain visible). When no project is selected, no fronts show.
@@ -220,6 +231,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
       delivery_date: form.delivery_date || null,
       project_id: form.project_id || null,
       front_id: form.front_id || null,
+      opportunity_id: form.opportunity_id || null,
     };
     // area_id is derived from project — don't send it to the API.
     delete payload.area_id;
@@ -390,6 +402,20 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
               </select>
             </Field>
           </div>
+
+          {/* Vínculo opcional com uma oportunidade de carreira (Etapa 6) */}
+          <Field label="Oportunidade vinculada">
+            <select
+              value={form.opportunity_id}
+              onChange={(e) => set({ opportunity_id: e.target.value })}
+              className="input"
+            >
+              <option value="">Nenhuma</option>
+              {careerOpps.map((o) => (
+                <option key={o.id} value={o.id}>{o.title}</option>
+              ))}
+            </select>
+          </Field>
 
           <div className="grid grid-cols-2 gap-3">
             <Field label="Status">

@@ -1,0 +1,101 @@
+================================
+AIDE — RELATÓRIO ETAPA 3
+Sistema de Importação em Massa
+Data: 2026-06-26
+================================
+
+ARQUIVOS CRIADOS:
+- src/lib/importParser.js              (validação/normalização client-side)
+- src/components/import/ImportPage.jsx (página /import: JSON → validar → preview → importar → histórico)
+- relatorios/import_h2_ecosystem.json  (seed do ecossistema H2)
+
+ARQUIVOS MODIFICADOS:
+- src/App.jsx       (import do ImportPage; gate ImportRoute; rota /import)
+- src/components/Layout.jsx (item de nav "Importar" com ícone Upload, visível p/ owner e assistente fixo)
+- _worker.js        (UPGRADE do handler handleMarketImport — ver nota abaixo)
+
+NOTA SOBRE O BACKEND (_worker.js):
+O endpoint /api/market/import já existia (criado na Etapa 2), mas era simples demais para o
+formato de JSON documentado (contatos com organization_name + campos profissionais). Foi
+ATUALIZADO (não duplicado) para o sistema completo:
+  - GET  /api/market/import → retorna o histórico (import_log) com o nome de quem importou.
+  - POST /api/market/import → importação inteligente e IDEMPOTENTE:
+      * organizações casam por nome (não duplica em reimportação);
+      * resolve contact.organization_name → organization_id;
+      * cria network_people (dedup por email, depois por nome) + contact_professional
+        (outreach_status, relevance_for_phd/job/spinoff) + vínculo contact_org_links;
+      * grava import_log e retorna { imported, failed, organizations, contacts, errors }.
+Nenhuma rota existente foi removida ou reescrita; apenas este handler foi estendido.
+
+ORGANIZAÇÕES NO JSON (16):
+1.  H2Hub Twente / IS2H4C        (consortium)
+2.  HoSt Group / Bright Renewables (company, Enschede)
+3.  HyGear                       (company, Arnhem)
+4.  Demcon / Demcon Energy Systems (company, Enschede)
+5.  NEWES Hydrogen               (company)
+6.  Twence                       (company, Hengelo)
+7.  Saxion University            (university, Enschede)
+8.  Cogas                        (company, Almelo)
+9.  Powerspex                    (company)
+10. HyMatters                    (company)
+11. Oost NL                      (funder)
+12. Pondera / Royal HaskoningDHV (company)
+13. Hanze University / EnTranCe  (university, Groningen)
+14. Kiwa Nederland               (company, Rijswijk)
+15. DNV Netherlands              (company, Arnhem)
+16. University of Twente         (university, Enschede)
+
+CONTATOS NO JSON (33):
+Array "contacts" preenchido com os 33 contatos fornecidos por Lauro (a partir dos
+documentos de pesquisa). Inclui campo relevance_for_spinoff e outreach_channel.
+Destaques de alta relevância: Ilaria Mirabelli (HyGear/SOEC), Hans Gelten (Saxion/HYGENESYS),
+Benno Aalderink (Saxion), Maarten Rinket (Powerspex/simulação), Jan Bekkering (Hanze/ENHyCo).
+As 16 organizações continuam com dados PÚBLICOS e conservadores (tipo, cidade quando de
+conhecimento público, tags); relevance_score/notes e websites devem ser revisados por Lauro.
+A importação é idempotente — não duplica o que já entrou (dedup por email, depois por nome).
+
+VERIFICAÇÃO npm run build:
+Status: zero erros (✓ built in 3.44s; ImportPage entrou no bundle: index.js 520→534 kB).
+Aviso único: "chunks larger than 500 kB" — pré-existente do Vite, não relacionado a esta etapa.
+
+VERIFICAÇÃO node --check _worker.js: OK
+VALIDAÇÃO JSON (import_h2_ecosystem.json): OK — 16 organizações, 33 contatos.
+
+TESTES LOCAIS (wrangler pages dev + sessão owner semeada em D1 local):
+- Parser (importParser.js):
+    JSON inválido            → valid:false + mensagem de erro
+    type de org inválido     → erro "type inválido: banana"
+    org sem name             → erro "name é obrigatório"
+    tags "H2, PEM" (string)  → normaliza para ["H2","PEM"]
+    relevance_for_phd: 9     → clampado para 5
+    summary                  → { validOrgs:1, validContacts:1, errorCount:0 }
+- Importação (POST /api/market/import) com o JSON do ecossistema:
+    1ª importação            → { imported:17, organizations:16, contacts:1, failed:0 }
+    2ª importação (reimport) → { organizations:0, contacts:1, failed:0 }  (idempotente)
+    contagem final no D1     → orgs:16, people:1, professional:1, links:1  (SEM duplicatas)
+    resolução organization_name → contact_professional.organization_id = HyGear  ✓
+- Histórico (GET /api/market/import) → 2 registros, com nome do importador ("Teste Owner").
+Dados de teste e sessão foram removidos do D1 local após os testes.
+
+NAVEGAÇÃO / ROTA:
+- Layout.jsx: item "Importar" (ícone Upload) aparece para owner e assistente fixo
+  (mesma regra do backend); oculto para assistente externo.
+- App.jsx: rota /import protegida pelo gate ImportRoute (owner | assistant_fixed | user_type fixed).
+
+PRÓXIMO PASSO:
+Etapa 4 — Frontend área Mercado
+
+INSTRUÇÃO PARA IMPORTAR OS DADOS:
+Após o deploy (e a migração remota 0025), acessar /import no app, colar o conteúdo de
+relatorios/import_h2_ecosystem.json (com os contatos completados a partir dos documentos),
+clicar em "Validar" para conferir o preview e depois "Importar".
+
+PENDÊNCIAS / DEPLOY:
+- Nenhum deploy realizado.
+- A migração 0025 continua aplicada APENAS no D1 local; a importação em produção só funcionará
+  após a migração remota (pendente de aprovação):
+  npx wrangler d1 execute aide-db --remote --file=migrations/0025_mercado_carreira.sql
+
+================================
+FIM DO RELATÓRIO
+================================

@@ -1,0 +1,78 @@
+================================
+AIDE — RELATÓRIO ETAPA 4
+Frontend — Área Mercado
+Data: 2026-06-26
+================================
+
+CORREÇÕES DE BACKEND (pré-requisito desta etapa, aplicadas em _worker.js):
+1. relevance_for_spinoff em contatos:
+   - Já era aceito e inserido em contact_professional (INSERT já listava a coluna e
+     fazia bind de Number(c.relevance_for_spinoff) || 0). Nenhuma correção necessária —
+     apenas confirmado.
+2. Reimportação passa a ATUALIZAR (antes pulava duplicatas):
+   - network_people: quando a pessoa já existe (dedup por email→nome), agora um UPDATE
+     atualiza institution, role, tags e (só quando o JSON traz o valor) email e linkedin —
+     não sobrescreve com vazio.
+   - contact_professional: trocado o padrão "cria só se não existir" por INSERT OR REPLACE
+     (person_id é PRIMARY KEY). Reimportar atualiza organization_id, outreach_status,
+     outreach_channel, relevance_for_phd/job/spinoff e notes. Os campos editados manualmente
+     na UI (last_contact_date, next_action, next_action_date, interaction_history,
+     confirmed_email, confirmed_linkedin) são preservados — lidos do registro existente e
+     re-gravados no REPLACE.
+   Efeito: colar o JSON com dados melhorados e reimportar agora reconcilia os registros
+   já existentes em vez de ignorá-los, sem perder o histórico de outreach.
+
+ESTADO DO FRONTEND (área Mercado):
+Os componentes da área Mercado já estavam implementados em disco e totalmente conectados.
+Esta etapa consistiu em verificar a integração ponta a ponta e garantir build limpo.
+
+ARQUIVOS DA ÁREA (src/components/market/):
+- MarketPage.jsx        — casca com sub-navegação (Organizações | Projetos | Contatos).
+- OrganizationsView.jsx — lista + filtros (tipo/status/busca/ordenação) + detalhe +
+                          editor lateral (com vínculo de projetos) + modal "Adicionar contato".
+- ProjectsView.jsx      — lista + detalhe (org coordenadora, parceiras, orçamento, datas) +
+                          editor lateral.
+- ContactsProView.jsx   — lista (busca + filtro de outreach) + detalhe com status editável,
+                          relevâncias por estrelas (PhD/Emprego/Spin-off), histórico de
+                          interações, editor profissional, modal de interação e modal
+                          "Adicionar contato profissional".
+- marketShared.jsx      — rótulos PT-BR, badges, StarRating e parseTags compartilhados.
+
+WIRING (já presente, confirmado):
+- store.js: estado marketOrgs / marketProjects / marketContacts (linhas 66-68) e setters
+  setMarketOrgs / setMarketProjects / setMarketContacts (linhas 139-141).
+- App.jsx: import MarketPage (linha 27) e rota /market protegida por FixedRoute
+  (owner | assistant_fixed | user_type fixed) — linha 243.
+- Layout.jsx: item de nav "Mercado" (ícone Building2) em fixedNav, visível para owner e
+  assistente fixo (mesma regra do backend) — linha 84.
+
+ENDPOINTS CONSUMIDOS (todos da Etapa 2):
+- GET/POST/PUT  /api/market/organizations[/:id]
+- GET/POST/PUT  /api/market/projects[/:id]
+- GET           /api/market/contacts  e  GET /api/market/contacts/:personId
+- POST/PUT      /api/market/contacts/:personId/professional
+- POST          /api/market/contacts/link
+- GET           /api/network/people   (seletor de pessoas nos modais)
+
+DEPENDÊNCIAS COMPARTILHADAS (confirmadas existentes):
+- src/lib/api.js (apiFetch), src/components/shared/LoadingSpinner.jsx,
+  src/components/shared/Avatar.jsx.
+
+VERIFICAÇÃO node --check _worker.js: OK
+VERIFICAÇÃO npm run build:
+Status: zero erros. Toda a árvore de Mercado entra no bundle via App.jsx (build verde).
+Aviso único: "chunks larger than 500 kB" — pré-existente do Vite, não relacionado a esta etapa.
+
+PENDÊNCIAS / DEPLOY:
+- Nenhum deploy realizado.
+- A migração 0025 continua aplicada APENAS no D1 local. Em produção, a área Mercado e a
+  importação só funcionam após a migração remota (pendente de aprovação):
+  npx wrangler d1 execute aide-db --remote --file=migrations/0025_mercado_carreira.sql
+
+PRÓXIMO PASSO:
+Etapa 5 — Frontend área Carreira (Oportunidades / Documentos / Metas), consumindo os
+endpoints /api/career/* já criados na Etapa 2.
+
+================================
+FIM DO RELATÓRIO
+================================

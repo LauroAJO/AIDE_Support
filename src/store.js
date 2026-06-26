@@ -62,6 +62,16 @@ export const useStore = create((set) => ({
   networkConnections: [],
   bridgeSyncStatus: null,
 
+  // Mercado (Etapa 4) — organizações, projetos, contatos profissionais
+  marketOrgs: [],
+  marketProjects: [],
+  marketContacts: [],
+
+  // Carreira (Etapa 5) — oportunidades, documentos, metas
+  careerOpportunities: [],
+  careerDocuments: [],
+  careerGoals: [],
+
   // v1.8 — Tasks tree view (Lista | Kanban | Árvore)
   taskView: 'list', // 'list' | 'kanban' | 'tree'
   treeCollapse: {},
@@ -130,6 +140,14 @@ export const useStore = create((set) => ({
   setNetworkInstitutions: (networkInstitutions) => set({ networkInstitutions }),
   setNetworkConnections: (networkConnections) => set({ networkConnections }),
   setBridgeSyncStatus: (bridgeSyncStatus) => set({ bridgeSyncStatus }),
+
+  setMarketOrgs: (marketOrgs) => set({ marketOrgs: marketOrgs || [] }),
+  setMarketProjects: (marketProjects) => set({ marketProjects: marketProjects || [] }),
+  setMarketContacts: (marketContacts) => set({ marketContacts: marketContacts || [] }),
+
+  setCareerOpportunities: (careerOpportunities) => set({ careerOpportunities: careerOpportunities || [] }),
+  setCareerDocuments: (careerDocuments) => set({ careerDocuments: careerDocuments || [] }),
+  setCareerGoals: (careerGoals) => set({ careerGoals: careerGoals || [] }),
 
   setTaskView: (taskView) => set({ taskView }),
   setTreeCollapse: (treeCollapse) => set({ treeCollapse }),

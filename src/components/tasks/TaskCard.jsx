@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { AlertTriangle, Star, ChevronRight, ChevronDown } from 'lucide-react';
+import { AlertTriangle, Star, ChevronRight, ChevronDown, Briefcase } from 'lucide-react';
 import Avatar from '../shared/Avatar';
+import { useStore } from '../../store';
 import {
   scoreColor,
   STATUS_LABELS,
@@ -16,6 +17,10 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
   const fav = !!task.favorited;
   const subs = task.subtasks || [];
   const [expanded, setExpanded] = useState(false);
+  // Etapa 6 — nome da oportunidade vinculada, resolvido a partir do store.
+  const opportunityTitle = useStore((s) =>
+    task.opportunity_id ? (s.careerOpportunities.find((o) => o.id === task.opportunity_id)?.title || null) : null,
+  );
 
   return (
     // role=button (not a real <button>) so the favorite <button> can nest validly.
@@ -102,6 +107,13 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
         )}
         {warn && <AlertTriangle className="h-3.5 w-3.5" style={{ color: '#F59E0B' }} />}
       </div>
+
+      {opportunityTitle && (
+        <div className="mt-2 flex items-center gap-1 truncate text-[11px] font-medium text-accent" title={`Carreira: ${opportunityTitle}`}>
+          <Briefcase className="h-3 w-3 shrink-0" />
+          <span className="truncate">→ {opportunityTitle}</span>
+        </div>
+      )}
 
       {task.assignedUser && (
         <div className="mt-2 flex items-center gap-1.5">

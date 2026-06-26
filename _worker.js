@@ -230,6 +230,28 @@ async function handleAPI(request, env, ctx) {
     return handleChatMessageItem(request, env, user, path.split('/')[4]);
   }
 
+  // Mercado (Etapa 2) — organizações, projetos, contatos profissionais, importação.
+  if (path === '/api/market/organizations') return handleMarketOrganizations(request, env, user);
+  if (path.startsWith('/api/market/organizations/')) return handleMarketOrganizationItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/market/projects') return handleMarketProjects(request, env, user);
+  if (path.startsWith('/api/market/projects/')) return handleMarketProjectItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/market/contacts') return handleMarketContacts(request, env, user);
+  if (path === '/api/market/contacts/link') return handleMarketContactLink(request, env, user);
+  // contacts/:personId/professional — deve casar ANTES da rota genérica de item.
+  if (path.match(/^\/api\/market\/contacts\/[^/]+\/professional$/)) {
+    return handleMarketContactProfessional(request, env, user, path.split('/')[4]);
+  }
+  if (path.startsWith('/api/market/contacts/')) return handleMarketContactItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/market/import') return handleMarketImport(request, env, user);
+
+  // Carreira (Etapa 2) — oportunidades, documentos, metas.
+  if (path === '/api/career/opportunities') return handleCareerOpportunities(request, env, user);
+  if (path.startsWith('/api/career/opportunities/')) return handleCareerOpportunityItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/career/documents') return handleCareerDocuments(request, env, user);
+  if (path.startsWith('/api/career/documents/')) return handleCareerDocumentItem(request, env, user, path.split('/')[4]);
+  if (path === '/api/career/goals') return handleCareerGoals(request, env, user);
+  if (path.startsWith('/api/career/goals/')) return handleCareerGoalItem(request, env, user, path.split('/')[4]);
+
   return json({ error: 'Rota não encontrada' }, 404);
 }
 
@@ -715,6 +737,7 @@ function shapeTask(row) {
     time_entries: parseJsonArray(row.time_entries),
     favorited: row.favorited ? 1 : 0,
     google_event_id: row.google_event_id || null,
+    opportunity_id: row.opportunity_id || null,
     drive_attachments: parseJsonArray(row.drive_attachments),
     source: row.source || 'aide',
     lifegame_id: row.lifegame_id || null,
@@ -876,6 +899,13 @@ async function handleTasksCollection(request, env, user, ctx) {
         await env.DB.prepare('UPDATE tasks SET front_id = ? WHERE id = ?').bind(body.front_id, id).run();
       } catch { /* migration 0015 not applied */ }
     }
+    // Vínculo com oportunidade de carreira (migration 0026) — separado p/ tolerar
+    // bancos onde a migração ainda não foi aplicada.
+    if (body.opportunity_id) {
+      try {
+        await env.DB.prepare('UPDATE tasks SET opportunity_id = ? WHERE id = ?').bind(body.opportunity_id, id).run();
+      } catch { /* migration 0026 not applied */ }
+    }
     const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(id).first();
     const shaped = shapeTask(row);
     if (shaped.assigned_to && shaped.assigned_to !== user.id) {
@@ -960,6 +990,13 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
         await env.DB.prepare('UPDATE tasks SET front_id = ? WHERE id = ?')
           .bind(body.front_id || null, taskId).run();
       } catch { /* migration 0015 not applied */ }
+    }
+    // Vínculo com oportunidade de carreira (migration 0026).
+    if (body.opportunity_id !== undefined) {
+      try {
+        await env.DB.prepare('UPDATE tasks SET opportunity_id = ? WHERE id = ?')
+          .bind(body.opportunity_id || null, taskId).run();
+      } catch { /* migration 0026 not applied */ }
     }
     // Taxa da tarefa (rate_type/rate_value) — migration 0014_payment_v2.
     // Updated separately para tolerar bancos onde a migração não foi aplicada.
@@ -3933,9 +3970,102 @@ async function runDailyNotifications(env) {
     sent += 1;
   }
 
+  // --- Notificações de Carreira (Etapa 6) ---------------------------------
+  // Envolvido em try/catch: se as tabelas (migration 0025) não existirem, o
+  // cron principal continua funcionando normalmente.
+  let career = { deadlines: 0, contacts: 0, inactive: 0 };
+  try {
+    career = await runCareerNotifications(env, today);
+    sent += career.deadlines + career.contacts + career.inactive;
+  } catch { /* migration 0025/0026 não aplicada — ignora */ }
+
   await evaluateAlertRules(env);
 
-  return { dueSoon: (dueSoon.results || []).length, overdue: (overdue.results || []).length, sent };
+  return {
+    dueSoon: (dueSoon.results || []).length,
+    overdue: (overdue.results || []).length,
+    sent,
+    career,
+  };
+}
+
+// Notificações da área Carreira/Mercado (Etapa 6):
+//  - oportunidades com deadline nos próximos 7 dias;
+//  - contatos com próxima ação marcada para hoje;
+//  - oportunidades sem atividade há 14+ dias.
+// Destinatário: o responsável (assigned_to) quando houver, senão o owner.
+async function runCareerNotifications(env, today) {
+  const owner = await env.DB.prepare("SELECT id FROM users WHERE role = 'owner' LIMIT 1").first();
+  const ownerId = owner ? owner.id : null;
+  const in7 = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
+  const cutoff14 = Math.floor(Date.now() / 1000) - 14 * 86400;
+  let deadlines = 0;
+  let contacts = 0;
+  let inactive = 0;
+
+  // 1) Deadlines nos próximos 7 dias (inclui hoje), ignorando encerradas.
+  const dueOpps = await env.DB.prepare(
+    `SELECT id, title, deadline, assigned_to AS uid FROM career_opportunities
+      WHERE deadline IS NOT NULL AND deadline >= ? AND deadline <= ?
+        AND status NOT IN ('rejected', 'closed')`
+  ).bind(today, in7).all();
+  for (const o of dueOpps.results || []) {
+    const uid = o.uid || ownerId;
+    if (!uid) continue;
+    const key = `notif:${uid}:opp:${o.id}:deadline:${today}`;
+    if (await dedupCheck(key, env)) continue;
+    await createNotification(env, null, {
+      to_user_id: uid,
+      type: 'career_deadline',
+      title: 'Deadline de oportunidade',
+      body: `"${o.title}" tem prazo em ${o.deadline}`,
+    });
+    await dedupSet(key, 86400, env);
+    deadlines += 1;
+  }
+
+  // 2) Contatos com próxima ação marcada para hoje.
+  const dueContacts = await env.DB.prepare(
+    `SELECT cp.person_id AS pid, p.name AS name, cp.next_action AS action
+       FROM contact_professional cp
+       LEFT JOIN network_people p ON p.id = cp.person_id
+      WHERE cp.next_action_date = ?`
+  ).bind(today).all();
+  for (const c of dueContacts.results || []) {
+    if (!ownerId) break;
+    const key = `notif:${ownerId}:contact:${c.pid}:nextaction:${today}`;
+    if (await dedupCheck(key, env)) continue;
+    await createNotification(env, null, {
+      to_user_id: ownerId,
+      type: 'career_contact_due',
+      title: 'Contato a fazer hoje',
+      body: `${c.name || 'Contato'}${c.action ? ` — ${c.action}` : ''}`,
+    });
+    await dedupSet(key, 86400, env);
+    contacts += 1;
+  }
+
+  // 3) Oportunidades ativas sem atividade há 14+ dias.
+  const stale = await env.DB.prepare(
+    `SELECT id, title, assigned_to AS uid FROM career_opportunities
+      WHERE status NOT IN ('rejected', 'closed') AND updated_at < ?`
+  ).bind(cutoff14).all();
+  for (const o of stale.results || []) {
+    const uid = o.uid || ownerId;
+    if (!uid) continue;
+    const key = `notif:${uid}:opp:${o.id}:stale:${today}`;
+    if (await dedupCheck(key, env)) continue;
+    await createNotification(env, null, {
+      to_user_id: uid,
+      type: 'career_inactive',
+      title: 'Oportunidade parada',
+      body: `"${o.title}" está sem atividade há mais de 14 dias`,
+    });
+    await dedupSet(key, 86400, env);
+    inactive += 1;
+  }
+
+  return { deadlines, contacts, inactive };
 }
 
 // POST /api/cron/run — owner session OR X-Cron-Secret (used by aide-cron worker).
@@ -5254,6 +5384,900 @@ async function handleNetworkConnectionItem(request, env, user, id) {
   if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
   await env.DB.prepare('DELETE FROM network_connections WHERE id = ?').bind(id).run();
   return json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Mercado & Carreira (Etapa 2 — migration 0025).
+// Tabelas novas: market_organizations, market_projects, contact_professional,
+// contact_org_links, career_opportunities, career_documents, career_goals,
+// import_log. Não substituem networking — contact_professional estende
+// network_people (1:1, PK = person_id). Todos os GETs de lista são tolerantes
+// a falha (retornam [] em erro), seguindo a convenção do projeto.
+// ---------------------------------------------------------------------------
+
+const MARKET_ORG_TYPES = ['company', 'university', 'research_institute', 'funder', 'consortium', 'other'];
+
+function shapeMarketOrg(r) {
+  if (!r) return r;
+  return { ...r, tags: parseJsonArray(r.tags) };
+}
+function shapeMarketProject(r) {
+  if (!r) return r;
+  return { ...r, tags: parseJsonArray(r.tags), partner_org_ids: parseJsonArray(r.partner_org_ids) };
+}
+function shapeOpportunity(r) {
+  if (!r) return r;
+  return { ...r, tags: parseJsonArray(r.tags) };
+}
+function shapeContactProfessional(r) {
+  if (!r) return r;
+  return { ...r, interaction_history: parseJsonArray(r.interaction_history) };
+}
+
+// ---- Mercado: organizações --------------------------------------------------
+
+async function handleMarketOrganizations(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const url = new URL(request.url);
+      const type = url.searchParams.get('type');
+      const status = url.searchParams.get('status');
+      const search = url.searchParams.get('search');
+      const tags = url.searchParams.get('tags');
+      const wh = [];
+      const args = [];
+      if (type) { wh.push('o.type = ?'); args.push(type); }
+      if (status) { wh.push('o.status = ?'); args.push(status); }
+      if (search) { wh.push('(o.name LIKE ? OR o.description LIKE ?)'); args.push(`%${search}%`, `%${search}%`); }
+      if (tags) { wh.push('o.tags LIKE ?'); args.push(`%${tags}%`); }
+      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const sql =
+        `SELECT o.*,
+          (SELECT COUNT(*) FROM market_projects p WHERE p.organization_id = o.id) AS project_count,
+          (SELECT COUNT(*) FROM contact_org_links l WHERE l.organization_id = o.id) AS contact_count
+         FROM market_organizations o ${where}
+         ORDER BY o.relevance_score DESC, o.name ASC`;
+      const { results } = await env.DB.prepare(sql).bind(...args).all();
+      return json((results || []).map(shapeMarketOrg));
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name) return json({ error: 'name é obrigatório' }, 400);
+    if (body.type && !MARKET_ORG_TYPES.includes(body.type)) return json({ error: 'type inválido' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO market_organizations
+          (id, name, type, subtype, country, city, website, linkedin, description,
+           relevance_score, relevance_notes, tags, status, source, created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.name, body.type || 'company', body.subtype || '', body.country || 'NL',
+        body.city || '', body.website || '', body.linkedin || '', body.description || '',
+        Number(body.relevance_score) || 3, body.relevance_notes || '',
+        JSON.stringify(body.tags || []), body.status || 'prospect', body.source || '',
+        user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar organização', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM market_organizations WHERE id = ?').bind(id).first();
+    return json(shapeMarketOrg(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleMarketOrganizationItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'GET') {
+    try {
+      const org = await env.DB.prepare('SELECT * FROM market_organizations WHERE id = ?').bind(id).first();
+      if (!org) return json({ error: 'Organização não encontrada' }, 404);
+      const projects = await env.DB.prepare(
+        'SELECT * FROM market_projects WHERE organization_id = ? ORDER BY name'
+      ).bind(id).all();
+      const contacts = await env.DB.prepare(
+        `SELECT l.*, p.name AS person_name, pr.name AS project_name
+           FROM contact_org_links l
+           LEFT JOIN network_people p ON p.id = l.person_id
+           LEFT JOIN market_projects pr ON pr.id = l.project_id
+          WHERE l.organization_id = ?`
+      ).bind(id).all();
+      const opportunities = await env.DB.prepare(
+        'SELECT * FROM career_opportunities WHERE organization_id = ? ORDER BY deadline'
+      ).bind(id).all();
+      return json({
+        ...shapeMarketOrg(org),
+        projects: (projects.results || []).map(shapeMarketProject),
+        contacts: contacts.results || [],
+        opportunities: (opportunities.results || []).map(shapeOpportunity),
+      });
+    } catch (e) {
+      return json({ error: 'Falha ao carregar organização', detail: String(e) }, 500);
+    }
+  }
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM market_organizations WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Organização não encontrada' }, 404);
+    if (body.type && !MARKET_ORG_TYPES.includes(body.type)) return json({ error: 'type inválido' }, 400);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    try {
+      await env.DB.prepare(
+        `UPDATE market_organizations SET name=?, type=?, subtype=?, country=?, city=?, website=?,
+           linkedin=?, description=?, relevance_score=?, relevance_notes=?, tags=?, status=?,
+           source=?, updated_at=? WHERE id=?`
+      ).bind(
+        pick('name', existing.name), pick('type', existing.type), pick('subtype', existing.subtype),
+        pick('country', existing.country), pick('city', existing.city), pick('website', existing.website),
+        pick('linkedin', existing.linkedin), pick('description', existing.description),
+        Number(pick('relevance_score', existing.relevance_score)) || 3,
+        pick('relevance_notes', existing.relevance_notes),
+        body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
+        pick('status', existing.status), pick('source', existing.source), now, id
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar organização', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM market_organizations WHERE id = ?').bind(id).first();
+    return json(shapeMarketOrg(row));
+  }
+  if (request.method === 'DELETE') {
+    if (user.role !== 'owner') return json({ error: 'Apenas o owner pode deletar organizações' }, 403);
+    try {
+      const url = new URL(request.url);
+      const confirm = url.searchParams.get('confirm') === 'true';
+      const active = await env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM career_opportunities
+          WHERE organization_id = ? AND status NOT IN ('closed','rejected')`
+      ).bind(id).first();
+      if (active && active.n > 0 && !confirm) {
+        return json({
+          error: `Há ${active.n} oportunidade(s) ativa(s) vinculada(s) a esta organização. Para confirmar a exclusão, repita com ?confirm=true.`,
+          requiresConfirmation: true,
+          activeOpportunities: active.n,
+        }, 409);
+      }
+      await env.DB.prepare('DELETE FROM market_organizations WHERE id = ?').bind(id).run();
+      return json({ ok: true });
+    } catch (e) {
+      return json({ error: 'Falha ao deletar organização', detail: String(e) }, 500);
+    }
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---- Mercado: projetos ------------------------------------------------------
+
+async function handleMarketProjects(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const url = new URL(request.url);
+      const orgId = url.searchParams.get('organization_id');
+      const type = url.searchParams.get('type');
+      const status = url.searchParams.get('status');
+      const wh = [];
+      const args = [];
+      if (orgId) { wh.push('p.organization_id = ?'); args.push(orgId); }
+      if (type) { wh.push('p.type = ?'); args.push(type); }
+      if (status) { wh.push('p.status = ?'); args.push(status); }
+      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const sql =
+        `SELECT p.*, o.name AS organization_name
+           FROM market_projects p
+           LEFT JOIN market_organizations o ON o.id = p.organization_id
+           ${where}
+          ORDER BY p.relevance_score DESC, p.name ASC`;
+      const { results } = await env.DB.prepare(sql).bind(...args).all();
+      return json((results || []).map(shapeMarketProject));
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name) return json({ error: 'name é obrigatório' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO market_projects
+          (id, name, acronym, type, organization_id, description, budget, start_date, end_date,
+           status, relevance_score, relevance_notes, url, tags, partner_org_ids, source,
+           created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.name, body.acronym || '', body.type || 'research', body.organization_id || null,
+        body.description || '', body.budget || '', body.start_date || '', body.end_date || '',
+        body.status || 'active', Number(body.relevance_score) || 3, body.relevance_notes || '',
+        body.url || '', JSON.stringify(body.tags || []), JSON.stringify(body.partner_org_ids || []),
+        body.source || '', user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar projeto', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM market_projects WHERE id = ?').bind(id).first();
+    return json(shapeMarketProject(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleMarketProjectItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'GET') {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT p.*, o.name AS organization_name
+           FROM market_projects p
+           LEFT JOIN market_organizations o ON o.id = p.organization_id
+          WHERE p.id = ?`
+      ).bind(id).first();
+      if (!row) return json({ error: 'Projeto não encontrado' }, 404);
+      return json(shapeMarketProject(row));
+    } catch (e) {
+      return json({ error: 'Falha ao carregar projeto', detail: String(e) }, 500);
+    }
+  }
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM market_projects WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Projeto não encontrado' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    try {
+      await env.DB.prepare(
+        `UPDATE market_projects SET name=?, acronym=?, type=?, organization_id=?, description=?,
+           budget=?, start_date=?, end_date=?, status=?, relevance_score=?, relevance_notes=?,
+           url=?, tags=?, partner_org_ids=?, source=?, updated_at=? WHERE id=?`
+      ).bind(
+        pick('name', existing.name), pick('acronym', existing.acronym), pick('type', existing.type),
+        pick('organization_id', existing.organization_id), pick('description', existing.description),
+        pick('budget', existing.budget), pick('start_date', existing.start_date),
+        pick('end_date', existing.end_date), pick('status', existing.status),
+        Number(pick('relevance_score', existing.relevance_score)) || 3,
+        pick('relevance_notes', existing.relevance_notes), pick('url', existing.url),
+        body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
+        body.partner_org_ids !== undefined ? JSON.stringify(body.partner_org_ids) : existing.partner_org_ids,
+        pick('source', existing.source), now, id
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar projeto', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM market_projects WHERE id = ?').bind(id).first();
+    return json(shapeMarketProject(row));
+  }
+  if (request.method === 'DELETE') {
+    if (user.role !== 'owner') return json({ error: 'Apenas o owner pode deletar projetos' }, 403);
+    try {
+      await env.DB.prepare('DELETE FROM market_projects WHERE id = ?').bind(id).run();
+      return json({ ok: true });
+    } catch (e) {
+      return json({ error: 'Falha ao deletar projeto', detail: String(e) }, 500);
+    }
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---- Mercado: contatos profissionais (extensão de network_people) ----------
+
+async function handleMarketContacts(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  try {
+    const url = new URL(request.url);
+    const outreach = url.searchParams.get('outreach_status');
+    const orgId = url.searchParams.get('organization_id');
+    const wh = [];
+    const args = [];
+    if (outreach) { wh.push('cp.outreach_status = ?'); args.push(outreach); }
+    if (orgId) { wh.push('cp.organization_id = ?'); args.push(orgId); }
+    const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+    const sql =
+      `SELECT cp.*, p.name AS person_name, p.email AS person_email, p.linkedin AS person_linkedin,
+              o.name AS organization_name
+         FROM contact_professional cp
+         JOIN network_people p ON p.id = cp.person_id
+         LEFT JOIN market_organizations o ON o.id = cp.organization_id
+         ${where}
+        ORDER BY CASE WHEN cp.next_action_date IS NULL OR cp.next_action_date = '' THEN 1 ELSE 0 END,
+                 cp.next_action_date ASC`;
+    const { results } = await env.DB.prepare(sql).bind(...args).all();
+    return json((results || []).map(shapeContactProfessional));
+  } catch { return json([]); }
+}
+
+async function handleMarketContactItem(request, env, user, personId) {
+  if (!personId) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  try {
+    const person = await env.DB.prepare('SELECT * FROM network_people WHERE id = ?').bind(personId).first();
+    if (!person) return json({ error: 'Pessoa não encontrada' }, 404);
+    const professional = await env.DB.prepare(
+      'SELECT * FROM contact_professional WHERE person_id = ?'
+    ).bind(personId).first();
+    const links = await env.DB.prepare(
+      `SELECT l.*, o.name AS organization_name, pr.name AS project_name
+         FROM contact_org_links l
+         LEFT JOIN market_organizations o ON o.id = l.organization_id
+         LEFT JOIN market_projects pr ON pr.id = l.project_id
+        WHERE l.person_id = ?`
+    ).bind(personId).all();
+    return json({
+      person: { ...person, tags: parseJsonArray(person.tags) },
+      professional: professional ? shapeContactProfessional(professional) : null,
+      org_links: links.results || [],
+    });
+  } catch (e) {
+    return json({ error: 'Falha ao carregar contato', detail: String(e) }, 500);
+  }
+}
+
+async function handleMarketContactProfessional(request, env, user, personId) {
+  if (!personId) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'POST' && request.method !== 'PUT') {
+    return json({ error: 'Método não permitido' }, 405);
+  }
+  const person = await env.DB.prepare('SELECT id FROM network_people WHERE id = ?').bind(personId).first();
+  if (!person) return json({ error: 'Pessoa não encontrada em network_people' }, 404);
+  const body = (await readJson(request)) || {};
+  const now = Math.floor(Date.now() / 1000);
+  const existing = await env.DB.prepare(
+    'SELECT * FROM contact_professional WHERE person_id = ?'
+  ).bind(personId).first();
+  const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+
+  // Histórico de interações: se vier `interaction`, anexa ao array existente.
+  let history = parseJsonArray(existing && existing.interaction_history);
+  if (body.interaction) {
+    history.push({
+      date: body.interaction.date || new Date(now * 1000).toISOString().slice(0, 10),
+      type: body.interaction.type || '',
+      notes: body.interaction.notes || '',
+    });
+  } else if (body.interaction_history !== undefined) {
+    history = parseJsonArray(body.interaction_history);
+  }
+
+  try {
+    if (!existing) {
+      await env.DB.prepare(
+        `INSERT INTO contact_professional
+          (person_id, organization_id, outreach_status, outreach_channel, last_contact_date,
+           next_action, next_action_date, relevance_for_phd, relevance_for_job, relevance_for_spinoff,
+           interaction_history, confirmed_email, confirmed_linkedin, notes, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        personId, body.organization_id || null, body.outreach_status || 'not_contacted',
+        body.outreach_channel || '', body.last_contact_date || '', body.next_action || '',
+        body.next_action_date || '', Number(body.relevance_for_phd) || 0,
+        Number(body.relevance_for_job) || 0, Number(body.relevance_for_spinoff) || 0,
+        JSON.stringify(history), body.confirmed_email || '', body.confirmed_linkedin || '',
+        body.notes || '', now
+      ).run();
+    } else {
+      await env.DB.prepare(
+        `UPDATE contact_professional SET organization_id=?, outreach_status=?, outreach_channel=?,
+           last_contact_date=?, next_action=?, next_action_date=?, relevance_for_phd=?,
+           relevance_for_job=?, relevance_for_spinoff=?, interaction_history=?, confirmed_email=?,
+           confirmed_linkedin=?, notes=?, updated_at=? WHERE person_id=?`
+      ).bind(
+        pick('organization_id', existing.organization_id), pick('outreach_status', existing.outreach_status),
+        pick('outreach_channel', existing.outreach_channel), pick('last_contact_date', existing.last_contact_date),
+        pick('next_action', existing.next_action), pick('next_action_date', existing.next_action_date),
+        Number(pick('relevance_for_phd', existing.relevance_for_phd)) || 0,
+        Number(pick('relevance_for_job', existing.relevance_for_job)) || 0,
+        Number(pick('relevance_for_spinoff', existing.relevance_for_spinoff)) || 0,
+        JSON.stringify(history), pick('confirmed_email', existing.confirmed_email),
+        pick('confirmed_linkedin', existing.confirmed_linkedin), pick('notes', existing.notes),
+        now, personId
+      ).run();
+    }
+  } catch (e) {
+    return json({ error: 'Falha ao salvar dados profissionais', detail: String(e) }, 500);
+  }
+  const row = await env.DB.prepare('SELECT * FROM contact_professional WHERE person_id = ?').bind(personId).first();
+  return json(shapeContactProfessional(row), existing ? 200 : 201);
+}
+
+async function handleMarketContactLink(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const body = (await readJson(request)) || {};
+  if (!body.person_id || !body.organization_id) {
+    return json({ error: 'person_id e organization_id são obrigatórios' }, 400);
+  }
+  const id = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `INSERT INTO contact_org_links
+        (id, person_id, organization_id, project_id, role_at_org, relevance_notes, created_at)
+       VALUES (?,?,?,?,?,?,?)`
+    ).bind(
+      id, body.person_id, body.organization_id, body.project_id || null,
+      body.role_at_org || '', body.relevance_notes || '', now
+    ).run();
+  } catch (e) {
+    return json({ error: 'Falha ao criar vínculo', detail: String(e) }, 500);
+  }
+  const row = await env.DB.prepare('SELECT * FROM contact_org_links WHERE id = ?').bind(id).first();
+  return json(row, 201);
+}
+
+// ---- Mercado: importação em massa ------------------------------------------
+// GET  → histórico (import_log) com nome de quem importou.
+// POST → importa organizações + contatos + vínculos a partir de um JSON
+//        estruturado. Idempotente: organizações casam por nome (não duplica),
+//        contatos por email e depois por nome. Resolve `organization_name` dos
+//        contatos para organization_id e cria a linha em contact_professional.
+
+async function handleMarketImport(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const { results } = await env.DB.prepare(
+        `SELECT il.*, u.name AS imported_by_name
+           FROM import_log il
+           LEFT JOIN users u ON u.id = il.imported_by
+          ORDER BY il.imported_at DESC`
+      ).all();
+      return json((results || []).map((r) => ({ ...r, error_log: parseJsonArray(r.error_log) })));
+    } catch { return json([]); }
+  }
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+
+  const allowed = user.role === 'owner' || user.role === 'assistant_fixed' || user.user_type === 'fixed';
+  if (!allowed) return json({ error: 'Sem permissão para importação em massa' }, 403);
+
+  const body = (await readJson(request)) || {};
+  const data = body.data || {};
+  const now = Math.floor(Date.now() / 1000);
+  let orgCount = 0;
+  let contactCount = 0;
+  let failed = 0;
+  const errors = [];
+
+  // Mapa nome(lowercase) → id para resolver organization_name dos contatos.
+  // Começa com as organizações já existentes no banco.
+  const orgByName = new Map();
+  try {
+    const { results } = await env.DB.prepare('SELECT id, name FROM market_organizations').all();
+    for (const o of (results || [])) orgByName.set((o.name || '').trim().toLowerCase(), o.id);
+  } catch { /* tabela ausente — segue com mapa vazio */ }
+
+  // --- Organizações ---
+  for (const org of (data.organizations || [])) {
+    try {
+      const key = (org.name || '').trim().toLowerCase();
+      if (!key) { failed++; errors.push({ kind: 'organization', item: '(sem nome)', error: 'name vazio' }); continue; }
+      if (orgByName.has(key)) continue; // já existe — idempotente
+      const id = org.id || crypto.randomUUID();
+      await env.DB.prepare(
+        `INSERT INTO market_organizations
+          (id, name, type, subtype, country, city, website, linkedin, description,
+           relevance_score, relevance_notes, tags, status, source, created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, org.name, org.type || 'company', org.subtype || '', org.country || 'NL',
+        org.city || '', org.website || '', org.linkedin || '', org.description || '',
+        Number(org.relevance_score) || 3, org.relevance_notes || '',
+        JSON.stringify(org.tags || []), org.status || 'prospect',
+        org.source || body.source_description || '', user.id, now, now
+      ).run();
+      orgByName.set(key, id);
+      orgCount++;
+    } catch (e) {
+      failed++; errors.push({ kind: 'organization', item: org && org.name, error: String(e) });
+    }
+  }
+
+  // --- Contatos (network_people + contact_professional) ---
+  for (const c of (data.contacts || [])) {
+    try {
+      if (!(c.name || '').trim()) { failed++; errors.push({ kind: 'contact', item: '(sem nome)', error: 'name vazio' }); continue; }
+      const orgKey = (c.organization_name || c.institution || '').trim().toLowerCase();
+      const orgId = orgKey ? (orgByName.get(orgKey) || null) : null;
+
+      // Dedup: por email (se houver), senão por nome exato.
+      let personId = null;
+      if (c.email) {
+        const hit = await env.DB.prepare('SELECT id FROM network_people WHERE email = ? LIMIT 1').bind(c.email).first();
+        if (hit) personId = hit.id;
+      }
+      if (!personId) {
+        const hit = await env.DB.prepare('SELECT id FROM network_people WHERE name = ? LIMIT 1').bind(c.name).first();
+        if (hit) personId = hit.id;
+      }
+      if (!personId) {
+        personId = c.id || crypto.randomUUID();
+        await env.DB.prepare(
+          `INSERT INTO network_people
+            (id, name, type, institution, role, area_of_work, email, phone, linkedin, notes,
+             connection_to_lauro, connection_strength, tags, lifegame_person_id, dex_contact_id,
+             created_by, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(
+          personId, c.name, c.type || 'person', c.organization_name || c.institution || '',
+          c.role || '', c.area_of_work || '', c.email || '', c.phone || '', c.linkedin || '',
+          c.notes || '', '', Number(c.connection_strength) || 3,
+          JSON.stringify(c.tags || []), '', '', user.id, now, now
+        ).run();
+      } else {
+        // Reimportação: atualiza dados descritivos. Não sobrescreve email/linkedin
+        // com vazio (preserva o que já existe quando o JSON não traz o campo).
+        await env.DB.prepare(
+          `UPDATE network_people SET
+             institution = ?, role = ?,
+             email = CASE WHEN ? <> '' THEN ? ELSE email END,
+             linkedin = CASE WHEN ? <> '' THEN ? ELSE linkedin END,
+             tags = ?, updated_at = ?
+           WHERE id = ?`
+        ).bind(
+          c.organization_name || c.institution || '', c.role || '',
+          c.email || '', c.email || '',
+          c.linkedin || '', c.linkedin || '',
+          JSON.stringify(c.tags || []), now, personId
+        ).run();
+      }
+
+      // contact_professional — upsert (INSERT OR REPLACE). Reimportar atualiza os
+      // campos vindos do JSON, mas preserva os campos editados manualmente na UI
+      // (last_contact_date, next_action, interaction_history, confirmed_*).
+      const existingProf = await env.DB.prepare(
+        'SELECT * FROM contact_professional WHERE person_id = ?'
+      ).bind(personId).first();
+      await env.DB.prepare(
+        `INSERT OR REPLACE INTO contact_professional
+          (person_id, organization_id, outreach_status, outreach_channel, last_contact_date,
+           next_action, next_action_date, relevance_for_phd, relevance_for_job, relevance_for_spinoff,
+           interaction_history, confirmed_email, confirmed_linkedin, notes, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        personId,
+        orgId || (existingProf && existingProf.organization_id) || null,
+        c.outreach_status || (existingProf && existingProf.outreach_status) || 'not_contacted',
+        c.outreach_channel || (existingProf && existingProf.outreach_channel) || '',
+        (existingProf && existingProf.last_contact_date) || '',
+        (existingProf && existingProf.next_action) || '',
+        (existingProf && existingProf.next_action_date) || '',
+        Number(c.relevance_for_phd) || 0, Number(c.relevance_for_job) || 0,
+        Number(c.relevance_for_spinoff) || 0,
+        (existingProf && existingProf.interaction_history) || '[]',
+        (existingProf && existingProf.confirmed_email) || '',
+        (existingProf && existingProf.confirmed_linkedin) || '',
+        c.relevance_notes || (existingProf && existingProf.notes) || '', now
+      ).run();
+
+      // Vínculo pessoa ↔ organização (se a organização foi resolvida).
+      if (orgId) {
+        const existingLink = await env.DB.prepare(
+          'SELECT id FROM contact_org_links WHERE person_id = ? AND organization_id = ? LIMIT 1'
+        ).bind(personId, orgId).first();
+        if (!existingLink) {
+          await env.DB.prepare(
+            `INSERT INTO contact_org_links
+              (id, person_id, organization_id, project_id, role_at_org, relevance_notes, created_at)
+             VALUES (?,?,?,?,?,?,?)`
+          ).bind(crypto.randomUUID(), personId, orgId, null, c.role || '', c.relevance_notes || '', now).run();
+        }
+      }
+      contactCount++;
+    } catch (e) {
+      failed++; errors.push({ kind: 'contact', item: c && c.name, error: String(e) });
+    }
+  }
+
+  // --- Vínculos explícitos (opcional) ---
+  for (const l of (data.links || [])) {
+    try {
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO contact_org_links
+          (id, person_id, organization_id, project_id, role_at_org, relevance_notes, created_at)
+         VALUES (?,?,?,?,?,?,?)`
+      ).bind(
+        l.id || crypto.randomUUID(), l.person_id || '', l.organization_id || '',
+        l.project_id || null, l.role_at_org || '', l.relevance_notes || '', now
+      ).run();
+    } catch (e) {
+      failed++; errors.push({ kind: 'link', item: l && l.person_id, error: String(e) });
+    }
+  }
+
+  const imported = orgCount + contactCount;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO import_log
+        (id, import_type, source_description, items_imported, items_failed, error_log, imported_by, imported_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(
+      crypto.randomUUID(), body.type || 'mixed', body.source_description || '',
+      imported, failed, JSON.stringify(errors), user.id, now
+    ).run();
+  } catch { /* falha ao registrar log não invalida a importação */ }
+
+  return json({ imported, failed, organizations: orgCount, contacts: contactCount, errors });
+}
+
+// ---- Carreira: oportunidades ------------------------------------------------
+
+async function handleCareerOpportunities(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const url = new URL(request.url);
+      const track = url.searchParams.get('track');
+      const status = url.searchParams.get('status');
+      const priority = url.searchParams.get('priority');
+      const wh = [];
+      const args = [];
+      if (track) { wh.push('o.track = ?'); args.push(track); }
+      if (status) { wh.push('o.status = ?'); args.push(status); }
+      if (priority) { wh.push('o.priority = ?'); args.push(Number(priority)); }
+      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const sql =
+        `SELECT o.*, org.name AS organization_name, c.name AS contact_name
+           FROM career_opportunities o
+           LEFT JOIN market_organizations org ON org.id = o.organization_id
+           LEFT JOIN network_people c ON c.id = o.contact_id
+           ${where}
+          ORDER BY CASE o.status
+            WHEN 'identified' THEN 0 WHEN 'researching' THEN 1 WHEN 'preparing' THEN 2
+            WHEN 'applied' THEN 3 WHEN 'interviewing' THEN 4 WHEN 'offer' THEN 5
+            WHEN 'rejected' THEN 6 WHEN 'closed' THEN 7 ELSE 8 END,
+            CASE WHEN o.deadline IS NULL OR o.deadline = '' THEN 1 ELSE 0 END, o.deadline ASC`;
+      const { results } = await env.DB.prepare(sql).bind(...args).all();
+      return json((results || []).map(shapeOpportunity));
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.title || !body.type || !body.track) {
+      return json({ error: 'title, type e track são obrigatórios' }, 400);
+    }
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO career_opportunities
+          (id, title, type, track, organization_id, contact_id, project_id, description,
+           requirements, location, salary_range, deadline, status, priority, fit_score, url,
+           notes, tags, assigned_to, created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.title, body.type, body.track, body.organization_id || null, body.contact_id || null,
+        body.project_id || null, body.description || '', body.requirements || '', body.location || '',
+        body.salary_range || '', body.deadline || '', body.status || 'identified',
+        Number(body.priority) || 3, Number(body.fit_score) || 3, body.url || '', body.notes || '',
+        JSON.stringify(body.tags || []), body.assigned_to || null, user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar oportunidade', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
+    return json(shapeOpportunity(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleCareerOpportunityItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'GET') {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT o.*, org.name AS organization_name, c.name AS contact_name
+           FROM career_opportunities o
+           LEFT JOIN market_organizations org ON org.id = o.organization_id
+           LEFT JOIN network_people c ON c.id = o.contact_id
+          WHERE o.id = ?`
+      ).bind(id).first();
+      if (!row) return json({ error: 'Oportunidade não encontrada' }, 404);
+      return json(shapeOpportunity(row));
+    } catch (e) {
+      return json({ error: 'Falha ao carregar oportunidade', detail: String(e) }, 500);
+    }
+  }
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Oportunidade não encontrada' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    const newStatus = pick('status', existing.status);
+    let notes = pick('notes', existing.notes);
+    // Mudança de status: registra no histórico (notes) com timestamp.
+    if (body.status !== undefined && body.status !== existing.status) {
+      const stamp = new Date(now * 1000).toISOString().slice(0, 16).replace('T', ' ');
+      notes = `${notes || ''}\n[${stamp}] status: ${existing.status} → ${newStatus}`.trim();
+    }
+    try {
+      await env.DB.prepare(
+        `UPDATE career_opportunities SET title=?, type=?, track=?, organization_id=?, contact_id=?,
+           project_id=?, description=?, requirements=?, location=?, salary_range=?, deadline=?,
+           status=?, priority=?, fit_score=?, url=?, notes=?, tags=?, assigned_to=?, updated_at=?
+         WHERE id=?`
+      ).bind(
+        pick('title', existing.title), pick('type', existing.type), pick('track', existing.track),
+        pick('organization_id', existing.organization_id), pick('contact_id', existing.contact_id),
+        pick('project_id', existing.project_id), pick('description', existing.description),
+        pick('requirements', existing.requirements), pick('location', existing.location),
+        pick('salary_range', existing.salary_range), pick('deadline', existing.deadline),
+        newStatus, Number(pick('priority', existing.priority)) || 3,
+        Number(pick('fit_score', existing.fit_score)) || 3, pick('url', existing.url), notes,
+        body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
+        pick('assigned_to', existing.assigned_to), now, id
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar oportunidade', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
+    return json(shapeOpportunity(row));
+  }
+  if (request.method === 'DELETE') {
+    // Soft delete: marca como 'closed' em vez de remover.
+    const existing = await env.DB.prepare('SELECT id FROM career_opportunities WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Oportunidade não encontrada' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        "UPDATE career_opportunities SET status='closed', updated_at=? WHERE id=?"
+      ).bind(now, id).run();
+    } catch (e) {
+      return json({ error: 'Falha ao encerrar oportunidade', detail: String(e) }, 500);
+    }
+    return json({ ok: true, status: 'closed' });
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---- Carreira: documentos ---------------------------------------------------
+
+async function handleCareerDocuments(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const url = new URL(request.url);
+      const type = url.searchParams.get('type');
+      const oppId = url.searchParams.get('opportunity_id');
+      const wh = [];
+      const args = [];
+      if (type) { wh.push('type = ?'); args.push(type); }
+      if (oppId) { wh.push('opportunity_id = ?'); args.push(oppId); }
+      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM career_documents ${where} ORDER BY updated_at DESC`
+      ).bind(...args).all();
+      return json(results || []);
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.title) return json({ error: 'title é obrigatório' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO career_documents
+          (id, title, type, version, opportunity_id, drive_file_id, drive_link, notes,
+           created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.title, body.type || 'cv', body.version || 'v1', body.opportunity_id || null,
+        body.drive_file_id || '', body.drive_link || '', body.notes || '', user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar documento', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_documents WHERE id = ?').bind(id).first();
+    return json(row, 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleCareerDocumentItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM career_documents WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Documento não encontrado' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    try {
+      await env.DB.prepare(
+        `UPDATE career_documents SET title=?, type=?, version=?, opportunity_id=?, drive_file_id=?,
+           drive_link=?, notes=?, updated_at=? WHERE id=?`
+      ).bind(
+        pick('title', existing.title), pick('type', existing.type), pick('version', existing.version),
+        pick('opportunity_id', existing.opportunity_id), pick('drive_file_id', existing.drive_file_id),
+        pick('drive_link', existing.drive_link), pick('notes', existing.notes), now, id
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar documento', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_documents WHERE id = ?').bind(id).first();
+    return json(row);
+  }
+  if (request.method === 'DELETE') {
+    try {
+      await env.DB.prepare('DELETE FROM career_documents WHERE id = ?').bind(id).run();
+      return json({ ok: true });
+    } catch (e) {
+      return json({ error: 'Falha ao deletar documento', detail: String(e) }, 500);
+    }
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---- Carreira: metas --------------------------------------------------------
+
+async function handleCareerGoals(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const url = new URL(request.url);
+      const track = url.searchParams.get('track');
+      const status = url.searchParams.get('status');
+      const wh = [];
+      const args = [];
+      if (track) { wh.push('track = ?'); args.push(track); }
+      if (status) { wh.push('status = ?'); args.push(status); }
+      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM career_goals ${where} ORDER BY priority DESC, target_date ASC`
+      ).bind(...args).all();
+      return json(results || []);
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.title) return json({ error: 'title é obrigatório' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO career_goals
+          (id, title, track, description, target_date, status, priority, notes,
+           created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.title, body.track || 'job', body.description || '', body.target_date || '',
+        body.status || 'active', Number(body.priority) || 3, body.notes || '', user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar meta', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_goals WHERE id = ?').bind(id).first();
+    return json(row, 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleCareerGoalItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM career_goals WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Meta não encontrada' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    try {
+      await env.DB.prepare(
+        `UPDATE career_goals SET title=?, track=?, description=?, target_date=?, status=?,
+           priority=?, notes=?, updated_at=? WHERE id=?`
+      ).bind(
+        pick('title', existing.title), pick('track', existing.track), pick('description', existing.description),
+        pick('target_date', existing.target_date), pick('status', existing.status),
+        Number(pick('priority', existing.priority)) || 3, pick('notes', existing.notes), now, id
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar meta', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_goals WHERE id = ?').bind(id).first();
+    return json(row);
+  }
+  if (request.method === 'DELETE') {
+    try {
+      await env.DB.prepare('DELETE FROM career_goals WHERE id = ?').bind(id).run();
+      return json({ ok: true });
+    } catch (e) {
+      return json({ error: 'Falha ao deletar meta', detail: String(e) }, 500);
+    }
+  }
+  return json({ error: 'Método não permitido' }, 405);
 }
 
 // ---------------------------------------------------------------------------

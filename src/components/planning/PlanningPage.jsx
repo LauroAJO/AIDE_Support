@@ -36,6 +36,8 @@ export default function PlanningPage() {
   const [monthGoal, setMonthGoal] = useState('');
   const [keyResults, setKeyResults] = useState([]);
   const [krInput, setKrInput] = useState('');
+  // Etapa 6 — oportunidades de carreira (para a seção de deadlines).
+  const [careerOpps, setCareerOpps] = useState([]);
 
   const setAreas = useStore((s) => s.setAreas);
   const setProjects = useStore((s) => s.setProjects);
@@ -73,6 +75,27 @@ export default function PlanningPage() {
     load(refDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refDate]);
+
+  // Etapa 6 — carrega oportunidades de carreira uma vez.
+  useEffect(() => {
+    apiFetch('/api/career/opportunities').then((r) => setCareerOpps(r || [])).catch(() => {});
+  }, []);
+
+  // Oportunidades com deadline nas próximas 4 semanas (28 dias), ordenadas por urgência.
+  const deadlineOpps = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const limit = today.getTime() + 28 * 86400000;
+    return (careerOpps || [])
+      .filter((o) => o.deadline && !['rejected', 'closed'].includes(o.status))
+      .map((o) => {
+        const s = o.deadline.length === 7 ? `${o.deadline}-01` : o.deadline;
+        const t = Date.parse(s);
+        return { ...o, _t: t, _days: Number.isNaN(t) ? null : Math.round((t - today.getTime()) / 86400000) };
+      })
+      .filter((o) => o._t && !Number.isNaN(o._t) && o._t <= limit)
+      .sort((a, b) => a._t - b._t);
+  }, [careerOpps]);
 
   const loadStrategic = async () => {
     try {
@@ -323,6 +346,43 @@ export default function PlanningPage() {
                     <Plus className="h-4 w-4" />
                   </button>
                 </div>
+              )}
+            </div>
+
+            {/* Etapa 6 — Oportunidades de carreira com deadline nas próximas 4 semanas */}
+            <div>
+              <p className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+                <Target className="h-3.5 w-3.5 text-accent" />
+                Oportunidades com deadline (4 semanas)
+              </p>
+              {deadlineOpps.length === 0 ? (
+                <p className="text-[11px] text-muted">Nenhuma oportunidade com prazo nas próximas 4 semanas.</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {deadlineOpps.map((o) => {
+                    const urgent = o._days !== null && o._days < 0;
+                    const soon = o._days !== null && o._days >= 0 && o._days < 14;
+                    const color = urgent || soon ? 'text-red-600' : (o._days < 28 ? 'text-amber-600' : 'text-ink2');
+                    return (
+                      <li key={o.id}>
+                        <button
+                          type="button"
+                          onClick={() => navigate('/career')}
+                          className="flex w-full items-center justify-between gap-2 rounded-lg border border-line bg-base px-3 py-2 text-left transition hover:border-accent"
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-medium text-ink">{o.title}</span>
+                            {o.organization_name && <span className="block truncate text-[11px] text-muted">{o.organization_name}</span>}
+                          </span>
+                          <span className={`shrink-0 text-[11px] font-semibold ${color}`}>
+                            {o.deadline}
+                            {o._days !== null && (o._days < 0 ? ` · ${-o._days}d atrás` : ` · ${o._days}d`)}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
               )}
             </div>
           </div>

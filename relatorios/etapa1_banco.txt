@@ -1,0 +1,58 @@
+================================
+AIDE — RELATÓRIO ETAPA 1
+Banco de Dados: Mercado e Carreira
+Data: 2026-06-25
+================================
+
+ARQUIVO CRIADO:
+migrations/0025_mercado_carreira.sql
+
+TABELAS CRIADAS (8 — todas novas, sem conflito com 0001-0024):
+- market_organizations ....... 17 colunas
+- market_projects ............ 19 colunas
+- contact_professional ....... 15 colunas  (PK = person_id → network_people)
+- contact_org_links .......... 7 colunas
+- career_opportunities ....... 22 colunas
+- career_documents ........... 11 colunas
+- career_goals ............... 11 colunas
+- import_log ................. 8 colunas
+
+ÍNDICES CRIADOS (7):
+- idx_market_org_type        ON market_organizations(type)
+- idx_market_org_status      ON market_organizations(status)
+- idx_market_proj_org        ON market_projects(organization_id)
+- idx_contact_prof_status    ON contact_professional(outreach_status)
+- idx_career_opp_status      ON career_opportunities(status)
+- idx_career_opp_track       ON career_opportunities(track)
+- idx_career_opp_deadline    ON career_opportunities(deadline)
+
+MIGRAÇÃO LOCAL:
+Comando: wrangler d1 execute aide-db --local --file=migrations/0025_mercado_carreira.sql
+Status: SUCESSO
+Statements executados: 15 (8 CREATE TABLE + 7 CREATE INDEX), todos success:true
+
+VERIFICAÇÃO:
+SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;
+As 8 novas tabelas aparecem no banco local, confirmadas pela ordem alfabética:
+  ... career_documents, career_goals, career_opportunities, chat_messages,
+  contact_org_links, contact_professional, ... import_log, ...
+  market_organizations, market_projects, ...
+Nenhuma tabela existente foi alterada ou removida. Nenhum DROP/DELETE executado.
+
+OBSERVAÇÕES:
+- Todas as FKs apontam para tabelas existentes (users, network_people) ou para
+  as próprias tabelas novas (market_organizations, market_projects,
+  career_opportunities). Integridade referencial coerente.
+- Migration 100% idempotente (CREATE TABLE/INDEX IF NOT EXISTS) — pode ser
+  re-executada com segurança, diferente de 0015/0016 (que usam ALTER).
+- _worker.js NÃO foi modificado. Nenhum deploy realizado.
+
+PRÓXIMO PASSO:
+Etapa 2 — Backend (rotas API para Mercado e Carreira em _worker.js)
+
+COMANDO PARA MIGRAÇÃO REMOTA (executar somente após aprovação do usuário):
+npx wrangler d1 execute aide-db --remote --file=migrations/0025_mercado_carreira.sql
+
+================================
+FIM DO RELATÓRIO
+================================

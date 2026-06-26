@@ -16,6 +16,9 @@ import {
   Network as NetworkIcon,
   MessageSquare,
   Shield,
+  Upload,
+  Building2,
+  Briefcase,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
@@ -75,7 +78,16 @@ export default function Layout({ children }) {
     return !!perm && perm !== 'none';
   });
   const visibleOwner = isOwner ? OWNER_NAV : [];
-  const navItems = [...visibleMain, ...visibleOwner];
+  // "Mercado", "Carreira" e "Importar" — só owner e assistente fixo (mesma regra dos endpoints).
+  const canFixed = isOwner || user?.role === 'assistant_fixed' || user?.user_type === 'fixed';
+  const fixedNav = canFixed
+    ? [
+        { to: '/market', label: 'Mercado', icon: Building2 },
+        { to: '/career', label: 'Carreira', icon: Briefcase },
+        { to: '/import', label: 'Importar', icon: Upload },
+      ]
+    : [];
+  const navItems = [...visibleMain, ...fixedNav, ...visibleOwner];
   const chatUnread = useStore((s) => s.chatUnread);
   const badgeCount = (key) => {
     if (key === 'pendingUsers') return pendingUsers ? pendingUsers.length : 0;

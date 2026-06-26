@@ -1,0 +1,100 @@
+================================
+AIDE — RELATÓRIO ETAPA 2
+Backend: Rotas API Mercado e Carreira
+Data: 2026-06-26
+================================
+
+ROTAS ADICIONADAS (28 — todas novas, nenhuma rota existente removida ou reescrita):
+
+MERCADO — Organizações
+  GET    /api/market/organizations            (filtros ?type=&status=&search=&tags=; ordena relevance_score DESC, name ASC; inclui project_count e contact_count)
+  POST   /api/market/organizations            (requer name; valida enum type; demais campos opcionais)
+  GET    /api/market/organizations/:id        (org + projetos + contatos vinculados + oportunidades)
+  PUT    /api/market/organizations/:id         (atualiza; valida type; atualiza updated_at)
+  DELETE /api/market/organizations/:id         (só owner; bloqueia se há oportunidades ativas; ?confirm=true força)
+
+MERCADO — Projetos
+  GET    /api/market/projects                 (filtros ?organization_id=&type=&status=; inclui organization_name)
+  POST   /api/market/projects                 (requer name)
+  GET    /api/market/projects/:id             (projeto + organization_name)
+  PUT    /api/market/projects/:id
+  DELETE /api/market/projects/:id             (só owner)
+
+MERCADO — Contatos Profissionais (extensão de network_people)
+  GET    /api/market/contacts                 (network_people JOIN contact_professional; filtros ?outreach_status=&organization_id=; ordena next_action_date ASC, urgentes primeiro; inclui organization_name)
+  GET    /api/market/contacts/:personId       (network_people + contact_professional + contact_org_links com org e projeto)
+  POST   /api/market/contacts/:personId/professional   (cria/atualiza contact_professional; 404 se pessoa não existe em network_people)
+  PUT    /api/market/contacts/:personId/professional   (atualiza; body.interaction é anexado ao interaction_history)
+  POST   /api/market/contacts/link            (cria contact_org_links; requer person_id + organization_id)
+
+MERCADO — Importação em massa
+  POST   /api/market/import                   (owner OU assistant_fixed/fixed; INSERT OR IGNORE idempotente p/ organizations/contacts/links; retorna {imported,failed,errors}; grava import_log)
+
+CARREIRA — Oportunidades
+  GET    /api/career/opportunities            (filtros ?track=&status=&priority=; ordena por pipeline de status e deadline ASC; inclui organization_name e contact_name)
+  POST   /api/career/opportunities            (requer title, type, track; created_by = user.id)
+  GET    /api/career/opportunities/:id
+  PUT    /api/career/opportunities/:id        (mudança de status é registrada em notes com timestamp)
+  DELETE /api/career/opportunities/:id        (soft delete: status='closed')
+
+CARREIRA — Documentos
+  GET    /api/career/documents                (filtros ?type=&opportunity_id=)
+  POST   /api/career/documents                (requer title)
+  PUT    /api/career/documents/:id
+  DELETE /api/career/documents/:id
+
+CARREIRA — Metas
+  GET    /api/career/goals                    (filtros ?track=&status=)
+  POST   /api/career/goals                    (requer title)
+  PUT    /api/career/goals/:id
+  DELETE /api/career/goals/:id
+
+LINHA DE INÍCIO NO _worker.js:
+- Roteamento (bloco if/else): linha 233 (logo após as rotas de /api/chat e antes do 404 fallback).
+- Implementação dos handlers: a partir da linha 5311 (após handleNetworkConnectionItem, antes da seção de anexos).
+
+PADRÕES SEGUIDOS:
+- Bloco if/else existente do router — apenas adições, nenhuma remoção.
+- Helper json() existente para todas as respostas.
+- Todos os novos handlers com try/catch; GETs de lista toleram falha (retornam []), seguindo a convenção do projeto.
+- IDs via crypto.randomUUID(); timestamps via Math.floor(Date.now()/1000).
+- Permissões: DELETE de organização/projeto restrito a owner (user.role==='owner'); /api/market/import restrito a owner ou assistant_fixed/fixed.
+- Todos os textos de erro em PT-BR.
+
+VERIFICAÇÃO node --check:
+Status: OK (node --check _worker.js → NODE_CHECK_OK)
+
+VERIFICAÇÃO npm run build:
+Status: zero erros (✓ built in 5.38s; postbuild copiou _worker.js → dist/_worker.js)
+Observação: único aviso é o pré-existente "chunks larger than 500 kB" do Vite — não relacionado a esta etapa.
+
+TESTES LOCAIS (wrangler pages dev dist + sessão owner semeada em D1 local):
+Requeridos:
+  GET  /api/market/organizations          → 200  []
+  POST /api/market/organizations {name}   → 201  (objeto criado, tags preservadas)
+  GET  /api/career/opportunities          → 200  []
+Extras (sanidade):
+  GET  /api/market/organizations (após POST) → 200, item com project_count=0/contact_count=0
+  POST org type inválido                  → 400
+  POST org sem name                       → 400
+  POST /api/career/goals {title,track}    → 201
+  POST opportunity sem track              → 400
+  GET sem token                           → 401
+  GET rota inexistente /api/market/foo    → 404 (routing cai corretamente no fallback)
+  GET /api/market/organizations/:id       → 200 (enriquecido: projects/contacts/opportunities)
+  POST /api/market/contacts/<inexistente>/professional → 404
+  POST /api/market/import {2 orgs}        → 200  {"imported":2,"failed":0,"errors":[]}
+Dados de teste e sessão semeada foram removidos do D1 local após os testes.
+
+PRÓXIMO PASSO:
+Etapa 3 — Sistema de Importação em Massa
+
+NOTAS / DEPLOY:
+- Nenhum deploy realizado.
+- A migração 0025 está aplicada apenas no D1 LOCAL. Para que estas rotas funcionem em produção,
+  a migração remota precisa ser executada (pendente de aprovação):
+  npx wrangler d1 execute aide-db --remote --file=migrations/0025_mercado_carreira.sql
+
+================================
+FIM DO RELATÓRIO
+================================

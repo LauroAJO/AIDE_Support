@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Network, Plus, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
-  Building2, User, Link as LinkIcon, Map, List as ListIcon,
+  Building2, User, Link as LinkIcon, Map, List as ListIcon, Briefcase,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -78,21 +79,26 @@ export default function NetworkingPage() {
   const [editor, setEditor] = useState(null);
   const [seeding, setSeeding] = useState(false);
   const [personRoles, setPersonRoles] = useState([]); // flattened roles for the graph
+  // Etapa 6 — IDs de pessoas que possuem perfil profissional (contact_professional).
+  const [proIds, setProIds] = useState(() => new Set());
+  const navigate = useNavigate();
 
   const loadAll = async () => {
     try {
-      const [routes, st, ar, pr, fr, ts] = await Promise.all([
+      const [routes, st, ar, pr, fr, ts, mc] = await Promise.all([
         apiFetch('/api/network/routes').catch(() => ({ people: [], institutions: [], connections: [], person_roles: [] })),
         apiFetch('/api/bridge/sync-status').catch(() => null),
         apiFetch('/api/areas').catch(() => []),
         apiFetch('/api/projects').catch(() => []),
         apiFetch('/api/fronts').catch(() => []),
         tasksInStore.length === 0 ? apiFetch('/api/tasks').catch(() => []) : Promise.resolve(tasksInStore),
+        apiFetch('/api/market/contacts').catch(() => []),
       ]);
       setPeople(routes.people || []);
       setInstitutions(routes.institutions || []);
       setConnections(routes.connections || []);
       setPersonRoles(routes.person_roles || []);
+      setProIds(new Set((mc || []).map((c) => c.person_id)));
       if (st) setBridgeStatus(st);
       if (ar) setAreas(ar);
       if (pr) setProjects(pr);
@@ -277,6 +283,11 @@ export default function NetworkingPage() {
                       {it._kind === 'person' && it.lifegame_person_id && (
                         <span className="rounded-full bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">LG</span>
                       )}
+                      {it._kind === 'person' && proIds.has(it.id) && (
+                        <span className="flex items-center gap-0.5 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium text-indigo-700" title="Tem perfil profissional no Mercado">
+                          <Briefcase className="h-2.5 w-2.5" /> Mercado
+                        </span>
+                      )}
                     </div>
                     <p className="truncate text-[11px] text-ink2">
                       {it._kind === 'person'
@@ -322,6 +333,8 @@ export default function NetworkingPage() {
                 kind={selected.kind}
                 people={people}
                 connections={connections}
+                hasPro={selected.kind === 'person' && proIds.has(selectedItem.id)}
+                onViewMarket={() => navigate('/market', { state: { contactId: selectedItem.id } })}
                 onEdit={() => setEditor({ kind: selected.kind, mode: 'edit', payload: { ...selectedItem } })}
                 onDelete={() => removeItem(selected.kind, selectedItem.id)}
                 onReloadConnections={() => apiFetch('/api/network/connections').then(setConnections)}
@@ -430,7 +443,7 @@ function BridgeBadge({ status }) {
   );
 }
 
-function DetailPanel({ item, kind, people, connections, onEdit, onDelete, onReloadConnections }) {
+function DetailPanel({ item, kind, people, connections, hasPro, onViewMarket, onEdit, onDelete, onReloadConnections }) {
   const isPerson = kind === 'person';
   const linked = useMemo(() => {
     if (!isPerson) return [];
@@ -476,6 +489,16 @@ function DetailPanel({ item, kind, people, connections, onEdit, onDelete, onRelo
       </div>
 
       <div className="space-y-4 p-4">
+        {isPerson && hasPro && (
+          <button
+            type="button"
+            onClick={onViewMarket}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
+          >
+            <Briefcase className="h-4 w-4" /> Ver perfil profissional (Mercado)
+          </button>
+        )}
+
         {isPerson && item.roles && item.roles.length > 0 && (
           <div>
             <p className="mb-1.5 text-xs font-semibold uppercase text-muted">Funções e Vínculos</p>

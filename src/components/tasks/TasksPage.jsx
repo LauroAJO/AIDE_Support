@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch } from 'lucide-react';
+import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch, Briefcase } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { canDo } from '../../lib/can';
@@ -41,6 +41,9 @@ export default function TasksPage() {
   const treeFilter = useStore((s) => s.taskTreeFilter);
   const setAreas = useStore((s) => s.setAreas);
   const setFronts = useStore((s) => s.setFronts);
+  const setCareerOpportunities = useStore((s) => s.setCareerOpportunities);
+  // Etapa 6 — filtro "Tarefas de carreira" (só tarefas com oportunidade vinculada).
+  const [careerOnly, setCareerOnly] = useState(false);
 
   // Compute locally with useMemo. Subscribing via useStore(selectFilteredTasks)
   // would return a new array every render → Zustand v5 + useSyncExternalStore
@@ -50,16 +53,20 @@ export default function TasksPage() {
     [tasks, taskFilter, user]
   );
 
-  // Apply the tree filter (sidebar) on top of the base filter.
+  // Apply the tree filter (sidebar) and the career filter on top of the base filter.
   const filtered = useMemo(() => {
-    if (!treeFilter.areaId && !treeFilter.projectId && !treeFilter.frontId) return filteredBase;
-    return filteredBase.filter((t) => {
-      if (treeFilter.frontId) return t.front_id === treeFilter.frontId;
-      if (treeFilter.projectId) return t.project_id === treeFilter.projectId;
-      if (treeFilter.areaId) return t.area_id === treeFilter.areaId;
-      return true;
-    });
-  }, [filteredBase, treeFilter]);
+    let list = filteredBase;
+    if (treeFilter.areaId || treeFilter.projectId || treeFilter.frontId) {
+      list = list.filter((t) => {
+        if (treeFilter.frontId) return t.front_id === treeFilter.frontId;
+        if (treeFilter.projectId) return t.project_id === treeFilter.projectId;
+        if (treeFilter.areaId) return t.area_id === treeFilter.areaId;
+        return true;
+      });
+    }
+    if (careerOnly) list = list.filter((t) => t.opportunity_id);
+    return list;
+  }, [filteredBase, treeFilter, careerOnly]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -72,18 +79,20 @@ export default function TasksPage() {
 
   const loadAll = async () => {
     try {
-      const [t, p, u, a, f] = await Promise.all([
+      const [t, p, u, a, f, o] = await Promise.all([
         apiFetch('/api/tasks'),
         apiFetch('/api/projects'),
         apiFetch('/api/users'),
         apiFetch('/api/areas').catch(() => []),
         apiFetch('/api/fronts').catch(() => []),
+        apiFetch('/api/career/opportunities').catch(() => []),
       ]);
       setTasks(t);
       setProjects(p);
       setUsers(u);
       setAreas(a || []);
       setFronts(f || []);
+      setCareerOpportunities(o || []);
       setError('');
     } catch {
       setError('Falha ao carregar tarefas.');
@@ -266,6 +275,17 @@ export default function TasksPage() {
               {label}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => setCareerOnly((v) => !v)}
+            title="Mostrar só tarefas vinculadas a oportunidades de carreira"
+            className={`ml-2 flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition ${
+              careerOnly ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'
+            }`}
+          >
+            <Briefcase className="h-3.5 w-3.5" />
+            Tarefas de carreira
+          </button>
         </div>
 
         {/* Alert banner */}

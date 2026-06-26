@@ -1,0 +1,105 @@
+================================
+AIDE — RELATÓRIO ETAPA 6
+Integração entre Áreas
+Data: 2026-06-26
+================================
+
+INTEGRAÇÕES IMPLEMENTADAS:
+
+1. TAREFAS → CARREIRA
+   - Migration 0026: coluna opcional tasks.opportunity_id (REFERENCES career_opportunities
+     ON DELETE SET NULL) + índice idx_tasks_opportunity. Aplicada no D1 LOCAL (verificada via
+     pragma_table_info: coluna presente). Remota PENDENTE.
+   - Backend (_worker.js): shapeTask agora expõe opportunity_id; POST e PUT de /api/tasks
+     gravam opportunity_id num UPDATE separado com try/catch (mesmo padrão de front_id/rate_type,
+     tolerante a banco sem a migração).
+   - TaskEditor.jsx: novo campo "Oportunidade vinculada" (select de career_opportunities,
+     carregado do store/endpoint); enviado no payload.
+   - TaskCard.jsx: badge "→ [nome da oportunidade]" (ícone Briefcase), com o nome resolvido a
+     partir do store (careerOpportunities) — evita acoplar o SELECT global de tarefas a uma
+     migração pendente.
+   - TasksPage.jsx: carrega as oportunidades no loadAll (alimenta o badge) e adiciona o filtro
+     "Tarefas de carreira" (mostra só tarefas com opportunity_id).
+
+2. NETWORKING → MERCADO
+   - NetworkingPage.jsx: carrega /api/market/contacts e marca com badge "Mercado" (indigo) as
+     pessoas que têm contact_professional. No painel de detalhe, botão "Ver perfil profissional
+     (Mercado)" que navega para /market passando { state: { contactId } }.
+   - MarketPage.jsx: lê location.state.contactId; quando presente, abre direto a sub-aba
+     Contatos e repassa o id.
+   - ContactsProView.jsx: aceita prop initialContactId e abre o detalhe daquele contato no mount.
+
+3. PLANEJAMENTO → CARREIRA
+   - PlanningPage.jsx: na Visão Estratégica (4 semanas), nova seção "Oportunidades com deadline
+     (4 semanas)" — lista oportunidades com prazo nos próximos 28 dias (exclui rejected/closed),
+     ordenadas por urgência (deadline ASC), com cor por proximidade e clique → /career.
+
+4. DASHBOARD → CARREIRA (owner only)
+   - DashboardPage.jsx: nova seção "Status da Busca" com 4 painéis:
+       • Oportunidades ativas — totais por trilha (PhD/Emprego/Spin-off) e por status;
+       • Próximas deadlines — 3 mais urgentes (inclui vencidas), clique → /career;
+       • Contatos esta semana — contact_professional com next_action_date <= +7 dias,
+         clique → /market abrindo o contato;
+       • Documentos pendentes — career_documents sem drive_link (ainda não anexados ao Drive).
+     (Definição de "documento pendente" = sem link do Drive — assumida; ajustável.)
+
+5. NOTIFICAÇÕES AUTOMÁTICAS (cron)
+   - _worker.js / runDailyNotifications: nova função runCareerNotifications(env, today),
+     chamada dentro de try/catch (não quebra o cron se a migração 0025 não existir):
+       • Oportunidades com deadline nos próximos 7 dias → notifica (tipo career_deadline);
+       • Contatos com next_action_date = hoje → notifica o owner (career_contact_due);
+       • Oportunidades ativas sem atividade há 14+ dias (updated_at) → lembrete (career_inactive).
+     Destinatário: assigned_to da oportunidade quando houver, senão o owner. Dedup diária por
+     item via dedupCheck/dedupSet (mesmo padrão das notificações de tarefas). O retorno do cron
+     agora inclui { career: { deadlines, contacts, inactive } }.
+
+ARQUIVOS CRIADOS:
+- migrations/0026_task_opportunity.sql
+
+ARQUIVOS MODIFICADOS:
+- _worker.js
+    · shapeTask: + opportunity_id
+    · handleTasksCollection (POST): grava opportunity_id (UPDATE separado, try/catch)
+    · handleTaskItem (PUT): grava opportunity_id (UPDATE separado, try/catch)
+    · runDailyNotifications: chama runCareerNotifications + inclui career no retorno
+    · runCareerNotifications: NOVA função (deadlines / contatos / inativas)
+- src/components/tasks/TaskEditor.jsx     (campo "Oportunidade vinculada" + payload)
+- src/components/tasks/TaskCard.jsx       (badge "→ oportunidade" via store)
+- src/components/tasks/TasksPage.jsx      (carrega oportunidades + filtro "Tarefas de carreira")
+- src/components/networking/NetworkingPage.jsx (badge Mercado + botão "Ver perfil profissional")
+- src/components/market/MarketPage.jsx    (abre Contatos via location.state.contactId)
+- src/components/market/ContactsProView.jsx (prop initialContactId)
+- src/components/planning/PlanningPage.jsx (seção "Oportunidades com deadline")
+- src/components/dashboard/DashboardPage.jsx (seção "Status da Busca")
+
+VERIFICAÇÃO npm run build:
+Status: zero erros (✓ built). Bundle index.js ~617 → ~624 kB. Único aviso: "chunks larger than
+500 kB" (pré-existente do Vite). node --check _worker.js: OK.
+
+TESTES:
+- Vincular tarefa a oportunidade: backend e UI compilam; migração 0026 aplicada no D1 local e
+  coluna opportunity_id verificada (pragma_table_info → 1). O select aparece no TaskEditor e o
+  badge no TaskCard quando há oportunidade vinculada.
+- Ver badge networking→mercado: NetworkingPage carrega /api/market/contacts e marca/abre o
+  perfil; MarketPage+ContactsProView recebem e abrem o contato. (compila; sem dados semeados não
+  há badges a exibir — fail-open.)
+- Ver oportunidades no planejamento: seção renderiza; com lista vazia mostra estado vazio.
+- Ver status no dashboard: seção "Status da Busca" renderiza (owner only); painéis com estados
+  vazios sem dados.
+- NOTA DE TRANSPARÊNCIA: a verificação foi por compilação (build verde), node --check e
+  aplicação/inspeção da migração local. NÃO houve teste interativo end-to-end no navegador com
+  sessão + dados semeados. Em produção, as integrações dependem das migrações 0025 e 0026 (ambas
+  pendentes de aplicação remota); os GETs são fail-open, então as telas renderizam sem dados.
+
+DEPLOY:
+- NENHUM deploy realizado (conforme instrução).
+- Migrações pendentes em produção (pendentes de aprovação):
+    npx wrangler d1 execute aide-db --remote --file=migrations/0025_mercado_carreira.sql
+    npx wrangler d1 execute aide-db --remote --file=migrations/0026_task_opportunity.sql
+
+PRÓXIMO PASSO:
+Etapa 7 — Testes completos e deploy
+
+================================
+FIM DO RELATÓRIO
+================================

@@ -1,0 +1,181 @@
+================================
+AIDE — RELATÓRIO ETAPA 0
+Auditoria Pré-Implementação
+Data: 2026-06-25
+================================
+
+1. TABELAS EXISTENTES
+---------------------
+Total de 24 migrations (migrations/0001 → 0024). Tabelas criadas (CREATE TABLE IF NOT EXISTS):
+
+Núcleo / usuários
+- users               (0001) — usuários do sistema
+- sessions            (0001) — sessões de login
+- projects            (0001/0002; +area_id, +description em 0015)
+- tasks               (0001/0002; +front_id em 0015)
+
+Tempo / planejamento
+- time_entries        (0003)
+- week_plans          (0003)
+- availability        (0003)
+- weekly_availability (0019)
+- daily_work_schedule (0019)
+- weekly_availability_new (0020)
+- month_plans         (0006/0009)
+
+Calendário / Drive
+- calendar_events_cache (0005)
+- drive_items_cache     (0005)
+- drive_access_rules    (0012)
+- calendar_access_rules (0012)
+- drive_sharing_rules   (0017)
+- calendar_sharing_rules(0017)
+
+Notas / notificações
+- notes               (0006/0009)
+- notifications       (0006/0009)
+- push_subscriptions  (0006/0009)
+- scheduled_notifications (0013)
+
+Estratégico / Phase 2 / pagamentos
+- alert_rules         (0008/0009)
+- user_profile_data   (0008/0009)
+- monthly_reports     (0008/0009)
+- exchange_rates      (0014)
+
+Bridge / LifeGame / dedup
+- bridge_sync_log     (0007/0009)
+- bridge_config       (0007/0009)
+- lifegame_cache      (0018)
+- dedup_log           (0010)
+
+>>> HIERARQUIA (Áreas > Projetos > Frentes) — migration 0015
+- areas               (0015) — id, name, color, description, created_by, created_at, updated_at
+- fronts              (0015) — id, name, project_id→projects, description, color, created_by, timestamps
+
+>>> NETWORKING — migrations 0015 e 0016
+- network_people       (0015) — ver seção 6
+- network_connections  (0015) — id, person_a_id, person_b_id, connection_type, description, created_at
+- network_institutions (0015) — id, name, type, area, website, linkedin, notes, tags, created_by, timestamps
+- person_roles         (0016) — id, person_id, role, institution_id, institution_name, start_date, end_date, current, created_at
+- network_entity_links (0016) — id, network_person_id, network_institution_id, entity_type, entity_id, entity_name, notes, created_at
+
+Multiusuário / permissões
+- permission_presets        (0022/0023)
+- user_permissions          (0022/0023)
+- invitations               (0022/0023)
+- chat_messages             (0022/0023)
+- user_profiles_archive     (0022/0023)
+- granular_permissions      (0024)
+- preset_granular_permissions (0024)
+
+OBS importante: migrations 0009 e 0023 são "ensure/repair" (recriam tabelas idempotentemente).
+Migrations 0015 e 0016 contêm ALTER TABLE ADD COLUMN — NÃO são idempotentes no SQLite
+(rodar de novo causa erro "duplicate column").
+
+2. ROTAS DE NETWORKING E AREAS (_worker.js)
+--------------------------------------------
+Roteamento (linhas ~94-110). Permissão via canDo(user.granular, ...) / requirePermission(...).
+GETs em v2.1.1 são "fail-open" (retornam lista/grafo vazio quando sem permissão); escritas → 403.
+
+PROJETOS
+- /api/projects            → handleProjectsCollection (L1003)  GET lista, POST cria (perm areas/manage_projects)
+- /api/projects/:id        → handleProjectItem        (L1055)  GET/PUT/DELETE (perm areas/manage_projects p/ PUT-DELETE)
+
+ÁREAS
+- /api/areas               → handleAreas              (L4719)  GET lista (fail-open), POST cria
+- /api/areas/:id           → handleAreaItem           (L4759)  GET/PUT/DELETE (perm areas/manage_areas p/ PUT-DELETE)
+
+FRENTES
+- /api/fronts              → handleFronts             (L4790)  GET lista, POST cria (perm areas/manage_fronts)
+- /api/fronts/:id          → handleFrontItem          (L4830)  GET/PUT/DELETE (perm areas/manage_fronts p/ PUT-DELETE)
+
+NETWORKING
+- /api/network/routes        → handleNetworkRoutes        (L5631) GET — grafo {people, institutions, connections, person_roles} (fail-open)
+- /api/network/people        → handleNetworkPeople        (L5061) GET lista (fail-open) + POST cria
+- /api/network/people/:id    → handleNetworkPersonItem    (L5113) GET/PUT/DELETE (perm networking/edit_contacts p/ PUT-DELETE)
+- /api/network/institutions  → handleNetworkInstitutions  (L5155) GET + POST
+- /api/network/institutions/:id → handleNetworkInstitutionItem (L5192) GET/PUT/DELETE
+- /api/network/connections   → handleNetworkConnections   (L5219) GET + POST
+- /api/network/connections/:id  → handleNetworkConnectionItem  (L5252) DELETE
+
+3. COMPONENTES FRONTEND
+-----------------------
+src/components/networking/
+- NetworkingPage.jsx — 1.117 linhas. Página única do módulo Networking (pessoas, instituições,
+  conexões, papéis/roles, links com entidades AIDE). É um componente grande/monolítico.
+
+src/components/areas/
+- AreasPage.jsx — 425 linhas. Página da hierarquia Áreas > Projetos > Frentes.
+
+Stores (src/store.js) — Zustand único, sem router. Campos de estado (L57-62):
+  areas: []
+  fronts: []
+  networkPeople: []
+  networkInstitutions: []
+  networkConnections: []
+Setters (L127-131): setAreas, setFronts, setNetworkPeople, setNetworkInstitutions, setNetworkConnections
+OBS: NÃO há campo de store dedicado para person_roles nem para network_entity_links
+     (são consumidos via /api/network/routes e endpoints, montados dentro da própria página).
+
+4. VERSÃO ATUAL
+---------------
+src/version.js → APP_VERSION = '2.1.2'  (bater com último commit v2.1.2)
+
+5. ÚLTIMOS COMMITS
+------------------
+d2e53f4 v2.1.2 — fix non-owner tasks list + notes visibility
+f306829 v2.1.1 hotfix — fail-open GETs + harden granular resolver
+e252b4b v2.1.0 — Granular per-feature permissions
+2aeb1d0 v2.0.0 — Multi-user system, zero KV ops
+a1707f3 v1.9.11 — Fuso horário por usuário (Lauro NL / Alice BR) com conversão no Calendário
+
+6. RISCOS IDENTIFICADOS (checklist solicitado)
+----------------------------------------------
+TODAS as cinco tabelas e o componente já EXISTEM. Esta é uma base brownfield, não greenfield.
+
+- Tabela network_people: EXISTE (0015). Colunas: id, name, type, institution, role, area_of_work,
+  email, phone, linkedin, notes, connection_to_lauro, connection_strength, tags, lifegame_person_id,
+  dex_contact_id, created_by, created_at, updated_at.
+- Tabela network_institutions: EXISTE (0015). Colunas: id, name, type, area, website, linkedin,
+  notes, tags, created_by, created_at, updated_at.
+- Tabela network_connections: EXISTE (0015). Colunas: id, person_a_id, person_b_id, connection_type,
+  description, created_at.
+- Tabela person_roles: EXISTE (0016). Colunas: id, person_id, role, institution_id, institution_name,
+  start_date, end_date, current, created_at.
+- Tabela network_entity_links: EXISTE (0016). Colunas: id, network_person_id, network_institution_id,
+  entity_type, entity_id, entity_name, notes, created_at.
+- Componente NetworkingPage.jsx: EXISTE. Tamanho: 1.117 linhas (grande / monolítico).
+- Store fields para networking: networkPeople, networkInstitutions, networkConnections
+  (+ setters). NÃO há store dedicado para person_roles / network_entity_links.
+
+Riscos transversais:
+R1. Migrations NÃO idempotentes (0015/0016 usam ALTER TABLE ADD COLUMN). Criar uma nova
+    migration que re-altere essas tabelas, ou re-rodar 0015/0016, quebra ("duplicate column").
+    => Qualquer alteração de schema deve ser uma NOVA migration (0025+), nunca editar as antigas.
+R2. Duplicidade de definições: tabelas existem em 0015/0016 e podem ser "re-asseguradas" no
+    estilo 0009/0023. Confirmar se há um padrão "ensure" esperado antes de criar 0025.
+R3. NetworkingPage.jsx monolítico (1.117 linhas) — alterações têm alto risco de regressão;
+    considerar refatorar em subcomponentes antes de adicionar features grandes.
+R4. Camada de permissões granular (canDo / requirePermission, módulos 'networking' e 'areas')
+    precisa ser respeitada em qualquer rota nova. GETs são fail-open por design (v2.1.1).
+R5. Sem testes e sem linter no projeto — validação é manual (build + deploy Cloudflare Pages).
+R6. _worker.js é grande (6.158 linhas) e único; edições devem ser cirúrgicas.
+
+7. RECOMENDAÇÕES ANTES DE PROSSEGUIR
+------------------------------------
+1. Confirmar com o usuário o ESCOPO real da "Etapa 1": como tudo já existe (tabelas, rotas,
+   componente), definir se a próxima etapa é (a) refatorar/estender o Networking existente,
+   (b) adicionar novos campos/relacionamentos, ou (c) reconstruir o módulo. O plano original
+   parecia assumir greenfield — não é.
+2. Toda mudança de schema = NOVA migration 0025+ (idempotente, sem ALTER em tabela já existente
+   a menos que seja coluna comprovadamente nova). Nunca editar 0015/0016.
+3. Antes de tocar em NetworkingPage.jsx, avaliar quebra em subcomponentes para reduzir risco.
+4. Mapear o consumo de person_roles e network_entity_links no frontend (não têm store dedicado)
+   antes de mexer nesses fluxos.
+5. Respeitar a malha de permissões granulares (módulos 'networking'/'areas') em qualquer rota nova.
+6. Após cada etapa concluída: bump version.js + commit + deploy (workflow padrão do projeto).
+
+================================
+FIM DO RELATÓRIO
+================================

@@ -1,0 +1,53 @@
+================================
+AIDE — RELATÓRIO ETAPA 7
+Testes e Deploy v2.2.0
+Data: 2026-06-26
+================================
+
+MIGRAÇÕES REMOTAS:
+0025 (mercado_carreira): sucesso (aplicada por Lauro, conforme informado)
+0026 (task_opportunity):  sucesso (aplicada por Lauro, conforme informado)
+
+BUILD:
+Status: zero erros (✓ built in 3.86s)
+Bundle size: dist/assets/index-BAFPHg2S.js = 624.31 kB (gzip 157.79 kB)
+            dist/assets/index-C7IPZUIU.css = 34.00 kB (gzip 6.74 kB)
+Aviso único: "chunks larger than 500 kB" — pré-existente do Vite, não relacionado a esta etapa.
+postbuild: _worker.js copiado para dist/_worker.js.
+
+DEPLOY:
+URL produção: https://aide-support.pages.dev
+Alias do deploy: https://b3d273fe.aide-support.pages.dev
+Versão: v2.2.0 (src/version.js)
+Comando: npm run deploy (vite build + wrangler pages deploy dist)
+Conta Cloudflare: lauro.ajo@gmail.com (projeto Pages "aide-support")
+Resultado: "Deployment complete!" — Worker compilado e enviado, 10 arquivos no bundle.
+Commit: e8bd299 — "v2.2.0 — Áreas Mercado e Carreira" (push para origin/main OK)
+        (o código de features Mercado/Carreira/Integração já havia sido commitado em 9d786e8;
+         este commit adiciona o bump de versão para 2.2.0.)
+
+VERIFICAÇÃO PRODUÇÃO (curl, sem token):
+/api/market/organizations: 401 sem token ✅ (rota registrada; auth exigida — comportamento correto)
+/api/career/opportunities: 401 sem token ✅
+/api/market/contacts:      401 sem token ✅
+Extra:
+  /api/market/organizations com token inválido: 401 ✅
+  / (raiz do site):                              200 ✅
+Observação: 401 (e não 404) confirma que as novas rotas existem no worker em produção; o 404 só
+ocorreria se a rota não estivesse registrada. A verificação autenticada (200 + dados) depende de
+sessão de owner e será feita pelo Lauro ao acessar o app.
+
+PRÓXIMO PASSO:
+Etapa 8 — Relatório Final
+Após deploy: importar dados via /import (ver instruções abaixo).
+
+IMPORTAÇÃO DOS DADOS (a ser feita pelo Lauro):
+1. Abrir https://aide-support.pages.dev/import
+2. Colar o conteúdo de relatorios/import_h2_ecosystem.json
+3. Clicar em "Validar" → confirmar 16 organizações + 33 contatos no preview
+4. Clicar em "Importar"
+5. Conferir em /market que organizações e contatos aparecem (Organizações e Contatos)
+
+================================
+FIM DO RELATÓRIO
+================================

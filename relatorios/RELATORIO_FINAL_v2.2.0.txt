@@ -1,0 +1,193 @@
+================================
+AIDE v2.2.0
+RELATÓRIO FINAL DE IMPLEMENTAÇÃO
+Áreas Mercado e Carreira
+Data: 26/06/2026
+================================
+
+RESUMO EXECUTIVO
+
+A versão 2.2.0 do Aide adiciona duas grandes áreas ao aplicativo — Mercado e
+Carreira — além de um sistema de Importação em massa. O objetivo é transformar
+o Aide num centro único para organizar a busca por um próximo passo profissional
+(doutoramento, emprego ou criação de empresa própria), partindo do ecossistema de
+hidrogénio de Twente e dos Países Baixos. Em vez de informação espalhada por
+folhas de cálculo e documentos, tudo passa a viver dentro do app, ligado às
+tarefas e ao dia a dia já existentes.
+
+A área Mercado funciona como uma "agenda profissional inteligente": guarda as
+organizações de interesse (empresas, universidades, institutos e financiadores),
+os projetos e programas de investigação relevantes, e os contatos profissionais
+com o respetivo estado de abordagem (ainda não contactado, contactado, respondeu,
+reunião marcada, etc.). Cada contato tem ainda uma pontuação de relevância
+separada para as três frentes — doutoramento, emprego e spin-off — o que ajuda a
+decidir por onde começar.
+
+A área Carreira é o lugar de ação. Um quadro Kanban acompanha cada oportunidade
+desde "Identificada" até "Fechada", podendo arrastar os cartões entre colunas à
+medida que as candidaturas avançam. A esta junta-se uma secção de Documentos
+(CVs, cartas, propostas, pitches, ligados ao Google Drive) e uma secção de Metas
+organizada pelas três trilhas, com lembretes de prazos críticos sempre à vista.
+
+Por fim, o sistema de Importação resolve o problema prático de carregar dezenas de
+organizações e contatos de uma só vez: basta colar um JSON estruturado, validar e
+importar. A operação é idempotente por nome — reimportar não duplica registos.
+Está pronta a receber as 28 organizações e 56 contatos já preparados a partir dos
+relatórios de pesquisa sobre o hidrogénio em Twente. Em conjunto, estas três áreas
+dão ao Lauro (e à assistente) uma visão completa e acionável de toda a estratégia
+de carreira, sem sair do Aide.
+
+NOVAS FUNCIONALIDADES
+
+1. Área Mercado (/market)
+   Sub-navegação em três abas: Organizações, Projetos e Contatos.
+
+   - Organizações: catálogo de empresas, universidades, institutos de
+     investigação e financiadores. Cada organização tem tipo, subtipo, país,
+     cidade, website, LinkedIn, descrição, pontuação de relevância (1-5), notas,
+     tags, estado (prospect / ativo / parceiro / inativo) e fonte. Pesquisa por
+     texto, filtros por tipo e por estado, ordenação por relevância, criação e
+     edição em painel, e botão para adicionar um contato diretamente a partir da
+     organização.
+
+   - Projetos: programas e projetos de P&D (investigação, chamadas de
+     financiamento, consórcios, programas de doutoramento, vagas, colaborações).
+     Inclui acrónimo, organização coordenadora, orçamento, datas de início/fim,
+     estado, relevância, URL, tags e organizações parceiras. Liga cada projeto à
+     organização que o coordena.
+
+   - Contatos Profissionais: lista de pessoas com cargo, organização, e-mail e
+     LinkedIn confirmados, estado de abordagem (outreach) e canal usado. Mostra
+     três indicadores de relevância lado a lado — 🎓 PhD, 💼 Emprego e 🚀 Spin-off
+     (0-5 cada) — além de histórico de interações e próxima ação. Pesquisa,
+     filtro por estado de abordagem e painel de detalhe. É possível abrir um
+     contato diretamente vindo da área Networking.
+
+2. Sistema de Importação (/import)
+   Importação em massa de organizações e contatos via JSON, sem digitar um a um.
+   Como usar (passo a passo):
+   1) Aceder a /import (menu "Importação em Massa").
+   2) Colar o JSON estruturado na caixa de texto (há um exemplo/placeholder no
+      próprio ecrã, com os campos esperados).
+   3) Clicar em "Validar" — o sistema mostra um preview com tabelas de
+      organizações e contatos, marcando cada linha como "ok" ou com o erro
+      encontrado, e um resumo de quantos itens estão prontos.
+   4) Corrigir eventuais erros apontados no preview.
+   5) Clicar em "Importar" (ou "Confirmar importação") para gravar.
+   6) Conferir o bloco verde "Importação concluída" (quantos itens, quantas
+      organizações/contatos, eventuais falhas) e o "Histórico de importações" no
+      fundo da página, que regista data, fonte, totais e autor.
+   Observação: a importação é idempotente por nome — reimportar o mesmo JSON
+   atualiza em vez de duplicar.
+
+3. Área Carreira (/career)
+   Sub-navegação em três abas: Pipeline, Documentos e Metas.
+
+   - Pipeline Kanban: quadro com 6 colunas — Identificada, Pesquisando,
+     Preparando, Aplicada, Em Processo (entrevista/proposta) e Fechada/Rejeitada.
+     Cada oportunidade é um cartão arrastável (drag-and-drop) que, ao mudar de
+     coluna, atualiza o estado automaticamente (gravação otimista). Os cartões
+     mostram tipo (vaga, PhD, pós-doc, bolsa, colaboração, apoio spin-off,
+     contrato), trilha por cor, organização, prazo com contagem de dias (a
+     vermelho/laranja conforme a urgência), fit score em estrelas, prioridade e
+     responsável. Filtro por trilha (Todas / PhD / Emprego / Spin-off). O detalhe
+     de cada oportunidade permite editar tudo, mudar status, ajustar prioridade e
+     fit, guardar notas e criar uma Tarefa diretamente a partir dela.
+
+   - Documentos: repositório de documentos de carreira — CV, Carta, Research
+     Statement, Proposta de PhD, Pitch de spin-off e Outros — com versão, ligação
+     ao Google Drive e associação opcional a uma oportunidade específica. Filtros
+     por tipo e por oportunidade.
+
+   - Metas por trilha: metas organizadas nas três trilhas — 🎓 PhD, 💼 Emprego e
+     🚀 Spin-off. Cada meta tem título, descrição, data alvo, prioridade e notas,
+     e pode ser marcada como concluída ou reaberta. Cada trilha exibe um lembrete
+     de prazo crítico fixo (ex.: "Visto expira dezembro 2025") sempre visível no
+     topo da secção.
+
+4. Integrações com o resto do app
+   - Tarefas ↔ Carreira: cada oportunidade pode gerar uma Tarefa ("Criar Tarefa"),
+     e a tabela de tarefas ganhou a coluna opportunity_id para vincular uma tarefa
+     a uma oportunidade (mantém a tarefa mesmo que a oportunidade seja removida).
+   - Networking ↔ Mercado: a área Networking abre um contato diretamente na aba
+     Contatos do Mercado, focando a pessoa indicada.
+   - Mercado ↔ Carreira: as oportunidades referenciam organizações e contatos do
+     Mercado; o detalhe da oportunidade liga de volta para /market.
+   - Google Drive ↔ Documentos: documentos de carreira ligam-se a ficheiros do
+     Drive já integrado no Aide.
+   - Permissões/acessos: as três áreas usam o gate "FixedRoute" — visíveis apenas
+     ao owner e a assistentes fixos — reaproveitando o modelo de acesso existente.
+
+ARQUIVOS CRIADOS/MODIFICADOS
+
+Criados:
+- src/components/market/MarketPage.jsx
+- src/components/market/marketShared.jsx
+- src/components/market/OrganizationsView.jsx
+- src/components/market/ProjectsView.jsx
+- src/components/market/ContactsProView.jsx
+- src/components/career/CareerPage.jsx
+- src/components/career/careerShared.jsx
+- src/components/career/OpportunityPipeline.jsx
+- src/components/career/DocumentsView.jsx
+- src/components/career/GoalsView.jsx
+- src/components/import/ImportPage.jsx
+- src/lib/importParser.js
+- migrations/0025_mercado_carreira.sql
+- migrations/0026_task_opportunity.sql
+- relatorios/import_h2_ecosystem.json (dados prontos a importar)
+
+Modificados:
+- src/App.jsx (rotas /market, /career, /import com gate FixedRoute)
+- src/version.js (APP_VERSION = '2.2.0')
+- src/store.js (estados: marketOrgs, marketContacts, careerOpportunities,
+  careerDocuments, careerGoals)
+- _worker.js (endpoints /api/market/*, /api/career/*, /api/market/import)
+- src/components/networking/NetworkingPage.jsx (abrir contato no Mercado)
+
+BANCO DE DADOS
+
+Tabelas criadas (migração 0025_mercado_carreira.sql):
+- market_organizations
+- market_projects
+- contact_professional
+- contact_org_links
+- career_opportunities
+- career_documents
+- career_goals
+- import_log
+
+Alteração adicional (migração 0026_task_opportunity.sql):
+- tasks: nova coluna opportunity_id (vínculo tarefa ↔ oportunidade)
+
+Dados prontos para importar:
+- 28 organizações
+- 56 contatos
+Arquivo: relatorios/import_h2_ecosystem.json
+
+VERSÃO E DEPLOY
+Versão: v2.2.0
+URL: https://aide-support.pages.dev
+Commit: 9d786e8
+
+COMO USAR — GUIA RÁPIDO
+
+Para a Milene:
+1. Acessar /import → colar o JSON → Validar → Importar
+2. Em /market → Contatos: atualizar status de outreach
+3. Em /market → Organizações: adicionar novas orgs
+
+Para o Lauro:
+1. Em /career → Pipeline: gerenciar oportunidades
+2. Em /career → Metas: acompanhar as 3 trilhas
+3. Em /dashboard: ver status da busca de emprego
+
+PRÓXIMOS PASSOS RECOMENDADOS
+1. Importar os dados via /import
+2. Começar outreach — prioridade #1: Benno Aalderink
+   (b.j.aalderink@saxion.nl)
+3. Criar primeira oportunidade PhD no pipeline
+
+================================
+FIM DO RELATÓRIO
+================================

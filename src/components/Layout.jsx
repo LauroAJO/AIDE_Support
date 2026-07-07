@@ -49,18 +49,22 @@ const NAV_ITEMS = [
   { to: '/market',     label: 'Mercado',      icon: Building2,     fixed: true,           group: 'rede' },
   { to: '/career',     label: 'Carreira',     icon: Briefcase,     fixed: true,           group: 'rede' },
   { to: '/hub',        label: 'Scraping Hub', icon: Radar,         fixed: true,           group: 'ferramentas' },
-  { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread', group: 'ferramentas' },
+  { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread', group: 'chat' },
 ];
 
-// Metadados de cada grupo: rótulo + fundo (estado NÃO-ativo). Cores exatas:
-// Trabalho #EFF6FF (blue-50) · Conteúdo #F0FDF4 (green-50) · Rede #EEF2FF
-// (indigo-50) · Ferramentas #F9FAFB (gray-50). As classes são literais completas
-// para o JIT do Tailwind detectá-las.
+// Fundo (estado NÃO-ativo) de cada grupo. Cada troca de `group` desenha um
+// divisor na sidebar. v2.3.6: rótulos de grupo removidos — só divisores + fundos.
+// Cores exatas: Trabalho #EFF6FF (blue-50) · Conteúdo #F0FDF4 (green-50) · Rede
+// #EEF2FF (indigo-50) · Ferramentas/Chat #F9FAFB (gray-50). Classes literais
+// completas para o JIT do Tailwind detectá-las. `chat` = mesmo cinza que
+// `ferramentas`, num grupo próprio só para inserir o divisor entre Scraping Hub
+// e Chat.
 const GROUP_META = {
-  trabalho:    { label: 'Trabalho',          bg: 'bg-blue-50 hover:bg-blue-100' },
-  conteudo:    { label: 'Conteúdo',          bg: 'bg-green-50 hover:bg-green-100' },
-  rede:        { label: 'Rede Profissional', bg: 'bg-indigo-50 hover:bg-indigo-100' },
-  ferramentas: { label: 'Ferramentas',       bg: 'bg-gray-50 hover:bg-gray-100' },
+  trabalho:    { bg: 'bg-blue-50 hover:bg-blue-100' },
+  conteudo:    { bg: 'bg-green-50 hover:bg-green-100' },
+  rede:        { bg: 'bg-indigo-50 hover:bg-indigo-100' },
+  ferramentas: { bg: 'bg-gray-50 hover:bg-gray-100' },
+  chat:        { bg: 'bg-gray-50 hover:bg-gray-100' },
 };
 
 // `groupBg` pinta o item com o fundo do seu grupo quando NÃO ativo; o estilo
@@ -310,22 +314,15 @@ export default function Layout({ children }) {
               const count = item.badge ? badgeCount(item.badge) : 0;
               const meta = GROUP_META[item.group] || null;
               const prev = navItems[i - 1];
-              // O 1º item visível de cada grupo abre a seção (divisor + rótulo).
-              // O divisor de abertura do próximo grupo serve de "divisor abaixo"
-              // do anterior — sem linhas duplicadas; após o último grupo não há
-              // divisor (Chat é o fim).
+              // Cada troca de `group` desenha um divisor (v2.3.6: sem rótulos).
+              // O divisor de abertura de um grupo faz as vezes de "divisor abaixo"
+              // do anterior — sem linhas duplicadas; após o último item (Chat) não
+              // há divisor.
               const startsGroup = !prev || prev.group !== item.group;
               return (
                 <Fragment key={item.to}>
                   {startsGroup && meta && (
-                    <div className="mt-2 border-t border-[#E8E3DB]">
-                      <span
-                        className="block text-[10px] font-semibold uppercase"
-                        style={{ color: '#9CA3AF', letterSpacing: '0.08em', padding: '4px 12px 2px 12px' }}
-                      >
-                        {meta.label}
-                      </span>
-                    </div>
+                    <div className="mt-2 border-t border-[#E8E3DB]" />
                   )}
                   <NavLink to={item.to} className={navClass(meta ? meta.bg : '')}>
                     <Icon className="h-5 w-5" />

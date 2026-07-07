@@ -24,6 +24,7 @@ import NetworkingPage from './components/networking/NetworkingPage';
 import ChatPage from './components/chat/ChatPage';
 import ImportPage from './components/import/ImportPage';
 import MarketPage from './components/market/MarketPage';
+import OrgDetailPage from './components/market/OrgDetailPage';
 import CareerPage from './components/career/CareerPage';
 import HubPage from './components/hub/HubPage';
 import AdminPage from './components/admin/AdminPage';
@@ -245,6 +246,7 @@ export default function App() {
           />
           <Route path="/import" element={<FixedRoute><ImportPage /></FixedRoute>} />
           <Route path="/market" element={<FixedRoute><MarketPage /></FixedRoute>} />
+          <Route path="/market/org/:id" element={<FixedRoute><OrgDetailPage /></FixedRoute>} />
           <Route path="/career" element={<FixedRoute><CareerPage /></FixedRoute>} />
           <Route path="/hub" element={<FixedRoute><HubPage /></FixedRoute>} />
           <Route path="/admin" element={<OwnerRoute><AdminPage /></OwnerRoute>} />

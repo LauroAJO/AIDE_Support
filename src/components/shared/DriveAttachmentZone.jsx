@@ -8,6 +8,7 @@ import { getToken } from '../../lib/auth';
 const ENDPOINT_BASE = {
   note: '/api/notes',
   task: '/api/tasks',
+  market_org: '/api/market/org',
 };
 
 function isImageMime(mime) {

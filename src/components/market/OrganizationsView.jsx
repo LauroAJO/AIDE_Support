@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Plus, Search, X, Pencil, ExternalLink, Linkedin, UserPlus, Briefcase, MapPin, Loader2, Users,
+  Plus, Search, X, Pencil, ExternalLink, Linkedin, UserPlus, Briefcase, MapPin, Loader2, Users, ArrowRight,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -35,6 +35,7 @@ const EMPTY_ORG = {
 };
 
 export default function OrganizationsView() {
+  const navigate = useNavigate();
   const orgs = useStore((s) => s.marketOrgs);
   const setOrgs = useStore((s) => s.setMarketOrgs);
 
@@ -146,16 +147,27 @@ export default function OrganizationsView() {
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
           {filtered.length === 0 && <p className="px-1 text-sm text-muted">Nenhuma organização encontrada.</p>}
           {filtered.map((o) => (
-            <button
+            // Clique no card → pré-visualização rápida (painel à direita).
+            // Clique no NOME → abre a página completa /market/org/:id.
+            <div
               key={o.id}
-              type="button"
+              role="button"
+              tabIndex={0}
               onClick={() => openDetail(o.id)}
-              className={`w-full rounded-xl border bg-surface p-3 text-left transition hover:border-accent ${
+              onKeyDown={(e) => { if (e.key === 'Enter') openDetail(o.id); }}
+              className={`w-full cursor-pointer rounded-xl border bg-surface p-3 text-left transition hover:border-accent ${
                 selectedId === o.id ? 'border-accent shadow-soft' : 'border-line'
               }`}
             >
               <div className="flex items-start justify-between gap-2">
-                <span className="font-semibold text-ink">{o.name}</span>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); navigate(`/market/org/${o.id}`); }}
+                  className="truncate text-left font-semibold text-ink hover:text-accent hover:underline"
+                  title="Abrir página completa"
+                >
+                  {o.name}
+                </button>
                 <OrgTypeBadge type={o.type} />
               </div>
               <div className="mt-1 flex items-center gap-1 text-xs text-muted">
@@ -174,7 +186,7 @@ export default function OrganizationsView() {
                 <span className="text-[11px] text-muted">{o.contact_count || 0} contato(s)</span>
                 <OrgStatusBadge status={o.status} />
               </div>
-            </button>
+            </div>
           ))}
         </div>
       </div>
@@ -186,11 +198,11 @@ export default function OrganizationsView() {
         )}
         {selectedId && detailLoading && <LoadingSpinner label="Carregando..." />}
         {selectedId && !detailLoading && detail && (
-          <OrgDetail
+          <QuickPreview
             org={detail}
+            onOpenFull={() => navigate(`/market/org/${detail.id}`)}
             onEdit={() => setEditor({ mode: 'edit', form: { ...detail, tags: parseTags(detail.tags) } })}
             onAddContact={() => setAddContactFor(detail.id)}
-            onSelectProject={() => { /* navegação entre abas é feita pelo MarketPage; aqui só exibe */ }}
           />
         )}
       </div>
@@ -229,6 +241,65 @@ function Chip({ active, onClick, children }) {
   );
 }
 
+// Pré-visualização compacta no painel direito. A ficha completa (com abas) vive
+// em /market/org/:id — abre pelo botão "Ver página completa".
+function QuickPreview({ org, onOpenFull, onEdit, onAddContact }) {
+  const contacts = org.contacts || [];
+  const projects = org.projects || [];
+  const updated = org.updated_at
+    ? new Date(org.updated_at * 1000).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    : null;
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-xl font-bold text-ink">{org.name}</h2>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <OrgTypeBadge type={org.type} />
+            <OrgStatusBadge status={org.status} />
+          </div>
+        </div>
+        <button type="button" onClick={onEdit} className="flex shrink-0 items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-sm text-ink2 hover:bg-surface2">
+          <Pencil className="h-4 w-4" /> Editar
+        </button>
+      </div>
+
+      <div className="mt-3 flex items-center gap-1 text-sm text-muted">
+        <MapPin className="h-4 w-4" /> {[org.city, org.country].filter(Boolean).join(', ') || '—'}
+      </div>
+
+      <div className="mt-3">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted">Relevância</span>
+        <div className="mt-1"><StarRating value={org.relevance_score} size={18} /></div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-4 text-sm text-ink2">
+        <span>{contacts.length} contato(s)</span>
+        <span>{projects.length} iniciativa(s)</span>
+      </div>
+
+      {updated && <p className="mt-3 text-xs text-muted">Atualizado em {updated}</p>}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button type="button" onClick={onAddContact} className="flex items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2">
+          <UserPlus className="h-3.5 w-3.5" /> Adicionar Contato
+        </button>
+      </div>
+
+      <button
+        type="button"
+        onClick={onOpenFull}
+        className="mt-auto flex items-center justify-center gap-1.5 rounded-lg bg-accent px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90"
+      >
+        Ver página completa <ArrowRight className="h-4 w-4" />
+      </button>
+    </div>
+  );
+}
+
+// Ficha inline completa — mantida como fallback (a experiência principal agora
+// é a página /market/org/:id). Não é renderizada por padrão.
 function OrgDetail({ org, onEdit, onAddContact }) {
   const navigate = useNavigate();
   const tags = parseTags(org.tags);
@@ -378,7 +449,7 @@ function Field({ label, children }) {
   );
 }
 
-function OrgEditor({ mode, initial, onClose, onSaved }) {
+export function OrgEditor({ mode, initial, onClose, onSaved }) {
   const allProjects = useStore((s) => s.marketProjects);
   const setMarketProjects = useStore((s) => s.setMarketProjects);
   const [form, setForm] = useState(initial);

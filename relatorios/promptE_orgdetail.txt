@@ -1,0 +1,67 @@
+================================
+AIDE — RELATÓRIO PROMPT E
+OrgDetailPage
+Data: 2026-07-07
+================================
+
+ARQUIVOS CRIADOS:
+- src/components/market/OrgDetailPage.jsx   (página completa /market/org/:id, 6 abas)
+- migrations/0031_market_orgdetail.sql      (market_notes, market_org_drive_links,
+                                             colunas relevance_for_phd/job/spinoff)
+
+ARQUIVOS MODIFICADOS:
+- _worker.js
+    • rota GET /api/market/organizations/:id/full  → handleMarketOrgFull (nova)
+    • rotas /api/market/notes e /api/market/notes/:id → handleMarketNotes / handleMarketNoteItem (novas)
+    • rotas /api/market/org/:id/files[/link][/:fileId] via sistema de anexos (kind 'market_org')
+    • ATTACHMENT_FOLDERS/TABLES/FK: + market_org (pasta Drive AIDE_SUPPORT/MERCADO/<orgId>/)
+    • shapeMarketOrg + INSERT/UPDATE de organização: 3 colunas de relevância por trilha
+- src/App.jsx
+    • import OrgDetailPage + <Route path="/market/org/:id"> dentro de <FixedRoute>
+- src/components/market/OrganizationsView.jsx
+    • clique no NOME da org → navega para /market/org/:id
+    • painel direito → QuickPreview (nome, tipo, cidade, estrelas, contatos,
+      iniciativas, atualizado em) + botão "Ver página completa →"
+    • OrgDetail inline MANTIDO como fallback (não removido)
+    • export function OrgEditor  (reutilizado pela OrgDetailPage)
+- src/components/shared/DriveAttachmentZone.jsx
+    • ENDPOINT_BASE: + market_org → /api/market/org
+- src/version.js
+    • 2.4.1 → 2.4.2
+
+ABAS DA PÁGINA (/market/org/:id):
+  Visão Geral   → descrição + notas de relevância (auto-save on blur),
+                  fonte, tags editáveis; à direita: relevância por trilha
+                  (auto-save), status, cidade/país, resumo, atualizado em.
+  Contatos      → lista simples + "Vincular Contato" (modal com busca em
+                  network_people) + "Ver no Networking →".
+  Projetos      → cards (coordenadora/parceira) + "Nova Iniciativa".
+  Notas         → market_notes (35/65): filtros, busca, lista, editor com
+                  auto-save, pin, tags, excluir.
+  Documentos    → DriveAttachmentZone entityType='market_org'.
+  Oportunidades → career_opportunities ativas + badges de trilha + prazo
+                  (vermelho <30 dias) + "Nova Oportunidade" (→ /career state.orgId).
+
+BACKEND:
+/api/market/organizations/:id/full : CRIADO (handleMarketOrgFull)
+/api/market/notes                  : CRIADO (GET lista por organization_id, POST cria)
+/api/market/notes/:id              : CRIADO (PUT, DELETE)
+/api/market/org/:id/files          : CRIADO (reaproveita handleAttachment*)
+
+VERIFICAÇÃO:
+npm run build : OK — zero erros (apenas warning pré-existente de chunk >500 kB)
+node --check _worker.js : OK
+
+MIGRAÇÃO 0031 (remota):
+  ATENÇÃO — precisa rodar ANTES do deploy no D1 REMOTO, senão o INSERT/UPDATE de
+  organização quebra em produção (no such column relevance_for_phd) e as notas/
+  /full retornam erro. Comando:
+    wrangler d1 execute aide-db --remote --file=migrations/0031_market_orgdetail.sql
+  (npm run db:migrate está hardcoded para 0001 — não aplica a 0031.)
+
+Deploy: v2.4.2  — [PENDENTE: aguardando confirmação sobre migração remota + push]
+Commit: [pendente]
+
+================================
+FIM DO RELATÓRIO
+================================

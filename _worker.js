@@ -237,6 +237,10 @@ async function handleAPI(request, env, ctx) {
 
   // Mercado (Etapa 2) — organizações, projetos, contatos profissionais, importação.
   if (path === '/api/market/organizations') return handleMarketOrganizations(request, env, user);
+  // Detalhe agregado da organização (OrgDetailPage, v2.4.2) — deve casar ANTES da rota genérica de item.
+  if (path.match(/^\/api\/market\/organizations\/[^/]+\/full$/) && request.method === 'GET') {
+    return handleMarketOrgFull(request, env, user, path.split('/')[4]);
+  }
   if (path.startsWith('/api/market/organizations/')) return handleMarketOrganizationItem(request, env, user, path.split('/')[4]);
   if (path === '/api/market/projects') return handleMarketProjects(request, env, user);
   if (path.startsWith('/api/market/projects/')) return handleMarketProjectItem(request, env, user, path.split('/')[4]);
@@ -248,6 +252,21 @@ async function handleAPI(request, env, ctx) {
   }
   if (path.startsWith('/api/market/contacts/')) return handleMarketContactItem(request, env, user, path.split('/')[4]);
   if (path === '/api/market/import') return handleMarketImport(request, env, user);
+  // Notas de mercado (v2.4.2) — CRUD separado de /api/notes.
+  if (path === '/api/market/notes') return handleMarketNotes(request, env, user);
+  if (path.startsWith('/api/market/notes/')) return handleMarketNoteItem(request, env, user, path.split('/')[4]);
+  // Anexos Drive por organização — reaproveita o sistema de anexos (kind 'market_org').
+  // A ordem importa: /files/link deve casar ANTES de /files/:fileId.
+  if (path.match(/^\/api\/market\/org\/[^/]+\/files\/link$/)) {
+    return handleAttachmentLink(request, env, user, 'market_org', path.split('/')[4]);
+  }
+  if (path.match(/^\/api\/market\/org\/[^/]+\/files$/)) {
+    return handleAttachmentFiles(request, env, user, 'market_org', path.split('/')[4]);
+  }
+  if (path.match(/^\/api\/market\/org\/[^/]+\/files\/[^/]+$/)) {
+    const parts = path.split('/');
+    return handleAttachmentItem(request, env, user, 'market_org', parts[4], parts[6]);
+  }
 
   // Carreira (Etapa 2) — oportunidades, documentos, metas.
   if (path === '/api/career/opportunities') return handleCareerOpportunities(request, env, user);
@@ -5457,7 +5476,14 @@ const MARKET_ORG_TYPES = ['company', 'university', 'research_institute', 'funder
 
 function shapeMarketOrg(r) {
   if (!r) return r;
-  return { ...r, tags: parseJsonArray(r.tags) };
+  return {
+    ...r,
+    tags: parseJsonArray(r.tags),
+    // Colunas 0031 — podem ser NULL em linhas antigas antes da migração.
+    relevance_for_phd: Number(r.relevance_for_phd) || 0,
+    relevance_for_job: Number(r.relevance_for_job) || 0,
+    relevance_for_spinoff: Number(r.relevance_for_spinoff) || 0,
+  };
 }
 function shapeMarketProject(r) {
   if (!r) return r;
@@ -5509,13 +5535,17 @@ async function handleMarketOrganizations(request, env, user) {
       await env.DB.prepare(
         `INSERT INTO market_organizations
           (id, name, type, subtype, country, city, website, linkedin, description,
-           relevance_score, relevance_notes, tags, status, source, created_by, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+           relevance_score, relevance_notes, tags, status, source,
+           relevance_for_phd, relevance_for_job, relevance_for_spinoff,
+           created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).bind(
         id, body.name, body.type || 'company', body.subtype || '', body.country || 'NL',
         body.city || '', body.website || '', body.linkedin || '', body.description || '',
         Number(body.relevance_score) || 3, body.relevance_notes || '',
         JSON.stringify(body.tags || []), body.status || 'prospect', body.source || '',
+        Number(body.relevance_for_phd) || 0, Number(body.relevance_for_job) || 0,
+        Number(body.relevance_for_spinoff) || 0,
         user.id, now, now
       ).run();
     } catch (e) {
@@ -5569,7 +5599,8 @@ async function handleMarketOrganizationItem(request, env, user, id) {
       await env.DB.prepare(
         `UPDATE market_organizations SET name=?, type=?, subtype=?, country=?, city=?, website=?,
            linkedin=?, description=?, relevance_score=?, relevance_notes=?, tags=?, status=?,
-           source=?, updated_at=? WHERE id=?`
+           source=?, relevance_for_phd=?, relevance_for_job=?, relevance_for_spinoff=?,
+           updated_at=? WHERE id=?`
       ).bind(
         pick('name', existing.name), pick('type', existing.type), pick('subtype', existing.subtype),
         pick('country', existing.country), pick('city', existing.city), pick('website', existing.website),
@@ -5577,7 +5608,11 @@ async function handleMarketOrganizationItem(request, env, user, id) {
         Number(pick('relevance_score', existing.relevance_score)) || 3,
         pick('relevance_notes', existing.relevance_notes),
         body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
-        pick('status', existing.status), pick('source', existing.source), now, id
+        pick('status', existing.status), pick('source', existing.source),
+        Number(pick('relevance_for_phd', existing.relevance_for_phd)) || 0,
+        Number(pick('relevance_for_job', existing.relevance_for_job)) || 0,
+        Number(pick('relevance_for_spinoff', existing.relevance_for_spinoff)) || 0,
+        now, id
       ).run();
     } catch (e) {
       return json({ error: 'Falha ao atualizar organização', detail: String(e) }, 500);
@@ -5605,6 +5640,168 @@ async function handleMarketOrganizationItem(request, env, user, id) {
       return json({ ok: true });
     } catch (e) {
       return json({ error: 'Falha ao deletar organização', detail: String(e) }, 500);
+    }
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---- Mercado: detalhe agregado da organização (OrgDetailPage) --------------
+// GET /api/market/organizations/:id/full — devolve a organização + contatos
+// vinculados (com outreach_status), iniciativas (coordenadora e parceira),
+// oportunidades ativas e a contagem de notas de mercado.
+
+async function handleMarketOrgFull(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  try {
+    const org = await env.DB.prepare(
+      `SELECT o.*, u.name AS created_by_name
+         FROM market_organizations o
+         LEFT JOIN users u ON u.id = o.created_by
+        WHERE o.id = ?`
+    ).bind(id).first();
+    if (!org) return json({ error: 'Organização não encontrada' }, 404);
+
+    // Contatos vinculados via contact_org_links + status de outreach.
+    const contacts = await env.DB.prepare(
+      `SELECT l.id, l.person_id, l.role_at_org, l.relevance_notes,
+              p.name AS person_name, p.email AS person_email,
+              cp.outreach_status AS outreach_status
+         FROM contact_org_links l
+         LEFT JOIN network_people p ON p.id = l.person_id
+         LEFT JOIN contact_professional cp ON cp.person_id = l.person_id
+        WHERE l.organization_id = ?
+        ORDER BY p.name`
+    ).bind(id).all();
+
+    // Iniciativas: coordenadora (organization_id) OU parceira (partner_org_ids LIKE).
+    const projects = await env.DB.prepare(
+      `SELECT * FROM market_projects
+        WHERE organization_id = ? OR partner_org_ids LIKE ?
+        ORDER BY relevance_score DESC, name ASC`
+    ).bind(id, `%"${id}"%`).all();
+
+    // Oportunidades ativas com nome do responsável.
+    const opportunities = await env.DB.prepare(
+      `SELECT co.*, u.name AS assigned_name
+         FROM career_opportunities co
+         LEFT JOIN users u ON u.id = co.assigned_to
+        WHERE co.organization_id = ?
+          AND co.status NOT IN ('closed','rejected')
+        ORDER BY CASE WHEN co.deadline IS NULL OR co.deadline = '' THEN 1 ELSE 0 END, co.deadline ASC`
+    ).bind(id).all();
+
+    const notesCount = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM market_notes WHERE organization_id = ?'
+    ).bind(id).first();
+
+    return json({
+      ...shapeMarketOrg(org),
+      created_by_name: org.created_by_name || null,
+      contacts: contacts.results || [],
+      projects: (projects.results || []).map(shapeMarketProject),
+      opportunities: (opportunities.results || []).map(shapeOpportunity),
+      notes_count: (notesCount && notesCount.n) || 0,
+    });
+  } catch (e) {
+    return json({ error: 'Falha ao carregar organização', detail: String(e) }, 500);
+  }
+}
+
+// ---- Mercado: notas por organização (market_notes) -------------------------
+// Tabela separada de /api/notes. GET lista por organization_id; POST cria.
+
+const MARKET_NOTE_TYPES = ['research', 'funding', 'culture', 'news', 'contact', 'other'];
+
+function shapeMarketNote(r) {
+  if (!r) return r;
+  return { ...r, tags: parseJsonArray(r.tags), pinned: !!r.pinned };
+}
+
+async function handleMarketNotes(request, env, user) {
+  if (request.method === 'GET') {
+    try {
+      const url = new URL(request.url);
+      const orgId = url.searchParams.get('organization_id');
+      const type = url.searchParams.get('note_type');
+      const wh = [];
+      const args = [];
+      if (orgId) { wh.push('n.organization_id = ?'); args.push(orgId); }
+      if (type) { wh.push('n.note_type = ?'); args.push(type); }
+      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const { results } = await env.DB.prepare(
+        `SELECT n.*, u.name AS author_name
+           FROM market_notes n
+           LEFT JOIN users u ON u.id = n.created_by
+           ${where}
+          ORDER BY n.pinned DESC, n.updated_at DESC`
+      ).bind(...args).all();
+      return json((results || []).map(shapeMarketNote));
+    } catch { return json([]); }
+  }
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.organization_id) return json({ error: 'organization_id é obrigatório' }, 400);
+    const type = MARKET_NOTE_TYPES.includes(body.note_type) ? body.note_type : 'other';
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO market_notes
+          (id, organization_id, title, body, note_type, tags, pinned, created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.organization_id, body.title || '', body.body || '', type,
+        JSON.stringify(body.tags || []), body.pinned ? 1 : 0, user.id, now, now
+      ).run();
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/no such table/i.test(msg)) return json({ error: 'Migração 0031 não aplicada', detail: msg }, 503);
+      return json({ error: 'Falha ao criar nota', detail: msg }, 500);
+    }
+    const row = await env.DB.prepare(
+      'SELECT n.*, u.name AS author_name FROM market_notes n LEFT JOIN users u ON u.id = n.created_by WHERE n.id = ?'
+    ).bind(id).first();
+    return json(shapeMarketNote(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleMarketNoteItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  const existing = await env.DB.prepare('SELECT * FROM market_notes WHERE id = ?').bind(id).first();
+  if (!existing) return json({ error: 'Nota não encontrada' }, 404);
+
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    const type = body.note_type !== undefined
+      ? (MARKET_NOTE_TYPES.includes(body.note_type) ? body.note_type : 'other')
+      : existing.note_type;
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `UPDATE market_notes SET title=?, body=?, note_type=?, tags=?, pinned=?, updated_at=? WHERE id=?`
+      ).bind(
+        pick('title', existing.title), pick('body', existing.body), type,
+        body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
+        body.pinned !== undefined ? (body.pinned ? 1 : 0) : existing.pinned,
+        now, id
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar nota', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare(
+      'SELECT n.*, u.name AS author_name FROM market_notes n LEFT JOIN users u ON u.id = n.created_by WHERE n.id = ?'
+    ).bind(id).first();
+    return json(shapeMarketNote(row));
+  }
+
+  if (request.method === 'DELETE') {
+    try {
+      await env.DB.prepare('DELETE FROM market_notes WHERE id = ?').bind(id).run();
+      return json({ ok: true });
+    } catch (e) {
+      return json({ error: 'Falha ao deletar nota', detail: String(e) }, 500);
     }
   }
   return json({ error: 'Método não permitido' }, 405);
@@ -6347,9 +6544,9 @@ async function handleCareerGoalItem(request, env, user, id) {
 // {note,task}_drive_links table — no Drive upload happens.
 // ---------------------------------------------------------------------------
 
-const ATTACHMENT_FOLDERS = { note: 'NOTAS', task: 'TAREFAS' };
-const ATTACHMENT_TABLES = { note: 'note_drive_links', task: 'task_drive_links' };
-const ATTACHMENT_FK = { note: 'note_id', task: 'task_id' };
+const ATTACHMENT_FOLDERS = { note: 'NOTAS', task: 'TAREFAS', market_org: 'MERCADO' };
+const ATTACHMENT_TABLES = { note: 'note_drive_links', task: 'task_drive_links', market_org: 'market_org_drive_links' };
+const ATTACHMENT_FK = { note: 'note_id', task: 'task_id', market_org: 'org_id' };
 
 async function entityFolderId(kind, entityId, ownerId, env) {
   const root = await findOrCreateDriveFolder('AIDE_SUPPORT', 'root', ownerId, env);

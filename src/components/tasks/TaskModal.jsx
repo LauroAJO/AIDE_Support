@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { X, Star, Pencil, CheckCircle2, Trash2, Paperclip, ExternalLink, Send } from 'lucide-react';
 import { useStore } from '../../store';
+import { apiFetch } from '../../lib/api';
 import Avatar from '../shared/Avatar';
 import MentionText from './MentionText';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
@@ -37,9 +38,18 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete }
     onPersist(task, { status: 'done' });
     onClose();
   };
-  const remove = () => {
+  const remove = async () => {
     if (!window.confirm('Excluir esta tarefa? Esta ação não pode ser desfeita.')) return;
-    onDelete(task.id);
+    // Bug fix (v2.4.8): o modal apenas chamava o callback de refresh e NUNCA
+    // enviava o DELETE — a tarefa reaparecia após o loadAll(). Agora exclui de
+    // fato no backend antes de atualizar a lista (mesmo padrão do TaskEditor).
+    try {
+      await apiFetch(`/api/tasks/${task.id}`, { method: 'DELETE' });
+      onDelete(task.id);
+    } catch (err) {
+      console.error('Falha ao excluir tarefa', task.id, err);
+      window.alert('Falha ao excluir a tarefa. Tente novamente.');
+    }
   };
 
   return (

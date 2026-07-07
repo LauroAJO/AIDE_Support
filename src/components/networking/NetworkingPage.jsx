@@ -86,7 +86,6 @@ export default function NetworkingPage() {
   const setTasks = useStore((s) => s.setTasks);
 
   const [view, setView] = useState('list');
-  const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [tagFilter, setTagFilter] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -465,18 +464,6 @@ function emptyPerson() {
     roles: [{ role: '', institution_id: '', institution_name: '', start_date: '', end_date: '', current: true }],
     entity_links: [],
   };
-}
-function emptyInstitution() {
-  return { name: '', type: 'company', area: '', website: '', linkedin: '', notes: '', tags: [] };
-}
-
-function Chip({ active, onClick, children }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${active ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'}`}
-    >{children}</button>
-  );
 }
 
 function StrengthDots({ value }) {

@@ -58,7 +58,7 @@ export default function ProjectsView() {
     if (id) openDetail(id);
   };
 
-  if (loading) return <div className="h-full"><LoadingSpinner label="Carregando projetos..." /></div>;
+  if (loading) return <div className="h-full"><LoadingSpinner label="Carregando iniciativas..." /></div>;
 
   return (
     <div className="flex h-full flex-col gap-4 lg:flex-row">
@@ -69,10 +69,10 @@ export default function ProjectsView() {
           onClick={() => setEditor({ mode: 'create', form: { ...EMPTY_PROJECT } })}
           className="flex items-center justify-center gap-1 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:opacity-90"
         >
-          <Plus className="h-4 w-4" /> Novo projeto
+          <Plus className="h-4 w-4" /> Nova Iniciativa
         </button>
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-          {projects.length === 0 && <p className="px-1 text-sm text-muted">Nenhum projeto cadastrado.</p>}
+          {projects.length === 0 && <p className="px-1 text-sm text-muted">Nenhuma iniciativa registrada</p>}
           {projects.map((p) => (
             <button
               key={p.id}
@@ -103,7 +103,7 @@ export default function ProjectsView() {
 
       {/* RIGHT — detalhe */}
       <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-line bg-surface p-5">
-        {!selectedId && <div className="flex h-full items-center justify-center text-muted">Selecione um projeto</div>}
+        {!selectedId && <div className="flex h-full items-center justify-center text-muted">Selecione uma iniciativa</div>}
         {selectedId && detail && (
           <ProjectDetail
             project={detail}
@@ -238,7 +238,7 @@ function ProjectEditor({ mode, initial, orgs, onClose, onSaved }) {
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
       <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
-          <h2 className="text-base font-bold text-ink">{mode === 'create' ? 'Novo projeto' : 'Editar projeto'}</h2>
+          <h2 className="text-base font-bold text-ink">{mode === 'create' ? 'Nova Iniciativa' : 'Editar Iniciativa'}</h2>
           <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">

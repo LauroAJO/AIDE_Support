@@ -8,8 +8,14 @@ import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import Avatar from '../shared/Avatar';
 import {
-  StarRating, OrgTypeBadge, OrgStatusBadge, ORG_TYPE_LABELS, ORG_STATUS_LABELS, parseTags,
+  StarRating, OrgTypeBadge, OrgStatusBadge, ORG_TYPE_LABELS, ORG_STATUS_LABELS, OUTREACH_LABELS, parseTags,
 } from './marketShared';
+
+// Cor do "dot" por status de outreach (mesmos valores usados no Networking).
+const OUTREACH_DOT = {
+  not_contacted: '#9CA3AF', contacted: '#3B82F6', responded: '#22C55E',
+  meeting_scheduled: '#6366F1', ongoing: '#F59E0B', converted: '#15803D', inactive: '#EF4444',
+};
 
 const TYPE_CHIPS = [
   { key: 'company', label: 'Empresa' },
@@ -278,9 +284,9 @@ function OrgDetail({ org, onEdit, onAddContact }) {
         </div>
       )}
 
-      {/* Projetos vinculados */}
-      <Section title={`Projetos vinculados (${projects.length})`}>
-        {projects.length === 0 ? <Empty>Nenhum projeto vinculado.</Empty> : (
+      {/* Iniciativas vinculadas */}
+      <Section title={`Iniciativas vinculadas (${projects.length})`}>
+        {projects.length === 0 ? <Empty>Nenhuma iniciativa vinculada.</Empty> : (
           <ul className="space-y-1.5">
             {projects.map((p) => (
               <li key={p.id} className="flex items-center justify-between rounded-lg border border-line px-3 py-2 text-sm">
@@ -300,22 +306,30 @@ function OrgDetail({ org, onEdit, onAddContact }) {
         {contacts.length === 0 ? <Empty>Nenhum contato vinculado.</Empty> : (
           <ul className="space-y-1.5">
             {contacts.map((c) => (
+              // Linha simples e somente-leitura. O perfil completo vive no Networking.
               <li key={c.id} className="flex items-center gap-2 rounded-lg border border-line px-3 py-2">
                 <Avatar user={{ name: c.person_name }} size={28} />
-                <div className="min-w-0">
-                  {/* Nome clicável → abre a ficha da pessoa no Networking. */}
-                  <button
-                    type="button"
-                    onClick={() => c.person_id && navigate('/networking', { state: { contactId: c.person_id } })}
-                    disabled={!c.person_id}
-                    title="Ver no Networking"
-                    className="flex items-center gap-1 text-sm text-indigo-600 hover:underline disabled:cursor-default disabled:text-ink disabled:no-underline"
-                  >
-                    <Users className="h-3 w-3 shrink-0" />
-                    <span className="truncate">{c.person_name || '—'}</span>
-                  </button>
-                  {c.role_at_org && <div className="truncate text-xs text-muted">{c.role_at_org}</div>}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold text-ink">{c.person_name || '—'}</div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    {c.role_at_org && <span className="truncate text-xs text-muted">{c.role_at_org}</span>}
+                    {c.outreach_status && OUTREACH_LABELS[c.outreach_status] && (
+                      <span className="flex items-center gap-1 text-[11px] text-ink2" title="Status de contato">
+                        <span className="h-2 w-2 rounded-full" style={{ background: OUTREACH_DOT[c.outreach_status] || '#9CA3AF' }} />
+                        {OUTREACH_LABELS[c.outreach_status]}
+                      </span>
+                    )}
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => c.person_id && navigate('/networking', { state: { contactId: c.person_id } })}
+                  disabled={!c.person_id}
+                  title="Ver no Networking"
+                  className="flex shrink-0 items-center gap-1 whitespace-nowrap text-xs font-medium text-indigo-600 hover:underline disabled:cursor-default disabled:text-muted disabled:no-underline"
+                >
+                  Ver no Networking →
+                </button>
               </li>
             ))}
           </ul>

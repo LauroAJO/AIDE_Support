@@ -5537,10 +5537,12 @@ async function handleMarketOrganizationItem(request, env, user, id) {
         'SELECT * FROM market_projects WHERE organization_id = ? ORDER BY name'
       ).bind(id).all();
       const contacts = await env.DB.prepare(
-        `SELECT l.*, p.name AS person_name, pr.name AS project_name
+        `SELECT l.*, p.name AS person_name, pr.name AS project_name,
+                cp.outreach_status AS outreach_status
            FROM contact_org_links l
            LEFT JOIN network_people p ON p.id = l.person_id
            LEFT JOIN market_projects pr ON pr.id = l.project_id
+           LEFT JOIN contact_professional cp ON cp.person_id = l.person_id
           WHERE l.organization_id = ?`
       ).bind(id).all();
       const opportunities = await env.DB.prepare(

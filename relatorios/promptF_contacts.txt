@@ -1,0 +1,54 @@
+================================
+AIDE — RELATÓRIO PROMPT F
+Contacts-Networking redirect
+Data: 2026-07-07
+================================
+
+Lidos por completo antes de alterar: MarketPage.jsx, ContactsProView.jsx,
+OrgDetailPage.jsx (novo, do Prompt E). Texto em PT-BR. NÃO houve deploy nem bump
+de versão (versão já está 2.4.2 pelo Prompt E; deploy conjunto ao final do Prompt E).
+
+MUDANÇAS:
+
+1. TAB RENOMEADA
+   - src/components/market/MarketPage.jsx: label da aba "Contatos" →
+     "Contatos-Networking" (TABS, ~L11). Chave 'contacts' e componente inalterados.
+
+2. ContactsProView SIMPLIFICADO (painel direito → redirect)
+   - src/components/market/ContactsProView.jsx:
+       * Adicionado `const navigate = useNavigate();` no componente principal (~L33).
+       * PAINEL DIREITO substituído (era <ContactDetail> com editor de outreach,
+         estrelas de relevância, histórico, notas, tags, edição). Agora, ao
+         selecionar um contato, mostra:
+            - "Ver perfil completo em Networking" (mensagem)
+            - Botão grande, centralizado, indigo "Ver no Networking →" →
+              navigate('/networking', { state: { contactId: selectedId } })
+              (selectedId é o person_id do contato clicado)
+            - Texto cinza pequeno: "O perfil completo está disponível na aba Networking"
+         (~L142-160)
+       * PAINEL ESQUERDO mantido EXATAMENTE como estava: busca, filtro de status,
+         lista de contatos com dots de status, e botão "+ Contato" (AddProfessionalModal).
+       * Clicar num contato ainda o seleciona (openDetail) e mostra o painel direito
+         com o botão de redirect.
+   - Observação: os componentes ContactDetail / ProfessionalEditor / InteractionModal
+     e o estado detail/editor/interactionFor ficaram SEM uso (dead code) — não
+     removidos (fora do escopo "substituir o painel direito"); inofensivos, build
+     passa. O perfil/edição completo vive no Networking.
+
+3. OrgDetailPage — Contatos
+   - N/A (já no formato desejado). A aba "Contatos" do OrgDetailPage.jsx (criado no
+     Prompt E, ContactsTab ~L402-460) JÁ é uma lista simples: avatar, nome,
+     cargo na org, dot+rótulo de outreach e link "Ver no Networking →", além de
+     "Vincular Contato". Não há perfil/editor inline. Nenhuma alteração necessária.
+
+VERIFICAÇÃO:
+  npm run build           : OK (0 erros; "✓ built in 3.61s"; _worker.js → dist/).
+                            Único aviso: tamanho de chunk (>500 kB) — pré-existente.
+  node --check _worker.js : OK (WORKER_OK). (worker não alterado neste prompt.)
+
+NOTE: NÃO fazer deploy — aguardando conclusão do Prompt E para deploy conjunto.
+  (Versão mantida em 2.4.2, definida pelo Prompt E.)
+
+================================
+FIM DO RELATÓRIO
+================================

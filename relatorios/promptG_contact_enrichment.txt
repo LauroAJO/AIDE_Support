@@ -1,0 +1,141 @@
+================================
+AIDE — RELATÓRIO PROMPT G
+Enriquecimento de perfis de contato
+Data: 2026-07-07
+================================
+
+Lidos por completo antes de alterar: migrations/0025_mercado_carreira.sql
+(esquema contact_professional), _worker.js (router, handleNetworkPeople,
+handleNetworkPersonItem, hydratePeople, shapeNetworkPerson, shapeContactProfessional,
+handleMarketContactProfessional, handleMarketContacts, insert de scheduled_notifications)
+e src/components/networking/NetworkingPage.jsx (items/filtros, card, DetailPanel).
+Texto 100% PT-BR. Nenhuma funcionalidade existente removida.
+NÃO houve deploy nem bump de versão (mantida em 2.4.2) — deploy conjunto com E+F.
+
+--------------------------------------------------------------------------------
+MIGRATION — migrations/0031_contact_enrichment.sql (NOVO)
+--------------------------------------------------------------------------------
+- CREATE TABLE contact_interactions (id, person_id FK→network_people ON DELETE
+  CASCADE, interaction_type, date 'YYYY-MM-DD', summary, outcome, next_step,
+  next_step_date, created_by FK→users, created_at unixepoch()).
+- 2 índices: idx_interactions_person (person_id), idx_interactions_date (date).
+- 4 ALTER em contact_professional:
+    acquaintance_context TEXT DEFAULT ''
+    acquaintance_notes   TEXT DEFAULT ''
+    referral_potential   TEXT DEFAULT ''
+    referral_score       INTEGER DEFAULT 0
+- Aplicada LOCAL com sucesso: "7 commands executed successfully"
+  (1 CREATE + 2 INDEX + 4 ALTER).
+
+--------------------------------------------------------------------------------
+CHANGE 1 — Histórico de interações estruturado
+--------------------------------------------------------------------------------
+Backend (_worker.js):
+  * Router: 2 rotas novas ANTES da rota genérica de pessoa (senão o startsWith
+    "/api/network/people/" as capturava):
+      GET/POST  /api/network/people/:id/interactions        → handleContactInteractions
+      DELETE    /api/network/people/:id/interactions/:intId → handleContactInteractionItem
+    (match por regex; split('/')[4]=personId, [6]=intId)
+  * handleContactInteractions:
+      - GET: fail-open (requirePermission 'networking','view' → [] se sem acesso);
+        SELECT ... ORDER BY date DESC, created_at DESC; try/catch → [].
+      - POST: exige canDo('networking','edit_contacts'); valida interaction_type
+        contra lista branca (fallback 'other'); date default = hoje; INSERT.
+        Se a tabela não existir (0031 não aplicada) → 503 com mensagem clara.
+      - POST com next_step_date: agenda follow-up em scheduled_notifications
+        (send_at = next_step_date @09:00 em segundos UNIX; to_user = owner;
+        title "Follow-up: <nome>", body = next_step). scheduled_notifications
+        NÃO tem coluna `type`, então o contexto vai no title/body. Best-effort:
+        falha no agendamento não bloqueia o registro da interação.
+      - handleContactInteractionItem: DELETE gated por edit_contacts;
+        WHERE id=? AND person_id=? (evita apagar de outra pessoa).
+Frontend (NetworkingPage.jsx):
+  * Componente <InteractionsSection personId> no DetailPanel (para qualquer
+    pessoa): lista com badge tipado/colorido (INTERACTION_META), data BR
+    (DD/MM/AAAA), resumo, resultado (itálico) e pílula "→ próximo passo · data";
+    botão "🗑" (X) no hover para excluir. Botão "+ Registrar" abre formulário
+    inline: tipo (select com 9 tipos), data, resumo, resultado, próximo passo e
+    data do próximo passo. Recarrega a lista após salvar/excluir.
+
+--------------------------------------------------------------------------------
+CHANGE 2 — Indicador de temperatura
+--------------------------------------------------------------------------------
+Backend (_worker.js):
+  * fetchTemperatures(env, ids): batch MAX(date) por person_id em
+    contact_interactions → hot (≤30d) / warm (≤90d) / cold (>90d).
+    try/catch → {} (gracioso se 0031 ainda não aplicada).
+  * hydratePeople: incluído no Promise.all; cada pessoa recebe
+    temperature = mapa[id] || 'never'. Flui por GET /api/network/people.
+Frontend (NetworkingPage.jsx):
+  * TEMP_META: 🔥 hot / 🟡 warm / 🔵 cold / ⚫ never (rótulo + cor do dot).
+  * Card: dot colorido de temperatura à esquerda do nome (com title).
+  * Chips de filtro [Todos] [🔥 Quentes] [🟡 Mornos] [🔵 Frios] [⚫ Nunca]
+    (estado tempFilter); items filtrados por (it.temperature||'never').
+
+--------------------------------------------------------------------------------
+CHANGE 3 — "Como se conheceram" (acquaintance)
+--------------------------------------------------------------------------------
+Backend (_worker.js):
+  * handleMarketContactProfessional: acquaintance_context / acquaintance_notes
+    adicionados às cláusulas INSERT e UPDATE (pick() com fallback ao existente).
+  * shapeContactProfessional faz spread de r → as novas colunas já fluem no GET.
+Frontend (NetworkingPage.jsx):
+  * <AcquaintanceSection> no DetailPanel (só p/ pessoas com perfil no Mercado):
+    chips de contexto (ACQUAINTANCE_META: 🔍 pesquisa online, 🎤 evento,
+    👥 indicação, 🤝 colega, 👨‍🏫 ex-orientador, 🎓 ex-estudante, 📝 outro) —
+    toggle salva na hora; textarea de notas (auto-save no blur), placeholder
+    muda p/ "Indicado por quem?" quando contexto = indicação.
+
+--------------------------------------------------------------------------------
+CHANGE 4 — "Potencial de indicação" (referral)
+--------------------------------------------------------------------------------
+Backend (_worker.js):
+  * handleMarketContactProfessional: referral_potential / referral_score
+    adicionados a INSERT e UPDATE (Number(...)||0 p/ o score).
+Frontend (NetworkingPage.jsx):
+  * <ReferralSection> no DetailPanel: slider de 0-5 estrelas (clique salva;
+    reclicar a mesma nota zera), rótulo "n/5", input de notas
+    "Pode me indicar para…" (auto-save no blur).
+  * Card: ícone 🔗 ao lado do nome quando referral_score >= 3
+    (usa proProfile[id].referral_score; title mostra a nota).
+
+--------------------------------------------------------------------------------
+DECISÕES / DESVIOS
+--------------------------------------------------------------------------------
+- scheduled_notifications NÃO tem coluna `type`: o follow-up codifica o contexto
+  no title ("Follow-up: <nome>") e body (próximo passo), sem inventar coluna.
+- Temperatura e histórico são tolerantes a 0031-não-aplicada (try/catch → 'never'
+  / lista vazia / 503 no POST), evitando 500 antes da migração remota.
+- InteractionsSection é exibido para QUALQUER pessoa (interações são por person_id,
+  independem de ter contact_professional); Acquaintance/Referral só aparecem para
+  quem tem perfil no Mercado (hasPro), pois estendem contact_professional.
+- Novas colunas fluem automaticamente no GET via shapeContactProfessional (spread)
+  e handleMarketContacts (cp.*); só foi preciso adicioná-las explicitamente ao
+  INSERT/UPDATE de handleMarketContactProfessional.
+
+--------------------------------------------------------------------------------
+VERIFICAÇÃO
+--------------------------------------------------------------------------------
+  0031 local           : OK — 7 commands executed successfully.
+  npm run build        : OK — 0 erros; "✓ built in 3.93s"; _worker.js → dist/.
+                         Único aviso: chunk > 500 kB (pré-existente).
+  node --check _worker.js : OK (WORKER_OK) — re-checado após todas as edições.
+  requirePermission/readJson/canDo/json : confirmados existentes; gating de
+                         interactions espelha handleNetworkPeople (GET fail-open).
+
+--------------------------------------------------------------------------------
+MIGRAÇÃO REMOTA (aplicar ANTES do deploy conjunto E+F+G)
+--------------------------------------------------------------------------------
+  cd "X:/_Software/Projetos Pessoais/AIDE/AIDE_Support"
+  npx --yes wrangler d1 execute aide-db --remote --file=migrations/0031_contact_enrichment.sql
+
+  Ordem obrigatória: aplicar 0031 no REMOTO antes de publicar o código —
+  senão os PUTs de contact_professional (acquaintance/referral) e os POSTs de
+  interações falham por coluna/tabela inexistente.
+
+NOTE: NÃO fazer deploy agora — aguardando E+F para deploy conjunto.
+Versão mantida em 2.4.2 (sem bump neste prompt).
+
+================================
+FIM DO RELATÓRIO
+================================

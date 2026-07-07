@@ -8,7 +8,7 @@ import ContactsProView from './ContactsProView';
 const TABS = [
   { key: 'orgs', label: 'Organizações', icon: Building2 },
   { key: 'projects', label: 'Projetos & Iniciativas', icon: FolderKanban },
-  { key: 'contacts', label: 'Contatos', icon: Users },
+  { key: 'contacts', label: 'Contatos-Networking', icon: Users },
 ];
 
 export default function MarketPage() {

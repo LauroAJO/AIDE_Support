@@ -36,6 +36,57 @@ const OUTREACH_STATUS_ORDER = [
   'not_contacted', 'contacted', 'responded', 'meeting_scheduled', 'ongoing', 'converted', 'inactive',
 ];
 
+// Prompt G — tipos de interação (emoji + rótulo + classe de badge).
+const INTERACTION_META = {
+  email_sent:         { emoji: '📧', label: 'Email enviado',      cls: 'bg-blue-100 text-blue-700' },
+  email_received:     { emoji: '📨', label: 'Email recebido',     cls: 'bg-green-100 text-green-700' },
+  linkedin_connected: { emoji: '💼', label: 'LinkedIn conectado', cls: 'bg-indigo-100 text-indigo-700' },
+  linkedin_message:   { emoji: '💬', label: 'Mensagem LinkedIn',  cls: 'bg-indigo-100 text-indigo-700' },
+  meeting:            { emoji: '🤝', label: 'Reunião',            cls: 'bg-purple-100 text-purple-700' },
+  coffee_chat:        { emoji: '☕', label: 'Coffee chat',        cls: 'bg-amber-100 text-amber-700' },
+  paper_mentioned:    { emoji: '📄', label: 'Paper/projeto',      cls: 'bg-gray-100 text-gray-700' },
+  event:              { emoji: '🎤', label: 'Evento',             cls: 'bg-orange-100 text-orange-700' },
+  other:              { emoji: '📝', label: 'Outro',              cls: 'bg-gray-100 text-gray-700' },
+};
+const INTERACTION_ORDER = ['email_sent', 'email_received', 'linkedin_connected', 'linkedin_message', 'meeting', 'coffee_chat', 'paper_mentioned', 'event', 'other'];
+
+// Temperatura do contato (pela última interação).
+const TEMP_META = {
+  hot:   { emoji: '🔥', label: 'Quente', dot: '#EF4444' },
+  warm:  { emoji: '🟡', label: 'Morno',  dot: '#F59E0B' },
+  cold:  { emoji: '🔵', label: 'Frio',   dot: '#3B82F6' },
+  never: { emoji: '⚫', label: 'Nunca contatado', dot: '#9CA3AF' },
+};
+const TEMP_CHIPS = [
+  { key: null, label: 'Todos' },
+  { key: 'hot', label: '🔥 Quentes' },
+  { key: 'warm', label: '🟡 Mornos' },
+  { key: 'cold', label: '🔵 Frios' },
+  { key: 'never', label: '⚫ Nunca' },
+];
+
+// "Como se conheceram".
+const ACQUAINTANCE_META = {
+  online_research: { emoji: '🔍', label: 'Pesquisa online' },
+  event:           { emoji: '🎤', label: 'Evento/conferência' },
+  referral:        { emoji: '👥', label: 'Indicação' },
+  colleague:       { emoji: '🤝', label: 'Colega/colaborador' },
+  ex_supervisor:   { emoji: '👨‍🏫', label: 'Ex-orientador' },
+  ex_student:      { emoji: '🎓', label: 'Ex-estudante' },
+  other:           { emoji: '📝', label: 'Outro' },
+};
+const ACQUAINTANCE_ORDER = ['online_research', 'event', 'referral', 'colleague', 'ex_supervisor', 'ex_student', 'other'];
+
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function fmtDateBR(s) {
+  if (!s) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : String(s);
+}
+
 const NETWORKING_AREA = {
   name: 'Networking',
   color: '#0EA5E9',
@@ -88,6 +139,7 @@ export default function NetworkingPage() {
   const [view, setView] = useState('list');
   const [search, setSearch] = useState('');
   const [tagFilter, setTagFilter] = useState(null);
+  const [tempFilter, setTempFilter] = useState(null); // filtro de temperatura (Prompt G)
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editor, setEditor] = useState(null);
@@ -195,6 +247,7 @@ export default function NetworkingPage() {
     const all = people.map((p) => ({ ...p, _kind: 'person' }));
     return all.filter((it) => {
       if (tagFilter && !(it.tags || []).includes(tagFilter)) return false;
+      if (tempFilter && (it.temperature || 'never') !== tempFilter) return false;
       if (q) {
         const roleStr = it.roles
           ? it.roles.map((r) => `${r.role} ${r.institution_name}`).join(' ')
@@ -204,7 +257,7 @@ export default function NetworkingPage() {
       }
       return true;
     });
-  }, [people, search, tagFilter]);
+  }, [people, search, tagFilter, tempFilter]);
 
   const selectedItem = useMemo(() => {
     if (!selected) return null;
@@ -230,6 +283,19 @@ export default function NetworkingPage() {
       });
     } catch {
       loadAll(); // reflete o estado real do servidor em caso de falha
+    }
+  };
+
+  // Atualiza campos do contact_professional (acquaintance/referral) — otimista + PUT (Prompt G).
+  const patchProfessional = async (personId, patch) => {
+    setProProfile((m) => ({ ...m, [personId]: { ...(m[personId] || {}), ...patch } }));
+    try {
+      await apiFetch(`/api/market/contacts/${personId}/professional`, {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      });
+    } catch {
+      loadAll();
     }
   };
 
@@ -281,6 +347,18 @@ export default function NetworkingPage() {
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
               <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar pessoas..." className="input pl-8" />
             </div>
+            {/* Filtro de temperatura (Prompt G) */}
+            <div className="mt-2 flex flex-wrap gap-1">
+              {TEMP_CHIPS.map((c) => (
+                <button
+                  key={c.label}
+                  onClick={() => setTempFilter(c.key)}
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium ${tempFilter === c.key ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'}`}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
             {allTags.length > 0 && (
               <div className="mt-2 flex max-h-32 flex-wrap gap-1 overflow-y-auto">
                 {allTags.map((t) => (
@@ -318,7 +396,19 @@ export default function NetworkingPage() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5">
+                      {/* Temperatura do contato (Prompt G) */}
+                      {it._kind === 'person' && (
+                        <span
+                          className="h-2.5 w-2.5 shrink-0 rounded-full"
+                          style={{ background: (TEMP_META[it.temperature] || TEMP_META.never).dot }}
+                          title={`Temperatura: ${(TEMP_META[it.temperature] || TEMP_META.never).label}`}
+                        />
+                      )}
                       <span className="truncate text-sm font-semibold text-ink">{it.name}</span>
+                      {/* Potencial de indicação alto (Prompt G) */}
+                      {it._kind === 'person' && Number(proProfile[it.id]?.referral_score) >= 3 && (
+                        <span className="text-[11px]" title={`Bom potencial de indicação (${proProfile[it.id].referral_score}/5)`}>🔗</span>
+                      )}
                       {it._kind === 'person' && it.lifegame_person_id && (
                         <span className="rounded-full bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">LG</span>
                       )}
@@ -394,6 +484,7 @@ export default function NetworkingPage() {
                 outreachStatus={proStatus[selectedItem.id]}
                 proProfile={proProfile[selectedItem.id] || null}
                 onChangeOutreach={(s) => changeOutreach(selectedItem.id, s)}
+                onPatchProfessional={(patch) => patchProfessional(selectedItem.id, patch)}
                 onViewMarket={() => navigate('/market', { state: { contactId: selectedItem.id } })}
                 onEdit={() => setEditor({ kind: selected.kind, mode: 'edit', payload: { ...selectedItem } })}
                 onDelete={() => removeItem(selected.kind, selectedItem.id)}
@@ -505,7 +596,172 @@ function RelevanceStars({ label, value }) {
   );
 }
 
-function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, proProfile, onChangeOutreach, onViewMarket, onEdit, onDelete, onReloadConnections }) {
+// --- Prompt G: seções de enriquecimento de contato -----------------------
+
+// "Como se conheceram" — seletor de contexto + notas (auto-save no blur).
+function AcquaintanceSection({ profile, onPatch }) {
+  const [ctx, setCtx] = useState(profile.acquaintance_context || '');
+  const [notes, setNotes] = useState(profile.acquaintance_notes || '');
+  useEffect(() => {
+    setCtx(profile.acquaintance_context || '');
+    setNotes(profile.acquaintance_notes || '');
+  }, [profile.person_id]);
+  const chooseCtx = (v) => { const nv = ctx === v ? '' : v; setCtx(nv); onPatch && onPatch({ acquaintance_context: nv }); };
+  return (
+    <div>
+      <p className="mb-1.5 text-xs font-semibold uppercase text-muted">Como se conheceram</p>
+      <div className="flex flex-wrap gap-1.5">
+        {ACQUAINTANCE_ORDER.map((k) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => chooseCtx(k)}
+            className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition ${ctx === k ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'}`}
+          >
+            {ACQUAINTANCE_META[k].emoji} {ACQUAINTANCE_META[k].label}
+          </button>
+        ))}
+      </div>
+      <textarea
+        rows={2}
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        onBlur={() => onPatch && onPatch({ acquaintance_notes: notes })}
+        placeholder={ctx === 'referral' ? 'Indicado por quem?' : 'Ex.: "Conheci na conferência de energia H2 2025"'}
+        className="input mt-2 resize-y"
+      />
+    </div>
+  );
+}
+
+// "Potencial de indicação" — slider de 0-5 estrelas + notas (auto-save no blur).
+function ReferralSection({ profile, onPatch }) {
+  const [notes, setNotes] = useState(profile.referral_potential || '');
+  useEffect(() => { setNotes(profile.referral_potential || ''); }, [profile.person_id]);
+  const score = Number(profile.referral_score) || 0;
+  return (
+    <div>
+      <p className="mb-1.5 text-xs font-semibold uppercase text-muted">Potencial de indicação</p>
+      <div className="flex items-center gap-1">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button key={n} type="button" onClick={() => onPatch && onPatch({ referral_score: score === n ? 0 : n })} title={`${n}/5`}>
+            <Star className={`h-5 w-5 ${n <= score ? 'fill-amber-400 text-amber-400' : 'text-muted opacity-40'}`} />
+          </button>
+        ))}
+        <span className="ml-2 text-xs text-ink2">{score}/5</span>
+      </div>
+      <input
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        onBlur={() => onPatch && onPatch({ referral_potential: notes })}
+        placeholder="Pode me indicar para… (ex.: cargo, projeto, pessoa)"
+        className="input mt-2"
+      />
+    </div>
+  );
+}
+
+// Histórico de interações estruturado — lista + formulário inline + exclusão.
+const EMPTY_INTERACTION = { interaction_type: 'email_sent', date: '', summary: '', outcome: '', next_step: '', next_step_date: '' };
+function InteractionsSection({ personId }) {
+  const [list, setList] = useState([]);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ ...EMPTY_INTERACTION, date: todayISO() });
+  const [saving, setSaving] = useState(false);
+
+  const load = () => apiFetch(`/api/network/people/${personId}/interactions`)
+    .then((r) => setList(Array.isArray(r) ? r : []))
+    .catch(() => setList([]));
+  useEffect(() => {
+    setAdding(false);
+    setForm({ ...EMPTY_INTERACTION, date: todayISO() });
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [personId]);
+
+  const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+  const save = async () => {
+    setSaving(true);
+    try {
+      await apiFetch(`/api/network/people/${personId}/interactions`, { method: 'POST', body: JSON.stringify(form) });
+      setForm({ ...EMPTY_INTERACTION, date: todayISO() });
+      setAdding(false);
+      load();
+    } catch { /* silencioso — mantém o formulário aberto */ } finally { setSaving(false); }
+  };
+  const del = async (id) => {
+    await apiFetch(`/api/network/people/${personId}/interactions/${id}`, { method: 'DELETE' }).catch(() => {});
+    load();
+  };
+
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between">
+        <p className="text-xs font-semibold uppercase text-muted">Histórico de interações</p>
+        <button type="button" onClick={() => setAdding((v) => !v)} className="flex items-center gap-1 text-xs font-medium text-accent hover:underline">
+          <Plus className="h-3.5 w-3.5" /> Registrar
+        </button>
+      </div>
+
+      {adding && (
+        <div className="mb-3 space-y-2 rounded-lg border border-line bg-surface2 p-2.5">
+          <div className="grid grid-cols-2 gap-2">
+            <select value={form.interaction_type} onChange={(e) => set({ interaction_type: e.target.value })} className="input">
+              {INTERACTION_ORDER.map((k) => <option key={k} value={k}>{INTERACTION_META[k].emoji} {INTERACTION_META[k].label}</option>)}
+            </select>
+            <input type="date" value={form.date} onChange={(e) => set({ date: e.target.value })} className="input" />
+          </div>
+          <textarea rows={2} value={form.summary} onChange={(e) => set({ summary: e.target.value })} placeholder="O que aconteceu?" className="input resize-y" />
+          <input value={form.outcome} onChange={(e) => set({ outcome: e.target.value })} placeholder="Resultado / resposta" className="input" />
+          <div className="grid grid-cols-2 gap-2">
+            <input value={form.next_step} onChange={(e) => set({ next_step: e.target.value })} placeholder="Próximo passo" className="input" />
+            <input type="date" value={form.next_step_date} onChange={(e) => set({ next_step_date: e.target.value })} className="input" title="Data do próximo passo (agenda lembrete)" />
+          </div>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setAdding(false)} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink2 hover:bg-surface2">Cancelar</button>
+            <button type="button" onClick={save} disabled={saving} className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-60">
+              {saving ? 'Salvando…' : 'Salvar'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {list.length === 0 ? (
+        <p className="text-[11px] text-muted">Nenhuma interação registrada.</p>
+      ) : (
+        <ul className="space-y-2">
+          {list.map((it) => {
+            const meta = INTERACTION_META[it.interaction_type] || INTERACTION_META.other;
+            return (
+              <li key={it.id} className="group rounded-lg border border-line px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${meta.cls}`}>
+                    {meta.emoji} {meta.label}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-muted">{fmtDateBR(it.date)}</span>
+                    <button type="button" onClick={() => del(it.id)} title="Excluir" className="text-muted opacity-0 transition hover:text-danger group-hover:opacity-100">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+                {it.summary && <p className="mt-1 text-sm text-ink">{it.summary}</p>}
+                {it.outcome && <p className="mt-0.5 text-xs italic text-muted">{it.outcome}</p>}
+                {it.next_step && (
+                  <span className="mt-1 inline-block rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">
+                    → {it.next_step}{it.next_step_date ? ` · ${fmtDateBR(it.next_step_date)}` : ''}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, proProfile, onChangeOutreach, onPatchProfessional, onViewMarket, onEdit, onDelete, onReloadConnections }) {
   const isPerson = kind === 'person';
   const linked = useMemo(() => {
     if (!isPerson) return [];
@@ -600,6 +856,19 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
             )}
           </div>
         )}
+
+        {/* Como se conheceram (Prompt G) — só p/ pessoas com perfil no Mercado */}
+        {isPerson && hasPro && (
+          <AcquaintanceSection profile={proProfile || {}} onPatch={onPatchProfessional} />
+        )}
+
+        {/* Potencial de indicação (Prompt G) */}
+        {isPerson && hasPro && (
+          <ReferralSection profile={proProfile || {}} onPatch={onPatchProfessional} />
+        )}
+
+        {/* Histórico de interações (Prompt G) — para qualquer pessoa */}
+        {isPerson && <InteractionsSection personId={item.id} />}
 
         {isPerson && item.roles && item.roles.length > 0 && (
           <div>

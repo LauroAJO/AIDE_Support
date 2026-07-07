@@ -59,8 +59,14 @@ MIGRAÇÃO 0031 (remota):
     wrangler d1 execute aide-db --remote --file=migrations/0031_market_orgdetail.sql
   (npm run db:migrate está hardcoded para 0001 — não aplica a 0031.)
 
-Deploy: v2.4.2  — [PENDENTE: aguardando confirmação sobre migração remota + push]
-Commit: [pendente]
+Migração remota 0031 : APLICADA (wrangler d1 execute --remote, 8 queries, success)
+Deploy: v2.4.2  — OK  (https://5f2c620d.aide-support.pages.dev)
+Commit: 3d2cac2  (push origin main: 1332166..3d2cac2)
+
+NOTA: usei `git add` seletivo (apenas os 8 arquivos desta tarefa) em vez de
+`git add -A`, porque o Terminal 1 estava com WIP não commitado em
+ContactsProView.jsx e MarketPage.jsx — evitei varrer trabalho de outro terminal
+para o commit/push.
 
 ================================
 FIM DO RELATÓRIO

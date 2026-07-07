@@ -30,6 +30,7 @@ function RelevanceIcons({ p }) {
 }
 
 export default function ContactsProView({ initialContactId = null }) {
+  const navigate = useNavigate();
   const contacts = useStore((s) => s.marketContacts);
   const setContacts = useStore((s) => s.setMarketContacts);
 
@@ -139,18 +140,22 @@ export default function ContactsProView({ initialContactId = null }) {
         </div>
       </div>
 
-      {/* RIGHT — detalhe */}
+      {/* RIGHT — redirect para o Networking (o perfil completo vive lá). */}
       <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-line bg-surface p-5">
-        {!selectedId && <div className="flex h-full items-center justify-center text-muted">Selecione um contato</div>}
-        {selectedId && detailLoading && <LoadingSpinner label="Carregando..." />}
-        {selectedId && !detailLoading && detail && (
-          <ContactDetail
-            data={detail}
-            onEdit={() => setEditor(detail)}
-            onRegister={() => setInteractionFor(detail.person.id)}
-            onChangeStatus={(status) => patchProfessional(detail.person.id, { outreach_status: status })}
-            onChangeRelevance={(field, val) => patchProfessional(detail.person.id, { [field]: val })}
-          />
+        {!selectedId ? (
+          <div className="flex h-full items-center justify-center text-muted">Selecione um contato</div>
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+            <p className="text-sm font-medium text-ink">Ver perfil completo em Networking</p>
+            <button
+              type="button"
+              onClick={() => navigate('/networking', { state: { contactId: selectedId } })}
+              className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-base font-semibold text-white transition hover:bg-accent-hover"
+            >
+              Ver no Networking →
+            </button>
+            <p className="text-xs text-muted">O perfil completo está disponível na aba Networking</p>
+          </div>
         )}
       </div>
 

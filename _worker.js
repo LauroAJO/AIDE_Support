@@ -107,6 +107,13 @@ async function handleAPI(request, env, ctx) {
   // Networking
   if (path === '/api/network/routes') return handleNetworkRoutes(request, env, user);
   if (path === '/api/network/people') return handleNetworkPeople(request, env, user);
+  // Interações de contato (contact_interactions) — antes da rota genérica de pessoa.
+  if (path.match(/^\/api\/network\/people\/[^/]+\/interactions$/)) {
+    return handleContactInteractions(request, env, user, path.split('/')[4]);
+  }
+  if (path.match(/^\/api\/network\/people\/[^/]+\/interactions\/[^/]+$/)) {
+    return handleContactInteractionItem(request, env, user, path.split('/')[4], path.split('/')[6]);
+  }
   if (path.startsWith('/api/network/people/')) return handleNetworkPersonItem(request, env, user, path.split('/')[4]);
   if (path === '/api/network/institutions') return handleNetworkInstitutions(request, env, user);
   if (path.startsWith('/api/network/institutions/')) return handleNetworkInstitutionItem(request, env, user, path.split('/')[4]);
@@ -5404,6 +5411,109 @@ async function handleNetworkPersonItem(request, env, user, id) {
   return json({ error: 'Método não permitido' }, 405);
 }
 
+// ---------------------------------------------------------------------------
+// Interações de contato (contact_interactions) — Prompt G
+// ---------------------------------------------------------------------------
+const INTERACTION_TYPES_VALID = [
+  'email_sent', 'email_received', 'linkedin_connected', 'linkedin_message',
+  'meeting', 'coffee_chat', 'paper_mentioned', 'event', 'other',
+];
+
+async function handleContactInteractions(request, env, user, personId) {
+  if (!personId) return json({ error: 'ID ausente' }, 400);
+
+  if (request.method === 'GET') {
+    if (!requirePermission(user, 'networking', 'view')) return json([]);
+    try {
+      const { results } = await env.DB.prepare(
+        'SELECT * FROM contact_interactions WHERE person_id = ? ORDER BY date DESC, created_at DESC'
+      ).bind(personId).all();
+      return json(results || []);
+    } catch { return json([]); }
+  }
+
+  if (request.method === 'POST') {
+    if (!canDo(user.granular, 'networking', 'edit_contacts')) {
+      return json({ error: 'Sem permissão para editar contatos' }, 403);
+    }
+    const body = (await readJson(request)) || {};
+    const type = INTERACTION_TYPES_VALID.includes(body.interaction_type) ? body.interaction_type : 'other';
+    const date = String(body.date || '').trim() || new Date().toISOString().slice(0, 10);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO contact_interactions
+          (id, person_id, interaction_type, date, summary, outcome, next_step, next_step_date, created_by, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, personId, type, date, body.summary || '', body.outcome || '',
+        body.next_step || '', body.next_step_date || '', user.id, now
+      ).run();
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/no such table/i.test(msg)) {
+        return json({ error: 'Tabela contact_interactions não existe — aplique migrations/0031_contact_enrichment.sql' }, 503);
+      }
+      return json({ error: 'Falha ao registrar interação', detail: msg }, 500);
+    }
+    // Se houver next_step_date, agenda um follow-up (notificação) para o owner.
+    // scheduled_notifications não tem coluna `type`; o contexto vai no title/body.
+    if (body.next_step_date) {
+      try {
+        const owner = await env.DB.prepare("SELECT id FROM users WHERE role = 'owner' LIMIT 1").first();
+        const person = await env.DB.prepare('SELECT name FROM network_people WHERE id = ?').bind(personId).first();
+        const sendAt = Math.floor(new Date(`${body.next_step_date}T09:00:00`).getTime() / 1000);
+        if (owner && owner.id && Number.isFinite(sendAt) && sendAt > 0) {
+          await env.DB.prepare(
+            `INSERT INTO scheduled_notifications (id, from_user_id, to_user_id, title, body, task_id, project_id, send_at, sent, created_at)
+             VALUES (?,?,?,?,?,?,?,?,0,?)`
+          ).bind(
+            crypto.randomUUID(), user.id, owner.id,
+            `Follow-up: ${person ? person.name : 'contato'}`, body.next_step || '',
+            null, null, sendAt, now
+          ).run();
+        }
+      } catch { /* best-effort — não bloqueia a interação */ }
+    }
+    const row = await env.DB.prepare('SELECT * FROM contact_interactions WHERE id = ?').bind(id).first();
+    return json(row, 201);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleContactInteractionItem(request, env, user, personId, intId) {
+  if (!personId || !intId) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  if (!canDo(user.granular, 'networking', 'edit_contacts')) {
+    return json({ error: 'Sem permissão para editar contatos' }, 403);
+  }
+  await env.DB.prepare('DELETE FROM contact_interactions WHERE id = ? AND person_id = ?')
+    .bind(intId, personId).run().catch(() => {});
+  return json({ ok: true });
+}
+
+// Temperatura por pessoa a partir da última interação (hot/warm/cold/never).
+async function fetchTemperatures(env, ids) {
+  if (!ids.length) return {};
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    const { results } = await env.DB.prepare(
+      `SELECT person_id, MAX(date) AS last_date FROM contact_interactions
+        WHERE person_id IN (${placeholders}) GROUP BY person_id`
+    ).bind(...ids).all();
+    const map = {};
+    const today = Date.now();
+    for (const r of results || []) {
+      if (!r.last_date) continue;
+      const days = Math.floor((today - new Date(`${r.last_date}T00:00:00`).getTime()) / 86400000);
+      map[r.person_id] = days <= 30 ? 'hot' : days <= 90 ? 'warm' : 'cold';
+    }
+    return map;
+  } catch { return {}; }
+}
+
 // DEPRECADO (consolidação v2.4): network_institutions foi consolidada em
 // market_organizations. Os handlers são mantidos (não removidos) e respondem 301
 // apontando para /api/market/organizations, para não quebrar clientes antigos.
@@ -6001,22 +6111,26 @@ async function handleMarketContactProfessional(request, env, user, personId) {
         `INSERT INTO contact_professional
           (person_id, organization_id, outreach_status, outreach_channel, last_contact_date,
            next_action, next_action_date, relevance_for_phd, relevance_for_job, relevance_for_spinoff,
-           interaction_history, confirmed_email, confirmed_linkedin, notes, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+           interaction_history, confirmed_email, confirmed_linkedin, notes,
+           acquaintance_context, acquaintance_notes, referral_potential, referral_score, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).bind(
         personId, body.organization_id || null, body.outreach_status || 'not_contacted',
         body.outreach_channel || '', body.last_contact_date || '', body.next_action || '',
         body.next_action_date || '', Number(body.relevance_for_phd) || 0,
         Number(body.relevance_for_job) || 0, Number(body.relevance_for_spinoff) || 0,
         JSON.stringify(history), body.confirmed_email || '', body.confirmed_linkedin || '',
-        body.notes || '', now
+        body.notes || '',
+        body.acquaintance_context || '', body.acquaintance_notes || '',
+        body.referral_potential || '', Number(body.referral_score) || 0, now
       ).run();
     } else {
       await env.DB.prepare(
         `UPDATE contact_professional SET organization_id=?, outreach_status=?, outreach_channel=?,
            last_contact_date=?, next_action=?, next_action_date=?, relevance_for_phd=?,
            relevance_for_job=?, relevance_for_spinoff=?, interaction_history=?, confirmed_email=?,
-           confirmed_linkedin=?, notes=?, updated_at=? WHERE person_id=?`
+           confirmed_linkedin=?, notes=?, acquaintance_context=?, acquaintance_notes=?,
+           referral_potential=?, referral_score=?, updated_at=? WHERE person_id=?`
       ).bind(
         pick('organization_id', existing.organization_id), pick('outreach_status', existing.outreach_status),
         pick('outreach_channel', existing.outreach_channel), pick('last_contact_date', existing.last_contact_date),
@@ -6026,6 +6140,10 @@ async function handleMarketContactProfessional(request, env, user, personId) {
         Number(pick('relevance_for_spinoff', existing.relevance_for_spinoff)) || 0,
         JSON.stringify(history), pick('confirmed_email', existing.confirmed_email),
         pick('confirmed_linkedin', existing.confirmed_linkedin), pick('notes', existing.notes),
+        pick('acquaintance_context', existing.acquaintance_context || ''),
+        pick('acquaintance_notes', existing.acquaintance_notes || ''),
+        pick('referral_potential', existing.referral_potential || ''),
+        Number(pick('referral_score', existing.referral_score)) || 0,
         now, personId
       ).run();
     }
@@ -6855,16 +6973,19 @@ async function fetchConnectionsForPeople(env, peopleIds) {
 async function hydratePeople(env, rows) {
   const people = rows.map(shapeNetworkPerson);
   const ids = people.map((p) => p.id);
-  const [rolesByPerson, linksMap, connsByPerson] = await Promise.all([
+  const [rolesByPerson, linksMap, connsByPerson, tempByPerson] = await Promise.all([
     fetchRolesForPeople(env, ids),
     fetchEntityLinksFor(env, ids, []),
-    fetchConnectionsForPeople(env, ids)
+    fetchConnectionsForPeople(env, ids),
+    fetchTemperatures(env, ids)
   ]);
   return people.map((p) => ({
     ...p,
     roles: rolesByPerson[p.id] || [],
     entity_links: linksMap.byPerson[p.id] || [],
-    connections: connsByPerson[p.id] || []
+    connections: connsByPerson[p.id] || [],
+    // Temperatura do contato pela última interação; 'never' se nenhuma.
+    temperature: tempByPerson[p.id] || 'never'
   }));
 }
 

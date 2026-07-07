@@ -1,0 +1,92 @@
+================================
+AIDE — RELATÓRIO v2.4.1
+Data: 2026-07-07
+================================
+
+Lidos por completo antes de alterar: Layout.jsx, MarketPage.jsx,
+OrganizationsView.jsx, ProjectsView.jsx, NetworkingPage.jsx. Layout.jsx NÃO tinha
+label "Projetos" (o item de nav é "Mercado") → sem mudança lá. Todo texto em PT-BR.
+
+MUDANÇAS:
+
+1. RENAME "Projetos" → "Projetos & Iniciativas" (Mercado)
+   - src/components/market/MarketPage.jsx: label da aba "Projetos" →
+     "Projetos & Iniciativas" (TABS). (chave 'projects' e rota inalteradas)
+   - src/components/market/ProjectsView.jsx:
+       * Botão adicionar: "Novo projeto" → "Nova Iniciativa" (~L72)
+       * Vazio: "Nenhum projeto cadastrado." → "Nenhuma iniciativa registrada" (~L75)
+       * "Selecione um projeto" → "Selecione uma iniciativa" (~L106)
+       * Editor: "Novo projeto"/"Editar projeto" → "Nova Iniciativa"/"Editar
+         Iniciativa" (~L241)
+       * LoadingSpinner "Carregando projetos..." → "Carregando iniciativas..." (~L61)
+   - src/components/market/OrganizationsView.jsx (OrgDetail): "Projetos vinculados"
+     → "Iniciativas vinculadas"; "Nenhum projeto vinculado." → "Nenhuma iniciativa
+     vinculada." (~L281-283)
+   - Variáveis, chaves e rotas de API mantidas (só labels de UI).
+
+2. CONTACTS SIMPLIFICADO (detalhe da organização no Mercado)
+   - _worker.js: query de contatos do detalhe da org passou a incluir
+     `cp.outreach_status` (LEFT JOIN contact_professional). (~L5539-5547)
+   - src/components/market/OrganizationsView.jsx (OrgDetail, seção "Contatos
+     vinculados"): cada linha agora é SIMPLES e somente-leitura:
+       * Avatar (inicial), Nome (negrito), Cargo na org (cinza, pequeno),
+         Status de outreach (dot colorido + rótulo, via OUTREACH_LABELS/OUTREACH_DOT),
+         e link "Ver no Networking →" (navega /networking com contactId).
+       * Mantido o botão "Adicionar Contato" (vincula network_people existente à org).
+       * Não havia editor inline de contato nem botão "editar detalhes" nessa seção,
+         então nada de edição a remover aqui (o perfil completo vive no Networking).
+   - Import: adicionado OUTREACH_LABELS de marketShared; const OUTREACH_DOT local.
+     (O ícone Users ficou sem uso no arquivo — inofensivo, não removido.)
+
+3. DEAD CODE REMOVIDO (NetworkingPage.jsx) — após grep 'institution':
+   Relatório dead vs live ANTES da remoção:
+     REMOVIDO (morto): emptyInstitution() (sem chamador após remoção do "+ Instituição");
+       Chip() (usado só pelos chips de filtro removidos); estado filter/setFilter
+       (não usado — o .filter() da lista é Array.filter).
+     MANTIDO (vivo/ referenciado): institutions (agora = market_organizations, alimenta
+       o seletor de organização das funções); INSTITUTION_TYPES (refs em 342/546/1222);
+       institutionStrengthColor (ref no mapa); institution_name/id nas funções.
+     MORTO-mas-mantido (fora da lista do prompt, evita risco): ramo kind==='institution'
+       do NetworkEditor; código de nós de instituição do mapa (recebe institutions=[]).
+     shapeInstitution: fica em _worker.js (não neste arquivo).
+   → Nenhuma funcionalidade viva removida.
+
+4. ÇANAN ACAR — vínculo com UT
+   STATUS: A função NÃO tinha sido apagada pela migração 0030 — a linha
+   sobreviveu (id a32e1f4e-..., "Assistant Professor", institution_name "University
+   of Twente"), mas com institution_id = NULL (link perdido). Por isso, em vez de
+   INSERT (que criaria uma função DUPLICADA), fiz UPDATE do vínculo:
+     UPDATE person_roles SET institution_id='cc4bdd0c-6a50-490e-8adb-91e4594173d8'
+       WHERE id='a32e1f4e-0fde-43f8-baa7-548b76a05d6e';
+   IDs (do remoto): Çanan person_id = 57ad75c3-165b-4bb3-9d78-fc000d941829 ;
+     UT market_org id = cc4bdd0c-6a50-490e-8adb-91e4594173d8.
+   Verificado: institution_id = cc4bdd0c e o JOIN em market_organizations resolve
+   para "University of Twente". Link recriado, sem duplicata.
+
+VERIFICAÇÃO:
+  npm run build           : OK (0 erros; "✓ built in 3.67s").
+  node --check _worker.js : OK (WORKER_OK).
+  Deploy                  : https://666a92fe.aide-support.pages.dev
+                            (produção: https://aide-support.pages.dev)
+  Commit                  : 1332166b7742356602340d09b8e8024ab2c3e9bf
+                            ("v2.4.1 — Projetos & Iniciativas, contacts simplified, cleanup")
+  Push                    : origin main  c341ab5..1332166
+  Versão                  : src/version.js → 2.4.1
+
+DESVIOS:
+  D1) Change 4: usei UPDATE em vez de INSERT — a função já existia (com
+      institution_id NULL); INSERT criaria duplicata. UPDATE recria o vínculo
+      corretamente.
+  D2) Change 2: a seção de contatos do detalhe da org já era uma lista (não um
+      editor inline), então não havia edição/relevância/histórico a remover ali;
+      apliquei o formato-alvo (linha simples + dot de outreach + "Ver no
+      Networking →"). A sub-aba "Contatos" (ContactsProView), que tem o editor
+      completo, NÃO foi alterada (não nomeada; remover seu editor violaria "never
+      remove functionality"). O perfil completo/edição vive no Networking + na
+      sub-aba Contatos.
+  D3) Botão "Adicionar Contato" mantido com esse rótulo (o prompt chama de
+      "Vincular Contato" — mesma função: vincula pessoa existente à org).
+
+================================
+FIM DO RELATÓRIO
+================================

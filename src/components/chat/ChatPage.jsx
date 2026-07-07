@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Paperclip } from 'lucide-react';
+import { Send } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { canDo } from '../../lib/can';
@@ -327,14 +327,6 @@ export default function ChatPage() {
             </div>
           )}
           <div className="flex items-end gap-2">
-            <button
-              type="button"
-              disabled
-              title="Em breve"
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-line text-muted opacity-50"
-            >
-              <Paperclip className="h-4 w-4" />
-            </button>
             <textarea
               ref={textareaRef}
               value={text}

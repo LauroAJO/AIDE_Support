@@ -1,0 +1,109 @@
+================================
+AIDE — RELATÓRIO PROMPT 4
+Planning Consolidação
+Data: 2026-07-07
+================================
+
+Pré-requisito: relatorios/auditoria_reuniao_2026-07-03.txt (seção 8) lido antes de
+qualquer alteração. PlanningPage.jsx lido por completo antes de modificar. Todo
+texto de UI em PT-BR. Nenhuma funcionalidade existente foi removida. NÃO houve
+deploy. (Único arquivo alterado: src/components/planning/PlanningPage.jsx.)
+
+DIAGNÓSTICO (do que já existia):
+  - O bloco colapsável do topo "Visão Estratégica — 4 Semanas" JÁ continha os três
+    elementos: grade de 4 semanas, Meta Estratégica do Mês + Resultados-chave, e
+    Oportunidades com deadline. Ou seja, A/B/C já viviam num único bloco — não
+    havia versões "standalone" duplicadas desses três a remover.
+  - A ÚNICA sobreposição era de NOME: o card "Níveis estratégicos" da coluna
+    direita (campos short_term/tactical/strategic do week_plan) usava a palavra
+    "estratégico", colidindo com a Visão Estratégica (mensal). Resolvido via
+    relabel (Change 2).
+  - PlanningPage NÃO renderiza blocos de disponibilidade (só "Horas por Área", que
+    é horas RASTREADAS). Logo Change 3 = não aplicável.
+
+
+MUDANÇAS IMPLEMENTADAS:
+
+1. BLOCOS ESTRATÉGICOS CONSOLIDADOS  (src/components/planning/PlanningPage.jsx)
+   - Título do bloco: "Visão Estratégica — 4 Semanas" → "Visão Estratégica"
+     (linha 335).
+   - Toggle persistido em localStorage 'aide-strategic-open', começa fechado
+     (estado linhas 37-40; helper toggleStrat linhas 41-47; onClick do cabeçalho
+     usa toggleStrat, linha ~327). Antes era só useState(false) sem persistência.
+   - Conteúdo reorganizado em TRÊS sub-seções claramente rotuladas, na ordem A→B→C
+     (bloco linhas 325-435):
+       * Sub-seção A "Meta do Mês" (linhas 342-382): "Meta estratégica do mês"
+         (strategic_goal) + "Resultados-chave (até 5)" (key_results) — do
+         month_plans (saveMonth / PUT /api/planning/month/:id), lógica preservada.
+       * Sub-seção B "Próximas 4 Semanas" (linhas 384-401): a grade de 4 cards
+         (weekBlocks) — range + contagem de tarefas; semana atual destacada em
+         indigo (bg-accent), como antes.
+       * Sub-seção C "Prazos de Oportunidades" (linhas 403-432): oportunidades de
+         carreira (deadlineOpps) com prazo nos próximos 28 dias, status ∉
+         (closed, rejected), ordenadas por deadline ASC (já garantido em
+         deadlineOpps). Cores AJUSTADAS para 3 faixas: vermelho < 7 dias (inclui
+         atrasados), âmbar 7–14, indigo 14–28. Vazio → "Nenhum prazo nas próximas
+         4 semanas".
+
+2. LABELS SEMANAIS CLARIFICADOS  (src/components/planning/PlanningPage.jsx)
+   - Card da coluna direita: "Níveis estratégicos" → "Níveis de Planejamento
+     (Semanal)" (linha 572).
+   - Campo horizonte longo: "🏔 Estratégico (próximos 3 meses)" → "🏔 Longo prazo
+     (próximos 3 meses)" (STRATEGIC_FIELDS, linha 17; comentário explicativo
+     linhas 12-13). Chaves de dados (short_term/tactical/strategic) INALTERADAS —
+     só o texto exibido mudou; o save no week_plan continua igual.
+   - Hierarquia conceitual agora legível:
+       Visão Estratégica (mensal/4 semanas, colapsável, topo)
+       Planejamento Semanal (h1 "Planejamento" + "Semana de …", conteúdo principal)
+       Dia a dia (grade diária dentro da semana)
+   - Observação: o "week navigation header" em si não continha nenhuma label com
+     "estratégico" (dizia "Planejamento" e "Semana de …"), então não havia o que
+     trocar ali; as únicas ocorrências de "estratégico" na área semanal eram as do
+     card acima, já relabeladas.
+
+3. LABELS DE DISPONIBILIDADE
+   - NÃO APLICÁVEL. PlanningPage não exibe blocos de disponibilidade
+     ("Disponibilidade — Alice" / "Planejado — Alice"). O único painel próximo é
+     "Horas por Área" (horas rastreadas, não disponibilidade), cujo rótulo já é
+     claro. Nenhuma alteração feita (ver DESVIOS).
+
+
+DUPLICAÇÕES REMOVIDAS:
+  - Nenhuma duplicação REAL de A/B/C existia para remover: os três blocos já
+    estavam juntos no único bloco colapsável do topo. A ação foi CONSOLIDAR a
+    apresentação (título único "Visão Estratégica" + 3 sub-seções rotuladas), não
+    apagar elementos repetidos.
+  - A sobreposição de NOMENCLATURA (card semanal "Níveis estratégicos" vs. Visão
+    Estratégica mensal) foi eliminada por relabel, não por remoção — o card semanal
+    é um recurso distinto (níveis do week_plan) e foi PRESERVADO, apenas renomeado.
+
+
+VERIFICAÇÃO:
+  npm run build           : OK  (0 erros; 1580 módulos; "✓ built in 3.42s";
+                                 postbuild copiou _worker.js → dist/_worker.js).
+                                 Único aviso é o pré-existente de tamanho de chunk
+                                 (>500 kB) — não é erro.
+  node --check _worker.js : OK  (retornou WORKER_OK). Nota: _worker.js não foi
+                                 alterado neste prompt; verificado por garantia.
+
+
+PENDÊNCIAS / DESVIOS:
+  D1) CHANGE 3 (disponibilidade) NÃO APLICÁVEL: PlanningPage não tem blocos de
+      disponibilidade. Se a intenção for exibi-los aqui (ex.: "Disponibilidade —
+      Alice"/"Planejado — Alice", que existem noutras telas via
+      weekly_availability/daily_work_schedule), isso seria uma FUNCIONALIDADE NOVA,
+      fora do escopo de "consolidação". Não implementado para não inventar recurso.
+  D2) CHANGE 1 "remover duplicatas": não havia duplicatas reais de A/B/C (já
+      estavam num só bloco). Consolidei a apresentação; o card semanal "Níveis de
+      Planejamento" foi mantido (relabelado), pois é dado distinto e o Change 2
+      pede relabel, não remoção.
+  D3) Rótulo do campo longo prazo: troquei "Estratégico (3 meses)" por "Longo prazo
+      (3 meses)" para remover a palavra "estratégico" da área semanal, conforme
+      Change 2. O horizonte/semântica é o mesmo; a chave de dados 'strategic'
+      permanece.
+
+  NENHUM deploy foi feito — aguardando aprovação.
+
+================================
+FIM DO RELATÓRIO
+================================

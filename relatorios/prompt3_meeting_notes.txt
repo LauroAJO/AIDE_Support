@@ -1,0 +1,119 @@
+================================
+AIDE — RELATÓRIO PROMPT 3
+Meeting Notes para D1
+Data: 2026-07-07
+================================
+
+Pré-requisito: relatorios/auditoria_reuniao_2026-07-03.txt (seção 7) lido antes de
+qualquer alteração. Todo texto de UI em PT-BR. Nenhuma funcionalidade existente foi
+removida (a autosave localStorage foi PRESERVADA como fallback offline e a lógica
+de timer/pauta/tarefas ficou intacta). NÃO houve deploy.
+
+
+MUDANÇAS IMPLEMENTADAS:
+
+1. D1 SYNC PARA NOTAS
+   - migrations/0028_meeting_notes.sql  (NOVO ARQUIVO)
+       * Tabela meeting_notes exatamente como especificado (id, meeting_date,
+         agenda, notes, created_by, updated_by, created_at, updated_at,
+         UNIQUE(meeting_date)) + índice idx_meeting_notes_date.
+       * ATENÇÃO: numerada 0028, não 0027 — 0027_hub_items.sql já existe. Mesmo
+         padrão de renumeração documentado no cabeçalho do arquivo.
+   - _worker.js
+       * Router: if (path === '/api/meeting/notes') → handleMeetingNotes (linha 219).
+       * handleMeetingNotes (linhas 4872-4914):
+           GET  /api/meeting/notes?date=YYYY-MM-DD → registro ou
+                { id:null, meeting_date, agenda:'', notes:'' } se não existir.
+           PUT  /api/meeting/notes { date, agenda?, notes? } → INSERT OR REPLACE
+                por meeting_date; updated_by = user.id; updated_at = unixepoch();
+                patch parcial preserva o campo ausente; retorna o registro salvo.
+           Qualquer usuário autenticado (a rota já passou pelo gate de sessão).
+   - src/store.js
+       * meetingDate (YYYY-MM-DD de hoje) — linhas 51-54.
+       * setMeetingDate — linha 136.
+   - src/components/meeting/MeetingPage.jsx (reescrito)
+       * On mount / troca de data: GET D1 → se vazio, fallback localStorage e, se
+         houver dado legado (data nos últimos 7 dias), migra p/ D1 + toast
+         "Notas anteriores migradas para a nuvem" (efeito de carga ~linhas 268-311).
+       * On change: localStorage GRAVADO a cada tecla (fallback offline) + PUT D1
+         com debounce de 1500ms (onChangeField ~linhas 258-272; flushPending
+         ~linhas 246-256).
+       * Indicador de save (componente SaveIndicator ~linhas 79-88):
+           salvando → "Salvando..." (cinza)
+           salvo    → "Salvo na nuvem ✓" (verde)
+           erro     → "Erro ao salvar — dados locais preservados" (âmbar)
+       * Rótulo enganoso removido: "Salvo automaticamente por data" →
+         "Sincronizado entre dispositivos • Salvo por data".
+       * flush ao desmontar e ao trocar de data (não perde a última edição).
+
+2. NAVEGAÇÃO POR DIA
+   - src/components/meeting/MeetingPage.jsx
+       * Cabeçalho da seção de notas: "← Anterior" / data "Quinta, 03 Jul 2026" /
+         "Próximo →" (desabilitado se hoje ou futuro) / "Hoje" (aparece quando não
+         é hoje). JSX ~linhas 452-484.
+       * Cada dia carrega do D1 (ou estado vazio). Datas com mais de 7 dias ficam
+         SOMENTE LEITURA com banner "Nota de DD/MM/AAAA — somente leitura (mais de
+         7 dias)"; hoje + últimos 7 dias são editáveis (readOnly/editable
+         ~linhas 227-231; banner ~linhas 487-491).
+       * Store: meetingDate + setMeetingDate (ver item 1).
+
+3. LINK PARA NOTAS
+   - src/components/meeting/MeetingPage.jsx
+       * Botão "Salvar como Nota" (ícone FileText) abaixo dos textareas
+         (~linhas 519-528). onClick → POST /api/notes com
+         title "Reunião — DD/MM/YYYY", body = agenda + "\n\n---\n\n" + notes,
+         tags ["reunião"] (saveAsFormalNote ~linhas 425-446).
+       * Toast "Nota criada" com link "Ver em Notas" → navigate('/notes')
+         (toast render ~linhas 640-655).
+
+
+MIGRAÇÃO:
+  Arquivo: migrations/0028_meeting_notes.sql   (0027 já era hub_items)
+  Local:   APLICADA e verificada.
+           Comando usado (o script npm db:migrate aponta fixo p/ 0001, então
+           apliquei o arquivo diretamente):
+             npx wrangler d1 execute aide-db --local --file=migrations/0028_meeting_notes.sql
+           Resultado: "🚣 2 commands executed successfully" (CREATE TABLE + INDEX).
+           Verificação: SELECT em sqlite_master retornou a tabela meeting_notes.
+  Remota:  PENDENTE (comando abaixo).
+
+
+VERIFICAÇÃO:
+  npm run build           : OK  (0 erros; 1580 módulos; "✓ built in 3.87s";
+                                 postbuild copiou _worker.js → dist/_worker.js).
+                                 Único aviso é o pré-existente de tamanho de chunk
+                                 (>500 kB) — não é erro.
+  node --check _worker.js : OK  (retornou WORKER_OK).
+
+
+COMANDO MIGRAÇÃO REMOTA (rodar na aprovação, antes/junto do deploy):
+  npx wrangler d1 execute aide-db --remote --file=migrations/0028_meeting_notes.sql
+
+
+PENDÊNCIAS / DESVIOS:
+  D1) NOME DA MIGRAÇÃO: usei 0028_meeting_notes.sql (o prompt pedia 0027, mas
+      0027_hub_items.sql já existe). Conteúdo do CREATE TABLE idêntico ao pedido.
+  D2) SCRIPT db:migrate: o package.json tem "db:migrate" fixo em
+      --file=migrations/0001_initial.sql, então `npm run db:migrate` NÃO aplicaria
+      a nova migração. Apliquei via wrangler apontando para o arquivo 0028 (local,
+      offline, sem auth). Não alterei o package.json (fora do escopo).
+  D3) COMPONENTE AutosaveTextarea REMOVIDO do MeetingPage: era usado só pela pauta
+      e notas, e foi substituído por textareas controlados com sync D1. A
+      funcionalidade de autosave foi PRESERVADA e melhorada — localStorage segue
+      sendo gravado a cada tecla como fallback offline; o D1 é o novo destino
+      primário. Nada mais dependia desse componente.
+  D4) SALVAMENTO EM localStorage a cada tecla (síncrono) + PUT D1 com debounce
+      1500ms. Isso garante que nenhuma edição se perca mesmo ao navegar rápido
+      entre datas ou fechar a aba: o localStorage sempre tem a versão mais recente
+      e a migração-no-load reenvia ao D1 na próxima abertura da data.
+  D5) MIGRAÇÃO REMOTA ainda PENDENTE — sem deploy, conforme instruções. O endpoint
+      /api/meeting/notes só funcionará em produção depois de rodar o comando de
+      migração remota acima (senão o GET/PUT falha por tabela inexistente; o
+      frontend degrada para o fallback localStorage e mostra "Erro ao salvar —
+      dados locais preservados").
+
+  NENHUM deploy foi feito — aguardando aprovação.
+
+================================
+FIM DO RELATÓRIO
+================================

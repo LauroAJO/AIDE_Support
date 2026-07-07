@@ -12,10 +12,15 @@ database_id = "71f9338d-8664-4df1-8384-86ba8c256de9"
 # Cloudflare account and can be re-bound later if needed.
 
 # Secrets (GOOGLE_CLIENT_ID/SECRET, ALLOWED_EMAILS, OWNER_EMAIL, VAPID_PUBLIC_KEY,
-# VAPID_PRIVATE_KEY) are NOT defined here (public repo). They live in the
-# Cloudflare Pages dashboard / `wrangler pages secret put`; local values go in
+# VAPID_PRIVATE_KEY, HUB_API_KEY) are NOT defined here (public repo). They live in
+# the Cloudflare Pages dashboard / `wrangler pages secret put`; local values go in
 # .dev.vars (git-ignored). GOOGLE_REDIRECT_URI is derived from the request
 # origin in production. Only non-sensitive vars belong below.
+#
+# HUB_API_KEY autentica a ingestão externa em POST /api/hub/items (header
+# "Authorization: ApiKey <chave>"). Definir em produção via:
+#   npx wrangler pages secret put HUB_API_KEY
+# (ou, se este worker rodar standalone: npx wrangler secret put HUB_API_KEY)
 
 [vars]
 VAPID_SUBJECT = "mailto:lauro.ajo@gmail.com"

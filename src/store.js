@@ -47,6 +47,11 @@ export const useStore = create((set) => ({
   notifications: [],
   unreadCount: 0,
   monthPlan: null,
+  // Meeting notes — data ativa (YYYY-MM-DD) da navegação por dia na Reunião.
+  meetingDate: (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  })(),
 
   // Phase 2 — alerts, payment, reports, personal data
   alertRules: [],
@@ -128,6 +133,7 @@ export const useStore = create((set) => ({
   setNotifications: (notifications) => set({ notifications }),
   setUnreadCount: (unreadCount) => set({ unreadCount }),
   setMonthPlan: (monthPlan) => set({ monthPlan }),
+  setMeetingDate: (meetingDate) => set({ meetingDate }),
 
   setAlertRules: (alertRules) => set({ alertRules }),
   setPaymentSummary: (paymentSummary) => set({ paymentSummary }),

@@ -53,6 +53,10 @@ async function handleAPI(request, env, ctx) {
   // Cron run — auth handled inside (owner session OR X-Cron-Secret).
   if (path === '/api/cron/run') return handleCronRun(request, env, ctx);
 
+  // Hub — ingestão externa: NÃO usa sessão, autentica por API key
+  // (Authorization: ApiKey <chave>). Tem de vir antes do gate de sessão.
+  if (path === '/api/hub/items' && method === 'POST') return handleHubIngest(request, env);
+
   // Protected routes — require valid session token
   const user = await getUserFromRequest(request, env);
   if (!user) return json({ error: 'Não autorizado' }, 401);
@@ -212,6 +216,7 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/meeting/start') return handleMeetingStart(request, env, user);
   if (path === '/api/meeting/stop') return handleMeetingStop(request, env, user);
   if (path === '/api/meeting/status') return handleMeetingStatus(request, env, user);
+  if (path === '/api/meeting/notes') return handleMeetingNotes(request, env, user);
 
   // Personal data
   if (path === '/api/profile/personal') return handlePersonalData(request, env, user);
@@ -251,6 +256,11 @@ async function handleAPI(request, env, ctx) {
   if (path.startsWith('/api/career/documents/')) return handleCareerDocumentItem(request, env, user, path.split('/')[4]);
   if (path === '/api/career/goals') return handleCareerGoals(request, env, user);
   if (path.startsWith('/api/career/goals/')) return handleCareerGoalItem(request, env, user, path.split('/')[4]);
+
+  // Hub — leitura protegida por sessão (owner / assistente fixo).
+  // (POST /api/hub/items é tratado acima, antes do gate de sessão.)
+  if (path === '/api/hub/items') return handleHubItems(request, env, user);
+  if (path === '/api/hub/stats') return handleHubStats(request, env, user);
 
   return json({ error: 'Rota não encontrada' }, 404);
 }
@@ -1115,7 +1125,20 @@ async function handleProjectItem(request, env, user, projectId) {
     return json(row);
   }
   if (request.method === 'DELETE') {
-    await env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(projectId).run();
+    // Desvincula frentes e tarefas ANTES de apagar o projeto, evitando
+    // front_id / project_id órfãos. Transação atômica via batch(). A ordem
+    // importa: desvincular tasks.front_id antes de limpar fronts.project_id,
+    // senão a subquery por project_id deixa de casar.
+    try {
+      await env.DB.batch([
+        env.DB.prepare('UPDATE tasks SET front_id = NULL WHERE front_id IN (SELECT id FROM fronts WHERE project_id = ?)').bind(projectId),
+        env.DB.prepare('UPDATE fronts SET project_id = NULL WHERE project_id = ?').bind(projectId),
+        env.DB.prepare('UPDATE tasks SET project_id = NULL WHERE project_id = ?').bind(projectId),
+        env.DB.prepare('DELETE FROM projects WHERE id = ?').bind(projectId),
+      ]);
+    } catch (e) {
+      return json({ error: 'Falha ao excluir projeto — nada foi alterado', detail: String(e) }, 500);
+    }
     return json({ ok: true });
   }
   return json({ error: 'Método não permitido' }, 405);
@@ -4842,6 +4865,47 @@ async function handleMeetingStatus(request, env, user) {
   });
 }
 
+// Notas de reunião persistidas em D1 (meeting_notes, uma linha por data).
+// Qualquer usuário autenticado pode ler/gravar (a rota já passou pelo gate de
+// sessão). GET ?date=YYYY-MM-DD → registro ou vazio; PUT { date, agenda?, notes? }
+// faz upsert por meeting_date.
+async function handleMeetingNotes(request, env, user) {
+  if (request.method === 'GET') {
+    const date = new URL(request.url).searchParams.get('date');
+    if (!date) return json({ error: 'Parâmetro date é obrigatório' }, 400);
+    const row = await env.DB.prepare(
+      'SELECT * FROM meeting_notes WHERE meeting_date = ?'
+    ).bind(date).first();
+    if (!row) return json({ id: null, meeting_date: date, agenda: '', notes: '' });
+    return json(row);
+  }
+
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const date = body.date ? String(body.date).trim() : '';
+    if (!date) return json({ error: 'Campo date é obrigatório' }, 400);
+    const now = Math.floor(Date.now() / 1000);
+    const existing = await env.DB.prepare(
+      'SELECT id, agenda, notes, created_by, created_at FROM meeting_notes WHERE meeting_date = ?'
+    ).bind(date).first();
+    // Mantém valores atuais quando o campo não vem no corpo (patch parcial).
+    const agenda = body.agenda !== undefined ? String(body.agenda) : (existing ? existing.agenda : '');
+    const notes = body.notes !== undefined ? String(body.notes) : (existing ? existing.notes : '');
+    const id = existing ? existing.id : crypto.randomUUID();
+    const createdBy = existing ? (existing.created_by || user.id) : user.id;
+    const createdAt = existing ? (existing.created_at || now) : now;
+    await env.DB.prepare(
+      `INSERT OR REPLACE INTO meeting_notes
+         (id, meeting_date, agenda, notes, created_by, updated_by, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(id, date, agenda, notes, createdBy, user.id, createdAt, now).run();
+    const row = await env.DB.prepare('SELECT * FROM meeting_notes WHERE id = ?').bind(id).first();
+    return json(row);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
 // ---------------------------------------------------------------------------
 // Hierarchy — Áreas > Projetos > Frentes
 // ---------------------------------------------------------------------------
@@ -4909,9 +4973,20 @@ async function handleAreaItem(request, env, user, id) {
     return json(row);
   }
   if (request.method === 'DELETE') {
-    // Detach projects rather than cascade — preserves task history.
-    await env.DB.prepare('UPDATE projects SET area_id = NULL WHERE area_id = ?').bind(id).run().catch(() => {});
-    await env.DB.prepare('DELETE FROM areas WHERE id = ?').bind(id).run();
+    // Desvincula tarefas (front_id + project_id) e projetos ANTES de apagar a
+    // área, evitando referências órfãs. Transação atômica via batch(). A ordem
+    // importa: desvincular as tarefas antes de limpar projects.area_id, senão
+    // as subqueries por area_id deixam de casar.
+    try {
+      await env.DB.batch([
+        env.DB.prepare('UPDATE tasks SET front_id = NULL WHERE front_id IN (SELECT id FROM fronts WHERE project_id IN (SELECT id FROM projects WHERE area_id = ?))').bind(id),
+        env.DB.prepare('UPDATE tasks SET project_id = NULL WHERE project_id IN (SELECT id FROM projects WHERE area_id = ?)').bind(id),
+        env.DB.prepare('UPDATE projects SET area_id = NULL WHERE area_id = ?').bind(id),
+        env.DB.prepare('DELETE FROM areas WHERE id = ?').bind(id),
+      ]);
+    } catch (e) {
+      return json({ error: 'Falha ao excluir área — nada foi alterado', detail: String(e) }, 500);
+    }
     return json({ ok: true });
   }
   return json({ error: 'Método não permitido' }, 405);
@@ -4981,8 +5056,15 @@ async function handleFrontItem(request, env, user, id) {
     return json(row);
   }
   if (request.method === 'DELETE') {
-    await env.DB.prepare('UPDATE tasks SET front_id = NULL WHERE front_id = ?').bind(id).run().catch(() => {});
-    await env.DB.prepare('DELETE FROM fronts WHERE id = ?').bind(id).run();
+    // Desvincula tarefas antes de apagar a frente. Transação atômica via batch().
+    try {
+      await env.DB.batch([
+        env.DB.prepare('UPDATE tasks SET front_id = NULL WHERE front_id = ?').bind(id),
+        env.DB.prepare('DELETE FROM fronts WHERE id = ?').bind(id),
+      ]);
+    } catch (e) {
+      return json({ error: 'Falha ao excluir frente — nada foi alterado', detail: String(e) }, 500);
+    }
     return json({ ok: true });
   }
   return json({ error: 'Método não permitido' }, 405);
@@ -7158,6 +7240,134 @@ async function handleChatMessageItem(request, env, user, id) {
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare('UPDATE chat_messages SET deleted_at = ? WHERE id = ?').bind(now, id).run();
   return json({ ok: true, deleted_at: now });
+}
+
+// ---------------------------------------------------------------------------
+// Hub — ingestão externa (API key) + leitura (sessão owner/assistente fixo)
+// ---------------------------------------------------------------------------
+
+// Autenticação por API key para a ingestão externa. Header esperado:
+//   Authorization: ApiKey <chave>
+// Retorna false (e o chamador devolve 401) se a chave não bater ou se
+// HUB_API_KEY não estiver configurada no ambiente.
+function validateHubApiKey(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  if (!auth.startsWith('ApiKey ')) return false;
+  const key = auth.slice(7);
+  return !!env.HUB_API_KEY && key === env.HUB_API_KEY;
+}
+
+// Mesma regra das áreas Mercado/Carreira: só owner e assistentes fixos leem o Hub.
+function isHubReader(user) {
+  return !!user && (user.role === 'owner' || user.role === 'assistant_fixed' || user.user_type === 'fixed');
+}
+
+// POST /api/hub/items — ingestão em lote. Idempotente via UNIQUE(external_id,
+// project_id) + INSERT OR IGNORE: itens repetidos contam como duplicates.
+// Erros individuais de item são silenciosamente ignorados (status sempre 200).
+async function handleHubIngest(request, env) {
+  if (!validateHubApiKey(request, env)) return json({ error: 'Não autorizado' }, 401);
+
+  const body = (await readJson(request)) || {};
+  if (!Array.isArray(body.items)) {
+    return json({ error: 'Corpo inválido: items deve ser um array' }, 400);
+  }
+
+  let accepted = 0;
+  let duplicates = 0;
+  for (const item of body.items) {
+    if (!item || !item.external_id || !item.project_id || !item.title) continue; // item malformado — ignora
+    const topicos = Array.isArray(item.topicos) ? JSON.stringify(item.topicos) : (item.topicos || null);
+    try {
+      const res = await env.DB.prepare(
+        `INSERT OR IGNORE INTO hub_items
+          (external_id, project_id, title, url, source_name, published_at,
+           relevancia, prioridade, tipo, resumo, topicos, justificativa, collected_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        String(item.external_id),
+        String(item.project_id),
+        String(item.title),
+        item.url || null,
+        item.source_name || null,
+        item.published_at || null,
+        item.relevancia != null ? Number(item.relevancia) : null,
+        item.prioridade || null,
+        item.tipo || null,
+        item.resumo || null,
+        topicos,
+        item.justificativa || null,
+        item.collected_at || null
+      ).run();
+      if (res.meta && res.meta.changes > 0) accepted += 1;
+      else duplicates += 1;
+    } catch {
+      // erro individual de item — ignora (não conta como accepted nem duplicate)
+    }
+  }
+  return json({ accepted, duplicates, total: accepted + duplicates });
+}
+
+// Converte uma linha do banco para o shape do front (topicos → array).
+function shapeHubItem(row) {
+  return { ...row, topicos: parseJsonArray(row.topicos) };
+}
+
+// GET /api/hub/items — lista paginada/filtrada. Sessão obrigatória.
+// Query: project, min_relevancia, limit (50), offset (0),
+//        order_by (received_at | relevancia, default received_at).
+async function handleHubItems(request, env, user) {
+  if (!isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+
+  const url = new URL(request.url);
+  const project = url.searchParams.get('project');
+  const minRel = url.searchParams.get('min_relevancia');
+  const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit'), 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(url.searchParams.get('offset'), 10) || 0, 0);
+  const orderBy = url.searchParams.get('order_by') === 'relevancia' ? 'relevancia' : 'received_at';
+
+  const wh = [];
+  const args = [];
+  if (project && project !== 'todos') { wh.push('project_id = ?'); args.push(project); }
+  if (minRel != null && minRel !== '') { wh.push('relevancia >= ?'); args.push(Number(minRel)); }
+  const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+
+  try {
+    const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS n FROM hub_items ${where}`).bind(...args).first();
+    const { results } = await env.DB.prepare(
+      `SELECT * FROM hub_items ${where} ORDER BY ${orderBy} DESC LIMIT ? OFFSET ?`
+    ).bind(...args, limit, offset).all();
+    return json({ items: (results || []).map(shapeHubItem), total: (totalRow && totalRow.n) || 0 });
+  } catch {
+    return json({ items: [], total: 0 });
+  }
+}
+
+// GET /api/hub/stats — agregados por projeto. Sessão obrigatória.
+async function handleHubStats(request, env, user) {
+  if (!isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT project_id,
+              COUNT(*)        AS count,
+              AVG(relevancia) AS avg_relevancia,
+              MAX(received_at) AS last_received
+         FROM hub_items
+        GROUP BY project_id
+        ORDER BY count DESC`
+    ).all();
+    const byProject = (results || []).map((r) => ({
+      project_id: r.project_id,
+      count: r.count || 0,
+      avg_relevancia: r.avg_relevancia != null ? Number(r.avg_relevancia) : null,
+      last_received: r.last_received || null,
+    }));
+    const total = byProject.reduce((s, p) => s + p.count, 0);
+    return json({ by_project: byProject, total });
+  } catch {
+    return json({ by_project: [], total: 0 });
+  }
 }
 
 function json(data, status = 200) {

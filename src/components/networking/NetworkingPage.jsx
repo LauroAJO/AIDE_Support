@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Network, Plus, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
   Building2, User, Link as LinkIcon, Map, List as ListIcon, Briefcase,
@@ -20,6 +20,21 @@ const INSTITUTION_TYPES = [
 const ENTITY_TYPE_LABELS = {
   area: 'Área', project: 'Projeto', front: 'Frente', task: 'Tarefa',
 };
+
+// Status de outreach (contact_professional) exibido no Networking. Rótulos
+// PT-BR + cor do "dot" por status. Mesmos valores usados no Mercado.
+const OUTREACH_META = {
+  not_contacted:     { label: 'Não contatado',     dot: '#9CA3AF' },
+  contacted:         { label: 'Contatado',         dot: '#3B82F6' },
+  responded:         { label: 'Respondeu',         dot: '#22C55E' },
+  meeting_scheduled: { label: 'Reunião agendada',  dot: '#6366F1' },
+  ongoing:           { label: 'Em andamento',      dot: '#F59E0B' },
+  converted:         { label: 'Convertido',        dot: '#15803D' },
+  inactive:          { label: 'Inativo',           dot: '#EF4444' },
+};
+const OUTREACH_STATUS_ORDER = [
+  'not_contacted', 'contacted', 'responded', 'meeting_scheduled', 'ongoing', 'converted', 'inactive',
+];
 
 const NETWORKING_AREA = {
   name: 'Networking',
@@ -81,7 +96,10 @@ export default function NetworkingPage() {
   const [personRoles, setPersonRoles] = useState([]); // flattened roles for the graph
   // Etapa 6 — IDs de pessoas que possuem perfil profissional (contact_professional).
   const [proIds, setProIds] = useState(() => new Set());
+  // Mapa person_id → outreach_status (do Mercado) p/ exibir no card e no detalhe.
+  const [proStatus, setProStatus] = useState(() => ({}));
   const navigate = useNavigate();
+  const location = useLocation();
 
   const loadAll = async () => {
     try {
@@ -99,6 +117,9 @@ export default function NetworkingPage() {
       setConnections(routes.connections || []);
       setPersonRoles(routes.person_roles || []);
       setProIds(new Set((mc || []).map((c) => c.person_id)));
+      const statusMap = {};
+      (mc || []).forEach((c) => { if (c.person_id) statusMap[c.person_id] = c.outreach_status || 'not_contacted'; });
+      setProStatus(statusMap);
       if (st) setBridgeStatus(st);
       if (ar) setAreas(ar);
       if (pr) setProjects(pr);
@@ -196,6 +217,32 @@ export default function NetworkingPage() {
     loadAll();
   };
 
+  // Altera o status de outreach (contact_professional) — atualização otimista + PUT.
+  const changeOutreach = async (personId, status) => {
+    setProStatus((m) => ({ ...m, [personId]: status }));
+    try {
+      await apiFetch(`/api/market/contacts/${personId}/professional`, {
+        method: 'PUT',
+        body: JSON.stringify({ outreach_status: status }),
+      });
+    } catch {
+      loadAll(); // reflete o estado real do servidor em caso de falha
+    }
+  };
+
+  // Link inverso Mercado → Networking: seleciona a pessoa indicada em
+  // state.contactId assim que os dados terminarem de carregar.
+  useEffect(() => {
+    const cid = location.state?.contactId;
+    if (!cid || loading) return;
+    if (people.some((p) => p.id === cid)) {
+      setView('list');
+      setSelected({ kind: 'person', id: cid });
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state, loading, people]);
+
   if (loading) return <div className="h-full"><LoadingSpinner label="Carregando networking..." /></div>;
 
   return (
@@ -232,7 +279,7 @@ export default function NetworkingPage() {
 
       {view === 'list' ? (
         <div className="mt-3 flex min-h-0 flex-1 gap-3">
-          <div className="flex w-full min-w-0 flex-col md:w-[35%]">
+          <div className="flex w-full min-w-0 min-h-0 flex-col md:w-[35%]">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
               <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar pessoas/instituições..." className="input pl-8" />
@@ -243,7 +290,7 @@ export default function NetworkingPage() {
               <Chip active={filter === 'institutions'} onClick={() => setFilter('institutions')}>Instituições</Chip>
             </div>
             {allTags.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1">
+              <div className="mt-2 flex max-h-32 flex-wrap gap-1 overflow-y-auto">
                 {allTags.map((t) => (
                   <button key={t} onClick={() => setTagFilter(tagFilter === t ? null : t)} className={`rounded-full px-2 py-0.5 text-[11px] ${tagFilter === t ? 'bg-accent text-white' : 'bg-surface2 text-ink2'}`}>
                     #{t}
@@ -278,7 +325,7 @@ export default function NetworkingPage() {
                     {(it.name || '?').trim().charAt(0).toUpperCase()}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="truncate text-sm font-semibold text-ink">{it.name}</span>
                       {it._kind === 'person' && it.lifegame_person_id && (
                         <span className="rounded-full bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">LG</span>
@@ -288,6 +335,13 @@ export default function NetworkingPage() {
                           <Briefcase className="h-2.5 w-2.5" /> Mercado
                         </span>
                       )}
+                      {/* Status de outreach (contact_professional) — só p/ pessoas com perfil no Mercado */}
+                      {it._kind === 'person' && proStatus[it.id] && OUTREACH_META[proStatus[it.id]] && (
+                        <span className="flex items-center gap-1 text-[10px] text-ink2" title="Status de contato (Mercado)">
+                          <span className="h-2 w-2 rounded-full" style={{ background: OUTREACH_META[proStatus[it.id]].dot }} />
+                          {OUTREACH_META[proStatus[it.id]].label}
+                        </span>
+                      )}
                     </div>
                     <p className="truncate text-[11px] text-ink2">
                       {it._kind === 'person'
@@ -295,6 +349,17 @@ export default function NetworkingPage() {
                         : INSTITUTION_TYPES.find(([t]) => t === it.type)?.[1] || 'Instituição'}
                     </p>
                     {it._kind === 'person' && <StrengthDots value={it.connection_strength || 0} />}
+                    {/* Tags no card — no máximo 3 + "+N" (mesmo padrão do Mercado) */}
+                    {(it.tags || []).length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {(it.tags || []).slice(0, 3).map((t) => (
+                          <span key={t} className="rounded-full bg-surface2 px-1.5 py-0.5 text-[9px] text-ink2">#{t}</span>
+                        ))}
+                        {(it.tags || []).length > 3 && (
+                          <span className="rounded-full bg-surface2 px-1.5 py-0.5 text-[9px] text-muted">+{(it.tags || []).length - 3}</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                   {/* Inline actions — sempre visíveis no mobile, no hover no desktop */}
                   <div className="flex shrink-0 flex-col gap-1 opacity-100 transition md:opacity-0 md:group-hover:opacity-100">
@@ -334,6 +399,8 @@ export default function NetworkingPage() {
                 people={people}
                 connections={connections}
                 hasPro={selected.kind === 'person' && proIds.has(selectedItem.id)}
+                outreachStatus={proStatus[selectedItem.id]}
+                onChangeOutreach={(s) => changeOutreach(selectedItem.id, s)}
                 onViewMarket={() => navigate('/market', { state: { contactId: selectedItem.id } })}
                 onEdit={() => setEditor({ kind: selected.kind, mode: 'edit', payload: { ...selectedItem } })}
                 onDelete={() => removeItem(selected.kind, selectedItem.id)}
@@ -443,7 +510,7 @@ function BridgeBadge({ status }) {
   );
 }
 
-function DetailPanel({ item, kind, people, connections, hasPro, onViewMarket, onEdit, onDelete, onReloadConnections }) {
+function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, onChangeOutreach, onViewMarket, onEdit, onDelete, onReloadConnections }) {
   const isPerson = kind === 'person';
   const linked = useMemo(() => {
     if (!isPerson) return [];
@@ -497,6 +564,28 @@ function DetailPanel({ item, kind, people, connections, hasPro, onViewMarket, on
           >
             <Briefcase className="h-4 w-4" /> Ver perfil profissional (Mercado)
           </button>
+        )}
+
+        {/* Status de contato (outreach) — editável; só p/ pessoas com perfil no Mercado */}
+        {isPerson && hasPro && (
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase text-muted">Status de contato</p>
+            <div className="flex items-center gap-2">
+              <span
+                className="h-2.5 w-2.5 shrink-0 rounded-full"
+                style={{ background: (OUTREACH_META[outreachStatus] || OUTREACH_META.not_contacted).dot }}
+              />
+              <select
+                value={outreachStatus || 'not_contacted'}
+                onChange={(e) => onChangeOutreach && onChangeOutreach(e.target.value)}
+                className="input"
+              >
+                {OUTREACH_STATUS_ORDER.map((s) => (
+                  <option key={s} value={s}>{OUTREACH_META[s].label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
         )}
 
         {isPerson && item.roles && item.roles.length > 0 && (

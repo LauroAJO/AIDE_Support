@@ -7,11 +7,14 @@ import { mondayOf, weekDays, addDaysISO, formatDateBR, weekdayLabel, isTodayISO,
 import { formatDuration } from '../../lib/time';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/tasks';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import AreasPage from '../areas/AreasPage';
 
+// Níveis de planejamento SEMANAL (salvos no week_plan). Rotulados como horizontes
+// táticos p/ não colidir com a "Visão Estratégica" (mensal) no topo da página.
 const STRATEGIC_FIELDS = [
   ['short_term', '🎯 Curto prazo (esta semana)'],
   ['tactical', '📋 Tático (próximas 4 semanas)'],
-  ['strategic', '🏔 Estratégico (próximos 3 meses)'],
+  ['strategic', '🏔 Longo prazo (próximos 3 meses)'],
 ];
 
 export default function PlanningPage() {
@@ -31,7 +34,29 @@ export default function PlanningPage() {
   const [addFor, setAddFor] = useState(null); // dayIso or null
   const [search, setSearch] = useState('');
   const [strategic, setStrategic] = useState({ short_term: '', tactical: '', strategic: '' });
-  const [stratOpen, setStratOpen] = useState(false);
+  // Visão Estratégica (colapsável) — estado persistido em localStorage; começa fechada.
+  const [stratOpen, setStratOpen] = useState(() => {
+    try { return localStorage.getItem('aide-strategic-open') === 'true'; } catch { return false; }
+  });
+  const toggleStrat = () => {
+    setStratOpen((v) => {
+      const next = !v;
+      try { localStorage.setItem('aide-strategic-open', String(next)); } catch { /* ignore */ }
+      return next;
+    });
+  };
+  // Seção "Áreas & Projetos" colapsável no topo (movida do menu lateral).
+  // Estado persistido em localStorage; começa fechada.
+  const [areasOpen, setAreasOpen] = useState(() => {
+    try { return localStorage.getItem('aide-areas-open') === 'true'; } catch { return false; }
+  });
+  const toggleAreas = () => {
+    setAreasOpen((v) => {
+      const next = !v;
+      try { localStorage.setItem('aide-areas-open', String(next)); } catch { /* ignore */ }
+      return next;
+    });
+  };
   const [weekBlocks, setWeekBlocks] = useState([]);
   const [monthGoal, setMonthGoal] = useState('');
   const [keyResults, setKeyResults] = useState([]);
@@ -254,6 +279,23 @@ export default function PlanningPage() {
 
   return (
     <div className="space-y-4">
+      {/* Áreas & Projetos — seção colapsável no topo (mesclada do menu Áreas) */}
+      <div style={{ background: '#F3F0EB', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <button
+          type="button"
+          onClick={toggleAreas}
+          className="flex w-full items-center gap-2 text-sm font-bold text-ink"
+        >
+          {areasOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          Áreas &amp; Projetos
+        </button>
+        {areasOpen && (
+          <div className="mt-3">
+            <AreasPage />
+          </div>
+        )}
+      </div>
+
       {/* Week navigation */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-2xl font-bold text-ink">Planejamento</h1>
@@ -280,89 +322,104 @@ export default function PlanningPage() {
         </div>
       </div>
 
-      {/* Strategic 4-week view (collapsible) */}
+      {/* Visão Estratégica (colapsável) — consolida, numa só seção, três blocos:
+          A) Meta do Mês (month_plans), B) Próximas 4 Semanas, C) Prazos de
+          Oportunidades (carreira). Estado do toggle em localStorage. */}
       <div className="rounded-xl border border-line bg-surface">
         <button
-          onClick={() => setStratOpen((v) => !v)}
+          onClick={toggleStrat}
           className="flex w-full items-center justify-between px-4 py-3 text-sm font-bold text-ink"
         >
           <span className="flex items-center gap-2">
             <Target className="h-4 w-4 text-accent" />
-            Visão Estratégica — 4 Semanas
+            Visão Estratégica
           </span>
           <ChevronDown className={`h-4 w-4 transition ${stratOpen ? 'rotate-180' : ''}`} />
         </button>
 
         {stratOpen && (
-          <div className="space-y-4 border-t border-line px-4 py-4">
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {weekBlocks.map((b) => (
-                <div
-                  key={b.weekStart}
-                  className={`rounded-lg border p-3 text-center ${
-                    b.isCurrent ? 'border-transparent bg-accent text-white' : 'border-line bg-base text-ink'
-                  }`}
-                >
-                  <div className="text-xs font-medium">{b.range}</div>
-                  <div className="mt-1 text-lg font-bold">{b.count}</div>
-                  <div className={`text-[10px] ${b.isCurrent ? 'text-white/80' : 'text-muted'}`}>tarefas</div>
-                </div>
-              ))}
-            </div>
-
-            <label className="block">
-              <span className="mb-1 block text-xs font-medium text-ink2">Meta Estratégica do Mês</span>
-              <textarea
-                rows={2}
-                value={monthGoal}
-                onChange={(e) => setMonthGoal(e.target.value)}
-                onBlur={() => monthGoal !== (monthPlan?.strategic_goal || '') && saveMonth({ strategic_goal: monthGoal })}
-                className="input resize-y"
-              />
-            </label>
-
-            <div>
-              <p className="mb-1 text-xs font-medium text-ink2">Resultados-chave (até 5)</p>
-              <ul className="space-y-1">
-                {keyResults.map((kr, idx) => (
-                  <li key={idx} className="flex items-center gap-2 rounded-lg bg-surface2 px-2 py-1.5 text-sm text-ink">
-                    <span className="flex-1">{kr}</span>
-                    <button onClick={() => removeKeyResult(idx)} className="text-muted hover:text-danger">
-                      <X className="h-3.5 w-3.5" />
+          <div className="space-y-5 border-t border-line px-4 py-4">
+            {/* Sub-seção A — Meta do Mês */}
+            <div className="space-y-3">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Meta do Mês</h3>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-ink2">Meta estratégica do mês</span>
+                <textarea
+                  rows={2}
+                  value={monthGoal}
+                  onChange={(e) => setMonthGoal(e.target.value)}
+                  onBlur={() => monthGoal !== (monthPlan?.strategic_goal || '') && saveMonth({ strategic_goal: monthGoal })}
+                  className="input resize-y"
+                />
+              </label>
+              <div>
+                <p className="mb-1 text-xs font-medium text-ink2">Resultados-chave (até 5)</p>
+                <ul className="space-y-1">
+                  {keyResults.map((kr, idx) => (
+                    <li key={idx} className="flex items-center gap-2 rounded-lg bg-surface2 px-2 py-1.5 text-sm text-ink">
+                      <span className="flex-1">{kr}</span>
+                      <button onClick={() => removeKeyResult(idx)} className="text-muted hover:text-danger">
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                {keyResults.length < 5 && (
+                  <div className="mt-1.5 flex gap-2">
+                    <input
+                      value={krInput}
+                      onChange={(e) => setKrInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addKeyResult())}
+                      placeholder="Adicionar resultado-chave"
+                      className="input flex-1"
+                    />
+                    <button onClick={addKeyResult} className="btn-icon">
+                      <Plus className="h-4 w-4" />
                     </button>
-                  </li>
-                ))}
-              </ul>
-              {keyResults.length < 5 && (
-                <div className="mt-1.5 flex gap-2">
-                  <input
-                    value={krInput}
-                    onChange={(e) => setKrInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addKeyResult())}
-                    placeholder="Adicionar resultado-chave"
-                    className="input flex-1"
-                  />
-                  <button onClick={addKeyResult} className="btn-icon">
-                    <Plus className="h-4 w-4" />
-                  </button>
-                </div>
-              )}
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Etapa 6 — Oportunidades de carreira com deadline nas próximas 4 semanas */}
-            <div>
-              <p className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+            {/* Sub-seção B — Próximas 4 Semanas */}
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Próximas 4 Semanas</h3>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {weekBlocks.map((b) => (
+                  <div
+                    key={b.weekStart}
+                    className={`rounded-lg border p-3 text-center ${
+                      b.isCurrent ? 'border-transparent bg-accent text-white' : 'border-line bg-base text-ink'
+                    }`}
+                  >
+                    <div className="text-xs font-medium">{b.range}</div>
+                    <div className="mt-1 text-lg font-bold">{b.count}</div>
+                    <div className={`text-[10px] ${b.isCurrent ? 'text-white/80' : 'text-muted'}`}>tarefas</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Sub-seção C — Prazos de Oportunidades (carreira, próximos 28 dias) */}
+            <div className="space-y-2">
+              <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
                 <Target className="h-3.5 w-3.5 text-accent" />
-                Oportunidades com deadline (4 semanas)
-              </p>
+                Prazos de Oportunidades
+              </h3>
               {deadlineOpps.length === 0 ? (
-                <p className="text-[11px] text-muted">Nenhuma oportunidade com prazo nas próximas 4 semanas.</p>
+                <p className="text-[11px] text-muted">Nenhum prazo nas próximas 4 semanas</p>
               ) : (
                 <ul className="space-y-1.5">
                   {deadlineOpps.map((o) => {
-                    const urgent = o._days !== null && o._days < 0;
-                    const soon = o._days !== null && o._days >= 0 && o._days < 14;
-                    const color = urgent || soon ? 'text-red-600' : (o._days < 28 ? 'text-amber-600' : 'text-ink2');
+                    const d = o._days;
+                    // Cores: vermelho < 7 dias (inclui atrasados), âmbar 7–14, indigo 14–28.
+                    const color = d === null
+                      ? 'text-ink2'
+                      : d < 7
+                        ? 'text-red-600'
+                        : d < 14
+                          ? 'text-amber-600'
+                          : 'text-indigo-600';
                     return (
                       <li key={o.id}>
                         <button
@@ -376,7 +433,7 @@ export default function PlanningPage() {
                           </span>
                           <span className={`shrink-0 text-[11px] font-semibold ${color}`}>
                             {o.deadline}
-                            {o._days !== null && (o._days < 0 ? ` · ${-o._days}d atrás` : ` · ${o._days}d`)}
+                            {d !== null && (d < 0 ? ` · ${-d}d atrás` : ` · ${d}d`)}
                           </span>
                         </button>
                       </li>
@@ -512,7 +569,7 @@ export default function PlanningPage() {
 
 
           <div className="rounded-xl border border-line bg-surface p-4">
-            <p className="mb-2 text-xs font-medium text-ink2">Níveis estratégicos</p>
+            <p className="mb-2 text-xs font-medium text-ink2">Níveis de Planejamento (Semanal)</p>
             <div className="space-y-3">
               {STRATEGIC_FIELDS.map(([key, label]) => (
                 <label key={key} className="block">

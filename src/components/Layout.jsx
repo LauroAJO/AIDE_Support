@@ -12,13 +12,15 @@ import {
   LayoutDashboard,
   Search,
   Video,
-  Layers,
   Network as NetworkIcon,
   MessageSquare,
   Shield,
   Upload,
   Building2,
   Briefcase,
+  Radar,
+  MoreHorizontal,
+  X,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
@@ -40,7 +42,6 @@ const NAV_ITEMS = [
   { to: '/notes',      label: 'Notas',        icon: FileText,      feature: 'notes' },
   { to: '/payment',    label: 'Pagamentos',   icon: CreditCard,    feature: 'payment' },
   { to: '/meeting',    label: 'Reunião',      icon: Video,         feature: 'meeting' },
-  { to: '/areas',      label: 'Áreas',        icon: Layers,        feature: 'areas' },
   { to: '/networking', label: 'Networking',   icon: NetworkIcon,   feature: 'networking' },
   { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread' },
 ];
@@ -65,6 +66,7 @@ export default function Layout({ children }) {
   const navigate = useNavigate();
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const menuRef = useRef(null);
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
@@ -84,7 +86,7 @@ export default function Layout({ children }) {
     ? [
         { to: '/market', label: 'Mercado', icon: Building2 },
         { to: '/career', label: 'Carreira', icon: Briefcase },
-        { to: '/import', label: 'Importar', icon: Upload },
+        { to: '/hub', label: 'Hub', icon: Radar },
       ]
     : [];
   const navItems = [...visibleMain, ...fixedNav, ...visibleOwner];
@@ -94,6 +96,17 @@ export default function Layout({ children }) {
     if (key === 'chatUnread') return chatUnread || 0;
     return 0;
   };
+
+  // Bottom nav (mobile): 4 slots fixos + botão "Mais" que abre um bottom sheet
+  // com o restante dos itens. Respeita as permissões (usa navItems já filtrado).
+  const MOBILE_PRIMARY = ['/tasks', '/planning', '/timer', '/notes'];
+  const primaryNav = MOBILE_PRIMARY
+    .map((to) => navItems.find((it) => it.to === to))
+    .filter(Boolean);
+  const moreNav = navItems.filter((it) => !MOBILE_PRIMARY.includes(it.to));
+  // Badge agregado no botão "Mais" (preserva o indicador de não-lidas do Chat,
+  // que agora fica dentro do bottom sheet no mobile).
+  const moreBadgeCount = moreNav.reduce((sum, it) => sum + (it.badge ? badgeCount(it.badge) : 0), 0);
 
   const handleLogout = () => {
     clearToken();
@@ -187,6 +200,16 @@ export default function Layout({ children }) {
                 >
                   Avisos
                 </button>
+                {(user?.role === 'owner' || user?.user_type === 'fixed') && (
+                  <button
+                    type="button"
+                    onClick={() => go('/import')}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                  >
+                    <Upload className="h-4 w-4" />
+                    Importar Dados
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => go('/settings')}
@@ -255,10 +278,9 @@ export default function Layout({ children }) {
           30-min check only fires once on desktop. */}
       <TimerCheckMonitor />
 
-      {/* Bottom nav (mobile) — horizontally scrolling because v1.10 pushes the
-          count past what fits on a phone (13 items max). */}
-      <nav className="fixed inset-x-0 bottom-0 z-10 flex h-16 items-stretch overflow-x-auto border-t border-line bg-surface md:hidden">
-        {navItems.map((item) => {
+      {/* Bottom nav (mobile) — 5 slots fixos: 4 principais + "Mais". */}
+      <nav className="fixed inset-x-0 bottom-0 z-10 flex h-16 items-stretch border-t border-line bg-surface md:hidden">
+        {primaryNav.map((item) => {
           const Icon = item.icon;
           const count = item.badge ? badgeCount(item.badge) : 0;
           return (
@@ -266,7 +288,7 @@ export default function Layout({ children }) {
               key={item.to}
               to={item.to}
               className={({ isActive }) =>
-                `relative flex min-w-[64px] flex-1 flex-col items-center justify-center gap-1 px-2 text-[10px] transition ${
+                `relative flex flex-1 flex-col items-center justify-center gap-1 px-2 text-[10px] transition ${
                   isActive ? 'text-accent' : 'text-ink2'
                 }`
               }
@@ -281,7 +303,71 @@ export default function Layout({ children }) {
             </NavLink>
           );
         })}
+        <button
+          type="button"
+          onClick={() => setMoreOpen(true)}
+          className="relative flex flex-1 flex-col items-center justify-center gap-1 px-2 text-[10px] text-ink2 transition"
+        >
+          <MoreHorizontal className="h-5 w-5" />
+          Mais
+          {moreBadgeCount > 0 && (
+            <span className="absolute right-2 top-1 rounded-full bg-danger px-1 py-0 text-[9px] font-semibold leading-tight text-white">
+              {moreBadgeCount}
+            </span>
+          )}
+        </button>
       </nav>
+
+      {/* Bottom sheet "Mais" (mobile) — grade com o restante da navegação. */}
+      {moreOpen && (
+        <div
+          className="fixed inset-0 z-20 bg-black/30 md:hidden"
+          onClick={() => setMoreOpen(false)}
+        >
+          <div
+            className="absolute inset-x-0 bottom-0 rounded-t-2xl bg-surface p-4 pb-6 shadow-soft"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-sm font-bold text-ink">Menu</span>
+              <button
+                type="button"
+                onClick={() => setMoreOpen(false)}
+                className="rounded-md p-1 text-ink2 transition hover:bg-surface2"
+                aria-label="Fechar"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {moreNav.map((item) => {
+                const Icon = item.icon;
+                const count = item.badge ? badgeCount(item.badge) : 0;
+                return (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    onClick={() => setMoreOpen(false)}
+                    className={({ isActive }) =>
+                      `relative flex flex-col items-center justify-center gap-1 rounded-lg px-2 py-3 text-center text-xs transition ${
+                        isActive ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+                      }`
+                    }
+                  >
+                    <Icon className="h-6 w-6" />
+                    <span>{item.label}</span>
+                    {count > 0 && (
+                      <span className="absolute right-1 top-1 rounded-full bg-danger px-1 py-0 text-[9px] font-semibold leading-tight text-white">
+                        {count}
+                      </span>
+                    )}
+                  </NavLink>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

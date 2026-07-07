@@ -1,5 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Video, Play, Pause, RotateCcw, ArrowRight, Square, Bell } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Video, Play, Pause, RotateCcw, ArrowRight, Square, Bell, ChevronLeft, ChevronRight, FileText,
+} from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { canDo } from '../../lib/can';
@@ -11,6 +14,39 @@ import TaskModal from '../tasks/TaskModal';
 const MEET_URL = 'https://meet.google.com/xbo-mcvw-reh';
 const MEET_LABEL = 'meet.google.com/xbo-mcvw-reh';
 const MEETING_TASK_TITLE = 'Reunião AIDE';
+
+const WEEKDAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+const MONTHS = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+
+// Chaves de localStorage — MANTIDAS iguais às da versão antiga (só-local) para
+// que a migração para D1 encontre as notas legadas de cada data.
+const agendaKeyFor = (date) => `aide-meeting-agenda-${date}`;
+const notesKeyFor = (date) => `aide-meeting-notes-${date}`;
+
+// "2026-07-03" → "Quinta, 03 Jul 2026"
+function formatMeetingDate(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return `${WEEKDAYS[d.getDay()]}, ${String(d.getDate()).padStart(2, '0')} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+// "2026-07-03" → "03/07/2026"
+function formatDateBRShort(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+// Desloca uma string YYYY-MM-DD por N dias.
+function addDaysStr(dateStr, delta) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  d.setDate(d.getDate() + delta);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// Dias inteiros entre hoje e dateStr (hoje - dateStr). Positivo = passado.
+function daysAgo(dateStr) {
+  const today = new Date(`${getTodayStr()}T00:00:00`).getTime();
+  const d = new Date(`${dateStr}T00:00:00`).getTime();
+  return Math.round((today - d) / 86400000);
+}
 
 // Plays a short beep via WebAudio. No assets needed; bails out silently if the
 // browser blocks audio without a user gesture.
@@ -36,45 +72,14 @@ function playBeep() {
   }
 }
 
-// Textarea that auto-saves to localStorage with a 1s debounce.
-function AutosaveTextarea({ storageKey, placeholder, rows = 6 }) {
-  const [value, setValue] = useState(() => {
-    try {
-      return localStorage.getItem(storageKey) || '';
-    } catch {
-      return '';
-    }
-  });
-  const timerRef = useRef(null);
-
-  useEffect(() => {
-    try {
-      setValue(localStorage.getItem(storageKey) || '');
-    } catch {
-      setValue('');
-    }
-  }, [storageKey]);
-
-  const onChange = (e) => {
-    const next = e.target.value;
-    setValue(next);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      try { localStorage.setItem(storageKey, next); } catch { /* ignore */ }
-    }, 1000);
-  };
-
-  useEffect(() => () => timerRef.current && clearTimeout(timerRef.current), []);
-
-  return (
-    <textarea
-      value={value}
-      onChange={onChange}
-      placeholder={placeholder}
-      rows={rows}
-      className="w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:shadow-[0_0_0_3px_rgba(99,102,241,0.12)]"
-    />
-  );
+// Small inline save indicator for the meeting notes (D1 sync state).
+function SaveIndicator({ state }) {
+  if (state === 'saving') return <span className="text-xs text-muted">Salvando...</span>;
+  if (state === 'saved') return <span className="text-xs font-medium text-emerald-600">Salvo na nuvem ✓</span>;
+  if (state === 'error') {
+    return <span className="text-xs font-medium text-amber-600">Erro ao salvar — dados locais preservados</span>;
+  }
+  return null;
 }
 
 // Local agenda countdown (independent of the meeting timer).
@@ -197,6 +202,7 @@ function AgendaCountdown() {
 }
 
 export default function MeetingPage() {
+  const navigate = useNavigate();
   const tasks = useStore((s) => s.tasks);
   const userGranular = useStore((s) => s.userGranular);
   const setTasks = useStore((s) => s.setTasks);
@@ -207,13 +213,117 @@ export default function MeetingPage() {
   const activeEntry = useStore((s) => s.activeEntry);
   const elapsedSeconds = useStore((s) => s.elapsedSeconds);
   const setActiveEntry = useStore((s) => s.setActiveEntry);
-
-  const today = getTodayStr();
-  const agendaKey = `aide-meeting-agenda-${today}`;
-  const notesKey = `aide-meeting-notes-${today}`;
+  const meetingDate = useStore((s) => s.meetingDate);
+  const setMeetingDate = useStore((s) => s.setMeetingDate);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  // --- Notas de reunião (persistidas em D1) -------------------------------
+  const [form, setForm] = useState({ agenda: '', notes: '' });
+  const [saveState, setSaveState] = useState('idle'); // idle | saving | saved | error
+  const [toast, setToast] = useState(null); // { message, action?: { label, onClick } } | null
+  const [savingAsNote, setSavingAsNote] = useState(false);
+  const formRef = useRef(form);              // último form (evita closures stale)
+  const pendingRef = useRef(null);           // { date, agenda, notes } aguardando D1
+  const saveTimerRef = useRef(null);
+  const toastTimerRef = useRef(null);
+  const loadSeqRef = useRef(0);
+
+  const today = getTodayStr();
+  const isToday = meetingDate === today;
+  const past = daysAgo(meetingDate);
+  const readOnly = past > 7;                  // mais de 7 dias → somente leitura
+  const editable = past >= 0 && past <= 7;    // hoje + últimos 7 dias
+
+  const showToast = useCallback((message, action) => {
+    setToast({ message, action });
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 6000);
+  }, []);
+
+  // Envia ao D1 o que está pendente (carrega a própria data no payload).
+  const flushPending = useCallback(async () => {
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+    const p = pendingRef.current;
+    if (!p) return;
+    pendingRef.current = null;
+    try {
+      await apiFetch('/api/meeting/notes', { method: 'PUT', body: JSON.stringify(p) });
+      setSaveState('saved');
+    } catch {
+      setSaveState('error');
+    }
+  }, []);
+
+  // Digitação: localStorage imediato (fallback offline) + PUT no D1 com debounce.
+  const onChangeField = (field, value) => {
+    const next = { ...formRef.current, [field]: value };
+    formRef.current = next;
+    setForm(next);
+    try {
+      localStorage.setItem(field === 'agenda' ? agendaKeyFor(meetingDate) : notesKeyFor(meetingDate), value);
+    } catch { /* ignore */ }
+    if (!editable) return;
+    pendingRef.current = { date: meetingDate, agenda: next.agenda, notes: next.notes };
+    setSaveState('saving');
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => { flushPending(); }, 1500);
+  };
+
+  // Carrega as notas da data ativa: D1 primeiro; se vazio, cai no localStorage
+  // (e migra dados legados para o D1). Descarrega edições da data anterior antes.
+  useEffect(() => {
+    let cancelled = false;
+    const seq = ++loadSeqRef.current;
+    (async () => {
+      await flushPending();
+      if (cancelled || seq !== loadSeqRef.current) return;
+      setSaveState('idle');
+      let d1 = null;
+      try { d1 = await apiFetch(`/api/meeting/notes?date=${meetingDate}`); } catch { d1 = null; }
+      if (cancelled || seq !== loadSeqRef.current) return;
+
+      let agenda = (d1 && d1.agenda) || '';
+      let notes = (d1 && d1.notes) || '';
+      const hasD1 = !!(d1 && d1.id && (agenda || notes));
+
+      if (!hasD1) {
+        // D1 vazio → fallback + migração do localStorage.
+        let lsA = ''; let lsN = '';
+        try {
+          lsA = localStorage.getItem(agendaKeyFor(meetingDate)) || '';
+          lsN = localStorage.getItem(notesKeyFor(meetingDate)) || '';
+        } catch { /* ignore */ }
+        agenda = lsA; notes = lsN;
+        if ((lsA || lsN) && past >= 0 && past <= 7) {
+          try {
+            await apiFetch('/api/meeting/notes', {
+              method: 'PUT',
+              body: JSON.stringify({ date: meetingDate, agenda: lsA, notes: lsN }),
+            });
+            if (!cancelled && seq === loadSeqRef.current) {
+              showToast('Notas anteriores migradas para a nuvem');
+            }
+          } catch { /* mantém local; tenta de novo na próxima edição */ }
+        }
+      }
+      if (cancelled || seq !== loadSeqRef.current) return;
+      const loaded = { agenda, notes };
+      formRef.current = loaded;
+      setForm(loaded);
+      pendingRef.current = null; // nada a salvar logo após carregar
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingDate]);
+
+  // Descarrega pendências ao desmontar (localStorage já guardou a cada tecla).
+  useEffect(() => () => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    flushPending();
+  }, [flushPending]);
 
   // The meeting is in progress whenever the user's active timer is on the
   // shared "Reunião AIDE" task. We rely on the global TimerIndicator to keep
@@ -331,6 +441,29 @@ export default function MeetingPage() {
     }
   };
 
+  // Cria uma Nota formal a partir da pauta + notas da reunião.
+  const saveAsFormalNote = async () => {
+    if (!form.agenda && !form.notes) return;
+    setSavingAsNote(true);
+    setError('');
+    try {
+      const body = `${form.agenda}\n\n---\n\n${form.notes}`;
+      await apiFetch('/api/notes', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: `Reunião — ${formatDateBRShort(meetingDate)}`,
+          body,
+          tags: ['reunião'],
+        }),
+      });
+      showToast('Nota criada', { label: 'Ver em Notas', onClick: () => navigate('/notes') });
+    } catch (e) {
+      setError(String((e && e.message) || e) || 'Falha ao criar nota.');
+    } finally {
+      setSavingAsNote(false);
+    }
+  };
+
   return (
     <div className="mx-auto flex h-full max-w-5xl flex-col gap-6">
       {/* Section 1 — Meeting link */}
@@ -359,27 +492,82 @@ export default function MeetingPage() {
       {/* Section 2 — Agenda/Notes + Meeting controls + Countdown */}
       <section className="grid gap-4 md:grid-cols-3">
         <div className="space-y-4 md:col-span-2">
+          {/* Navegação por dia + status de sincronização */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setMeetingDate(addDaysStr(meetingDate, -1))}
+                className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-sm text-ink2 hover:bg-surface2"
+              >
+                <ChevronLeft className="h-4 w-4" /> Anterior
+              </button>
+              <span className="text-sm font-medium text-ink">{formatMeetingDate(meetingDate)}</span>
+              <button
+                type="button"
+                onClick={() => setMeetingDate(addDaysStr(meetingDate, 1))}
+                disabled={isToday || meetingDate > today}
+                className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-sm text-ink2 hover:bg-surface2 disabled:opacity-40"
+              >
+                Próximo <ChevronRight className="h-4 w-4" />
+              </button>
+              {!isToday && (
+                <button
+                  type="button"
+                  onClick={() => setMeetingDate(today)}
+                  className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-hover"
+                >
+                  Hoje
+                </button>
+              )}
+            </div>
+            <SaveIndicator state={saveState} />
+          </div>
+
+          {readOnly && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+              Nota de {formatDateBRShort(meetingDate)} — somente leitura (mais de 7 dias)
+            </div>
+          )}
+
           <div>
             <label className="mb-1 block text-sm font-semibold text-ink">
               Pauta de hoje
             </label>
-            <AutosaveTextarea
-              storageKey={agendaKey}
+            <textarea
+              value={form.agenda}
+              onChange={(e) => onChangeField('agenda', e.target.value)}
+              readOnly={readOnly}
               placeholder="O que será discutido hoje..."
               rows={5}
+              className="w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:shadow-[0_0_0_3px_rgba(99,102,241,0.12)] read-only:opacity-70"
             />
           </div>
           <div>
             <label className="mb-1 block text-sm font-semibold text-ink">
               Notas da reunião
             </label>
-            <AutosaveTextarea
-              storageKey={notesKey}
+            <textarea
+              value={form.notes}
+              onChange={(e) => onChangeField('notes', e.target.value)}
+              readOnly={readOnly}
               placeholder="Anotações durante a reunião..."
               rows={8}
+              className="w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:shadow-[0_0_0_3px_rgba(99,102,241,0.12)] read-only:opacity-70"
             />
           </div>
-          <p className="text-[11px] text-muted">Salvo automaticamente por data</p>
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[11px] text-muted">Sincronizado entre dispositivos • Salvo por data</p>
+            <button
+              type="button"
+              onClick={saveAsFormalNote}
+              disabled={savingAsNote || (!form.agenda && !form.notes)}
+              className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm font-medium text-ink2 transition hover:bg-surface2 disabled:opacity-50"
+            >
+              <FileText className="h-4 w-4" /> {savingAsNote ? 'Salvando...' : 'Salvar como Nota'}
+            </button>
+          </div>
         </div>
 
         <div className="space-y-4">
@@ -484,6 +672,24 @@ export default function MeetingPage() {
           onPersist={persistTask}
           onDelete={handleDelete}
         />
+      )}
+
+      {/* Toast (migração / nota criada) */}
+      {toast && (
+        <div className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 md:bottom-6">
+          <div className="flex items-center gap-3 rounded-lg border border-line bg-surface px-4 py-2.5 text-sm text-ink shadow-soft">
+            <span>{toast.message}</span>
+            {toast.action && (
+              <button
+                type="button"
+                onClick={() => { toast.action.onClick(); setToast(null); }}
+                className="font-medium text-accent hover:underline"
+              >
+                {toast.action.label}
+              </button>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

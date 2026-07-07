@@ -1,0 +1,107 @@
+================================
+AIDE — RELATÓRIO PROMPT 2
+Networking e Market
+Data: 2026-07-06
+================================
+
+Pré-requisito: relatorios/auditoria_reuniao_2026-07-03.txt lido antes de qualquer
+alteração (seções 5 e 6 tratam exatamente destes pontos). Todo texto de UI em
+PT-BR. Nenhuma funcionalidade existente foi removida (apenas adições). NÃO houve
+deploy.
+
+
+MUDANÇAS IMPLEMENTADAS:
+
+1. MARKET → NETWORKING LINK (bidirecional)
+   - src/components/market/ContactsProView.jsx
+       * import useNavigate + ícone Users (linhas 2-5).
+       * ContactDetail: const navigate = useNavigate() (~linha 165).
+       * Botão "Ver no Networking" (outline, borda indigo, ícone Users) abaixo das
+         ações existentes → navigate('/networking', { state:{ contactId: person.id }})
+         (~linhas 219-227). Observação: no objeto de detalhe o campo é person.id
+         (= network_people.id), não person.person_id — mesmo valor alvo.
+   - src/components/market/OrganizationsView.jsx
+       * import useNavigate + ícone Users (linhas 2-5).
+       * OrgDetail: const navigate = useNavigate() (~linha 226).
+       * "Contatos vinculados": nome do contato agora é um <button> clicável
+         (texto indigo, underline no hover, ícone Users) →
+         navigate('/networking', { state:{ contactId: c.person_id }})
+         (~linhas 300-318). Desabilitado se c.person_id ausente.
+   - src/components/networking/NetworkingPage.jsx  (consumo do link — necessário)
+       * import useLocation (linha 2).
+       * useEffect que lê location.state.contactId e, com os dados carregados,
+         faz setView('list') + setSelected({kind:'person', id:contactId}) e limpa
+         o state (navigate replace) (~linhas 233-245). Sem isto, o botão levaria à
+         página sem selecionar a pessoa. Ver DESVIOS D1.
+
+2. NETWORKING SCROLL FIX + TAGS
+   - src/components/networking/NetworkingPage.jsx
+       * Coluna esquerda: adicionado min-h-0 ao container flex (linha 282) — corrige
+         o page-scroll indevido; a lista volta a rolar internamente.
+       * Barra de filtro de tags: max-h-32 overflow-y-auto (linha 293) — impede que
+         muitas tags comprimam a lista.
+       * Tags no card da lista (não existiam antes): mostra as 3 primeiras como
+         pílulas "#tag" + badge cinza "+N" quando há mais (mesmo padrão do Mercado)
+         (~linhas 353-363). Aplica a pessoas E instituições.
+
+3. OUTREACH STATUS VISÍVEL
+   - src/components/networking/NetworkingPage.jsx
+       * Constante OUTREACH_META (label PT-BR + cor do dot) + OUTREACH_STATUS_ORDER
+         com os 7 status (linhas 26-42). Valores idênticos aos do Mercado
+         (marketShared.jsx OUTREACH_LABELS/OUTREACH_ORDER).
+       * Estado proStatus (mapa person_id → outreach_status) preenchido em loadAll
+         a partir de /api/market/contacts (linhas 100 e ~139-141).
+       * No card da lista: dot colorido + rótulo ao lado do nome, só quando a pessoa
+         tem contact_professional (proStatus[it.id]); pessoas "puras" de networking
+         não mostram nada (~linhas 338-343). Linha do nome recebeu flex-wrap.
+       * No painel de detalhe: select "Status de contato" (7 opções PT-BR) com dot,
+         só quando hasPro; onChange → changeOutreach → PUT
+         /api/market/contacts/:personId/professional { outreach_status } (atualização
+         otimista) (handler ~linhas 221-231; UI ~linhas 569-588; props passadas
+         ~linhas 402-403; assinatura DetailPanel atualizada).
+
+4. TAGS NO MAPA
+   - Nada a alterar (ver DESVIOS D2): o NetworkMap não renderiza tags em nenhum
+     tooltip/label (só nome e connection_type). Não há tags para limitar a 3.
+
+
+VERIFICAÇÃO:
+  npm run build           : OK  (0 erros; 1580 módulos; "✓ built in 4.02s";
+                                 postbuild copiou _worker.js → dist/_worker.js).
+                                 Único aviso é o pré-existente de tamanho de chunk
+                                 (>500 kB) — não é erro.
+  node --check _worker.js : OK  (retornou WORKER_OK). Nota: nenhuma alteração foi
+                                 feita no _worker.js neste prompt — verificado por
+                                 garantia.
+
+
+PENDÊNCIAS / DESVIOS:
+  D1) CONSUMO DO LINK NO NETWORKING (adição necessária, fora da lista literal do
+      prompt): o prompt pediu apenas os botões em ContactsProView/OrganizationsView.
+      Porém a NetworkingPage NÃO lia location.state.contactId — o botão levaria à
+      página sem abrir a ficha. Adicionei useLocation + useEffect para selecionar a
+      pessoa e limpar o state. É puramente aditivo e torna o link realmente
+      funcional (objetivo do audit: link bidirecional).
+  D2) CHANGE 4 (tags no mapa) = NÃO APLICÁVEL: grep em NetworkingPage confirma que
+      tags só aparecem no filtro, no DetailPanel e no editor — NUNCA no mapa. Não há
+      onde aplicar .slice(0,3). Nenhuma UI nova foi inventada para não adicionar
+      função não solicitada. Se desejar, posso adicionar um <title> nos nós de
+      pessoa mostrando nome + 3 tags.
+  D3) Campo do id no botão do ContactDetail: usei person.id (o objeto de detalhe
+      expõe person.id = network_people.id), não person.person_id (esse nome de
+      campo existe na LISTA de contatos, não no objeto de detalhe). Valor alvo é o
+      mesmo. O link inverso em OrganizationsView usa c.person_id (presente em l.* do
+      JOIN contact_org_links).
+  D4) Posição do status de outreach no card: colocado na linha do nome com flex-wrap
+      (quebra graciosamente), ao lado do nome/pílulas, conforme pedido. Mantidos LG
+      e "Mercado" (não removidos).
+  D5) Detalhe visível só no desktop: o painel de detalhe do Networking é md:flex
+      (oculto no mobile) — comportamento pré-existente. O select de status e o link
+      inverso selecionam a pessoa, mas o painel só aparece em telas ≥768px, igual ao
+      fluxo já existente (ex.: seleção pelo mapa).
+
+  Nenhum outro item ficou pendente. NENHUM deploy foi feito — aguardando aprovação.
+
+================================
+FIM DO RELATÓRIO
+================================

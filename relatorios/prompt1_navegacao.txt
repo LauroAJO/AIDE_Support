@@ -1,0 +1,134 @@
+================================
+AIDE — RELATÓRIO PROMPT 1
+Navegação, Sidebar e Bug Fix
+Data: 2026-07-06
+================================
+
+Pré-requisito: relatorios/auditoria_reuniao_2026-07-03.txt foi lido antes de
+qualquer alteração. Todo o texto de UASe novo está em PT-BR. Nenhuma
+funcionalidade existente foi removida (apenas movida ou desabilitada conforme
+pedido). NÃO houve deploy.
+
+
+MUDANÇAS IMPLEMENTADAS:
+
+1. BUG FIX DELEÇÃO CASCADE  [_worker.js]
+   Todas as UPDATE/DELETE agrupadas em transação atômica via env.DB.batch();
+   em caso de falha, retorna 500 com mensagem clara e "nada foi alterado".
+   - DELETE /api/projects/:id  (handleProjectItem)  ~linhas 1126-1142
+       * UPDATE tasks   SET front_id=NULL  WHERE front_id IN
+                         (SELECT id FROM fronts WHERE project_id=?)
+       * UPDATE fronts  SET project_id=NULL WHERE project_id=?
+       * UPDATE tasks   SET project_id=NULL WHERE project_id=?
+       * DELETE FROM projects WHERE id=?
+       (erro tratado na linha 1139)
+   - DELETE /api/areas/:id     (handleAreaItem)     ~linhas 4935-4949
+       * UPDATE tasks SET front_id=NULL   WHERE front_id IN
+           (SELECT id FROM fronts WHERE project_id IN
+             (SELECT id FROM projects WHERE area_id=?))
+       * UPDATE tasks SET project_id=NULL WHERE project_id IN
+           (SELECT id FROM projects WHERE area_id=?)
+       * UPDATE projects SET area_id=NULL WHERE area_id=?
+       * DELETE FROM areas WHERE id=?
+       (substitui o antigo detach único com .catch() silencioso; erro na 4946)
+   - DELETE /api/fronts/:id     (handleFrontItem)    ~linhas 5015-5026
+       * UPDATE tasks SET front_id=NULL WHERE front_id=?
+       * DELETE FROM fronts WHERE id=?
+       (agora atômico; removido o .catch(()=>{}) silencioso; erro na 5024)
+
+2. ÁREAS → DENTRO DE PLANNING
+   - src/components/Layout.jsx:
+       * Item "Áreas" REMOVIDO de NAV_ITEMS (antes na sidebar + bottom nav).
+       * Import do ícone "Layers" removido (ficou sem uso).
+   - src/components/planning/PlanningPage.jsx:
+       * import AreasPage from '../areas/AreasPage'  (~linha 10).
+       * Estado areasOpen persistido em localStorage 'aide-areas-open',
+         começa FECHADO  (~linhas 38-46: leitura 39, escrita 44).
+       * Seção colapsável "Áreas & Projetos" no TOPO da página, antes da
+         navegação semanal  (~linhas 270-289; cabeçalho com Chevron 278).
+         Estilo pedido: background #F3F0EB, border-radius 8, padding 12,
+         margin-bottom 16. Expandida renderiza <AreasPage /> inline.
+   - src/App.jsx:
+       * Rota /areas agora redireciona: <Navigate to="/planning" replace />
+         (linha 233). AreasPage segue importado (ver Pendências).
+
+3. IMPORT → MENU DE PERFIL
+   - src/components/Layout.jsx:
+       * Item "Importar" REMOVIDO de fixedNav (antes junto a Mercado/Carreira/Hub).
+       * No dropdown de perfil, ANTES de "Configurações", adicionado botão
+         "Importar Dados" com ícone Upload → go('/import') (fecha o dropdown).
+         Visível apenas se user?.role==='owner' || user?.user_type==='fixed'
+         (~linhas 203-213; label na 210).
+       * Import do ícone "Upload" mantido (usado agora no dropdown).
+
+4. /MEETING PROTECTEDROUTE
+   - src/App.jsx: rota /meeting envolvida em
+     <ProtectedRoute feature="meeting"><MeetingPage/></ProtectedRoute>
+     (~linhas 226-229; path na 227).
+
+5. PAPERCLIP REMOVIDO
+   - src/components/chat/ChatPage.jsx:
+       * Botão de anexo desabilitado (title "Em breve") REMOVIDO por completo
+         da área de input (bloco antes na ~330-337). Nada o substitui.
+       * Import "Paperclip" removido (linha 2 → import { Send } from 'lucide-react').
+
+6. MOBILE BOTTOM NAV
+   - src/components/Layout.jsx:
+       * Novos imports: MoreHorizontal, X.
+       * Derivados após badgeCount (~linhas 100-108):
+           MOBILE_PRIMARY = ['/tasks','/planning','/timer','/notes']
+           primaryNav (respeita permissões via navItems já filtrado)
+           moreNav    (o restante)
+           moreBadgeCount (soma dos badges ocultos → preserva o indicador de
+                           não-lidas do Chat no botão "Mais").
+       * Estado local moreOpen (useState; NÃO persistido).
+       * <nav> bottom (mobile) agora mostra 5 slots fixos: 4 principais
+         (Tarefas, Planejamento, Timer, Notas) + botão "Mais" (MoreHorizontal)
+         — sem overflow-x-auto  (~linhas 291-320).
+       * Bottom sheet "Mais" (~linhas 321-372): overlay fixed inset-0, painel
+         inferior arredondado no topo (rounded-t-2xl), header "Menu" + botão X,
+         grade de 3 colunas com o restante dos itens (ícone 24px + label 12px),
+         item ativo com fundo indigo (bg-accent), fecha ao tocar item ou backdrop.
+       * Desktop (≥768px): sidebar inalterada (continua md:flex, itera navItems).
+
+
+VERIFICAÇÃO:
+  node --check _worker.js : OK  (retornou WORKER_OK)
+  npm run build           : OK  (0 erros; 1580 módulos; "✓ built in 6.08s";
+                                 postbuild copiou _worker.js → dist/_worker.js).
+                                 Único aviso é o pré-existente de tamanho de
+                                 chunk (>500 kB) — não é erro.
+
+
+PENDÊNCIAS / DESVIOS:
+  D1) ORDEM DAS QUERIES DE DELEÇÃO (desvio intencional e necessário):
+      O prompt listou as UPDATE numa ordem que, se seguida à risca, NÃO
+      corrigiria o bug — limpar fronts.project_id / projects.area_id ANTES faz
+      as subqueries seguintes (WHERE project_id/area_id = ?) não casarem mais,
+      deixando tasks.front_id órfãos. Implementei EXATAMENTE as mesmas queries,
+      apenas reordenadas para desvincular os filhos mais profundos primeiro.
+      Resultado final idêntico ao pretendido, agora correto.
+  D2) TRANSAÇÃO: usei env.DB.batch() (API atômica nativa do D1) — o arquivo não
+      usava batch() antes, mas é o mecanismo correto para o "wrap in a
+      transaction" pedido. Em falha, 500 com "nada foi alterado".
+  D3) App.jsx ainda importa AreasPage embora a rota /areas passe a redirecionar.
+      Mantido de propósito, conforme instrução ("keep AreasPage imported").
+      PlanningPage importa a SUA própria cópia; portanto o import em App.jsx
+      ficou tecnicamente sem uso (não quebra o build). Posso removê-lo se
+      preferir.
+  D4) Fundo do bottom sheet: usei o token bg-surface (branco/superfície do tema)
+      em vez de "white" literal, para consistência visual com header/sidebar.
+      Comportamento e layout conforme especificado.
+  D5) Badge agregado no botão "Mais": adição (não pedida explicitamente) para
+      NÃO perder o indicador de não-lidas do Chat no mobile, já que Chat saiu
+      da barra fixa. Puramente aditivo.
+  D6) Visibilidade de "Importar Dados": usei a condição literal do prompt
+      (owner || user_type==='fixed'). É levemente mais restrita que o canFixed
+      da sidebar antiga (que também aceitava role==='assistant_fixed' sem
+      user_type='fixed'). Mantido conforme o pedido.
+
+  Nada mais ficou pendente. NENHUM deploy foi feito — aguardando aprovação.
+
+================================
+FIM DO RELATÓRIO
+================================

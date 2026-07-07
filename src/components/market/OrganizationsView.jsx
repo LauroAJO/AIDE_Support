@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  Plus, Search, X, Pencil, ExternalLink, Linkedin, UserPlus, Briefcase, MapPin, Loader2,
+  Plus, Search, X, Pencil, ExternalLink, Linkedin, UserPlus, Briefcase, MapPin, Loader2, Users,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -223,6 +224,7 @@ function Chip({ active, onClick, children }) {
 }
 
 function OrgDetail({ org, onEdit, onAddContact }) {
+  const navigate = useNavigate();
   const tags = parseTags(org.tags);
   const projects = org.projects || [];
   const contacts = org.contacts || [];
@@ -301,7 +303,17 @@ function OrgDetail({ org, onEdit, onAddContact }) {
               <li key={c.id} className="flex items-center gap-2 rounded-lg border border-line px-3 py-2">
                 <Avatar user={{ name: c.person_name }} size={28} />
                 <div className="min-w-0">
-                  <div className="truncate text-sm text-ink">{c.person_name || '—'}</div>
+                  {/* Nome clicável → abre a ficha da pessoa no Networking. */}
+                  <button
+                    type="button"
+                    onClick={() => c.person_id && navigate('/networking', { state: { contactId: c.person_id } })}
+                    disabled={!c.person_id}
+                    title="Ver no Networking"
+                    className="flex items-center gap-1 text-sm text-indigo-600 hover:underline disabled:cursor-default disabled:text-ink disabled:no-underline"
+                  >
+                    <Users className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{c.person_name || '—'}</span>
+                  </button>
                   {c.role_at_org && <div className="truncate text-xs text-muted">{c.role_at_org}</div>}
                 </div>
               </li>

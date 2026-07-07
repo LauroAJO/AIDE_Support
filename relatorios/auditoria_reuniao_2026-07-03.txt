@@ -1,0 +1,378 @@
+================================================================================
+AUDITORIA DO CÓDIGO AIDE — NOTAS DA REUNIÃO 2026-07-03
+================================================================================
+Data da auditoria: 2026-07-06
+Escopo: AIDE/AIDE_Support/ (Vite + React 18 + Zustand + Cloudflare Pages/D1)
+Natureza: SOMENTE LEITURA — nenhum código foi modificado.
+
+Arquivos inspecionados:
+  src/App.jsx
+  src/components/Layout.jsx
+  src/components/planning/PlanningPage.jsx
+  src/components/chat/ChatPage.jsx
+  src/components/networking/NetworkingPage.jsx
+  src/components/meeting/MeetingPage.jsx
+  src/components/market/MarketPage.jsx
+  src/components/market/OrganizationsView.jsx
+  src/components/market/ContactsProView.jsx
+  src/components/areas/AreasPage.jsx (referência de rota)
+  src/components/import/ImportPage.jsx (referência de rota)
+  _worker.js (handleTaskItem + bridge Lifegame)
+
+
+================================================================================
+1. NAVEGAÇÃO — Áreas e Projetos
+================================================================================
+
+• Onde AreasPage é renderizada em App.jsx?
+  - Import: App.jsx:23  ->  import AreasPage from './components/areas/AreasPage'
+  - Rota:   App.jsx:227-230
+        <Route
+          path="/areas"
+          element={<ProtectedRoute feature="areas"><AreasPage /></ProtectedRoute>}
+        />
+  - Protegida por permissão granular feature="areas" (owner ignora o gate).
+
+• Onde está na navegação da sidebar (Layout.jsx)?
+  - Layout.jsx:44, dentro do array NAV_ITEMS:
+        { to: '/areas', label: 'Áreas', icon: Layers, feature: 'areas' }
+  - Aparece na sidebar principal (desktop) E no bottom nav (mobile), pois ambos
+    iteram sobre o mesmo array `navItems` (Layout.jsx:226 e :263).
+
+• Onde PlanningPage é renderizada?
+  - Import: App.jsx:15  ->  import PlanningPage from './components/planning/PlanningPage'
+  - Rota:   App.jsx:205-208
+        <Route
+          path="/planning"
+          element={<ProtectedRoute feature="planning"><PlanningPage /></ProtectedRoute>}
+        />
+  - Sidebar: Layout.jsx:37 -> { to: '/planning', label: 'Planejamento', icon: CalendarRange, feature: 'planning' }
+
+• O que PlanningPage contém atualmente?
+  (arquivo src/components/planning/PlanningPage.jsx, 668 linhas)
+  - Cabeçalho com navegação semanal: Anterior / "Semana de <range>" / Próxima / Hoje (linhas 257-281).
+  - Seção "Visão Estratégica — 4 Semanas" — COLAPSÁVEL (linhas 283-390). Ver item 8.
+  - Coluna esquerda (~65%): grade de 7 dias (seg-dom) com tarefas planejadas por dia,
+    reordenáveis (setas ↑/↓), remoção (X) e botão "Adicionar tarefa" (linhas 392-470).
+  - Coluna direita (~35%):
+        * "Meta da semana" (textarea) + "Revisão semanal" (textarea)  (linhas 474-495)
+        * "Resumo da semana": Planejadas / Concluídas / Horas  (linhas 497-504)
+        * "Horas por Área" — barras proporcionais (componente HoursByAreaPanel, :506 e :625)
+        * "Níveis estratégicos": 3 textareas — Curto prazo / Tático / Estratégico
+          (STRATEGIC_FIELDS, linhas 11-15 e 514-534)
+  - Modal "Adicionar a <dia>" com busca e agrupamento Área > Projeto (linhas 538-611).
+  - Dados carregados: /api/planning/week, /api/tasks, /api/timer/entries, /api/areas,
+    /api/projects, /api/career/opportunities.
+
+• Já existe uma seção "Visão Estratégica" no Planejamento?
+  - SIM. Duas coisas distintas usam o nome "estratégic*":
+    1) "Visão Estratégica — 4 Semanas" (bloco colapsável no topo, linhas 283-390) —
+       contém cards de 4 semanas, "Meta Estratégica do Mês", "Resultados-chave (até 5)"
+       e "Oportunidades com deadline (4 semanas)".
+    2) "Níveis estratégicos" (card na coluna direita, linhas 514-534) — 3 campos de texto
+       (curto/tático/estratégico) salvos no plano SEMANAL (short_term/tactical/strategic).
+  => Há sobreposição/duplicação conceitual entre esses dois blocos "estratégicos".
+
+
+================================================================================
+2. NAVEGAÇÃO — Importação (Import)
+================================================================================
+
+• Onde está ImportPage em App.jsx?
+  - Import: App.jsx:26  ->  import ImportPage from './components/import/ImportPage'
+  - Rota:   App.jsx:244
+        <Route path="/import" element={<FixedRoute><ImportPage /></FixedRoute>} />
+  - Protegida por FixedRoute (App.jsx:59-74): acesso apenas para owner OU
+    assistant_fixed OU user_type === 'fixed'. NÃO usa permissão granular.
+
+• Onde está na sidebar (Layout.jsx)?
+  - Layout.jsx:82-91, dentro do array `fixedNav` (construído somente quando canFixed = true):
+        { to: '/import', label: 'Importar', icon: Upload }
+  - fixedNav é concatenado em navItems (Layout.jsx:92), portanto "Importar" aparece
+    junto com Mercado / Carreira / Hub, entre a nav principal e a nav de owner.
+  - Só aparece para owner/assistente fixo (canFixed, Layout.jsx:83).
+
+• Onde é renderizado o menu dropdown do perfil em Layout.jsx?
+  - No HEADER (canto superior direito), dentro do <div ref={menuRef}> (Layout.jsx:160-209).
+  - Botão avatar+nome (linhas 161-170) abre o dropdown (estado menuOpen).
+  - Conteúdo do dropdown (linhas 172-208):
+        * nome/email do usuário (:174-176)
+        * "Meu Perfil"    -> go('/profile')      (:178-184)
+        * "Avisos"        -> go('/alerts')       (:185-191)
+        * "Configurações" -> go('/settings')     (:192-198)
+        * "Sair"          -> handleLogout()      (:200-206)
+  - Fecha ao clicar fora (listener mousedown, Layout.jsx:113-119).
+  - Observação: existe também um botão "Sair" em texto SEPARADO, fora do dropdown
+    (Layout.jsx:211-218), duplicando a ação de logout.
+
+
+================================================================================
+3. SIDEBAR — itens de navegação atuais
+================================================================================
+
+• TODOS os itens da sidebar, EM ORDEM (Layout.jsx):
+  A nav final = [...visibleMain, ...fixedNav, ...visibleOwner]  (Layout.jsx:92)
+
+  NAV_ITEMS principais (Layout.jsx:35-47) — filtrados por permissão (visibleMain):
+     1. Tarefas       /tasks       (feature: tasks)
+     2. Planejamento  /planning    (feature: planning)
+     3. Timer         /timer       (feature: timer)
+     4. Calendário    /calendar    (feature: calendar)
+     5. Drive         /drive       (feature: drive)
+     6. Notas         /notes       (feature: notes)
+     7. Pagamentos    /payment     (feature: payment)
+     8. Reunião       /meeting     (feature: meeting)
+     9. Áreas         /areas       (feature: areas)
+    10. Networking    /networking  (feature: networking)
+    11. Chat          /chat        (feature: chat, badge: chatUnread)
+
+  fixedNav (Layout.jsx:84-91) — só owner/assistente fixo:
+    12. Mercado       /market
+    13. Carreira      /career
+    14. Hub           /hub
+    15. Importar      /import
+
+  OWNER_NAV (Layout.jsx:49-52) — só owner (visibleOwner):
+    16. Dashboard     /dashboard
+    17. Admin         /admin  (badge: pendingUsers)
+
+• TODOS os itens do bottom nav (mobile):
+  - IDÊNTICOS à sidebar. O bottom nav (Layout.jsx:262-286) itera sobre o MESMO
+    array `navItems`. Não há lista separada para mobile.
+  - O próprio código comenta que o bottom nav rola horizontalmente porque a
+    contagem estoura a largura de um telefone: "13 items max" (Layout.jsx:260-262).
+    Na prática um owner vê até 17 itens rolando horizontalmente.
+
+• Quais são raramente usados / poderiam ser removidos ou movidos?
+  (avaliação baseada no código; não há telemetria de uso no repositório)
+  - Timer (/timer): há indicador de timer sempre visível no header (mobile) e no
+    rodapé da sidebar (TimerIndicator, Layout.jsx:133 e :247). A página dedicada
+    /timer é redundante com esses indicadores.
+  - Áreas (/areas) e Planejamento (/planning): funções de gestão/config que
+    poderiam viver sob um agrupamento em vez de itens de topo.
+  - Hub (/hub): item "fixed" de uso pontual; candidato a mover.
+  - Reunião (/meeting): a rota NÃO está protegida por gate no App.jsx:226 (sem
+    ProtectedRoute), embora tenha feature 'meeting' na sidebar — inconsistência.
+  - Avisos (/alerts): NÃO está na sidebar; só é acessível pelo dropdown do perfil
+    (Layout.jsx:185-191) — item de baixa visibilidade.
+  - Dashboard e Admin: só owner, uso pouco frequente — poderiam ser agrupados.
+  => O problema central é lotação: 17 itens no total para o owner, com bottom nav
+     rolando horizontalmente. Recomenda-se agrupar (ex.: submenu "Mais") os itens
+     de baixa frequência (Timer, Áreas, Hub, Importar, Dashboard).
+
+
+================================================================================
+4. CHAT — estado atual
+================================================================================
+
+• O que ChatPage.jsx contém? (src/components/chat/ChatPage.jsx, 360 linhas)
+  - Canal único "geral" de mensagens. Cabeçalho "Chat" + contador de mensagens (:231-235).
+  - Lista de mensagens com:
+        * separadores por data (Hoje / Ontem / data) (:216-228, :255-264)
+        * bolhas alinhadas (próprias à direita) com Avatar, nome, hora (:266-291)
+        * suporte a @menções (MentionText) e "[Mensagem removida]" para deleted_at.
+  - Polling a cada 10s (POLL_MS=10000, :9, :94-123) buscando /api/chat/messages?limit=50.
+  - Controle de não-lidas via localStorage (lastReadKey) + store chatUnread (:39, :113-118).
+  - Banner "X novas mensagens ↓" quando o usuário está com scroll para cima (:296-304).
+  - Composição de mensagem: textarea auto-crescente (até 3 linhas), Enter envia /
+    Shift+Enter nova linha, dropdown de @menção (:311-355).
+  - View somente-leitura quando canDo(userGranular,'chat','write') é falso (:307-310).
+
+• Algum elemento que pareça NÃO relacionado ao chat?
+  - SIM. Botão de anexo (Paperclip) DESABILITADO com title="Em breve" e opacity-50
+    (ChatPage.jsx:330-337). É um placeholder não funcional (import Paperclip em :2).
+  - Fora isso, nenhum elemento estranho: tudo o mais é diretamente de chat.
+    (Diferentemente de MeetingPage, ChatPage não mistura funcionalidades de timer,
+    tarefas etc.)
+
+
+================================================================================
+5. NETWORKING — problema das tags
+================================================================================
+
+• Como as tags são renderizadas em NetworkingPage.jsx?
+  - Barra de filtro por tag (topo da lista): allTags é derivado de todas as tags de
+    pessoas + instituições (linhas 154-159) e renderizado como chips "#tag"
+    clicáveis em `flex flex-wrap gap-1` (linhas 245-253). Clicar define tagFilter.
+  - No card de cada item da lista: as tags NÃO são exibidas no card resumido
+    (o card mostra nome, subtítulo, selo LG/Mercado e StrengthDots — linhas 261-324).
+  - No painel de detalhe (DetailPanel): as tags do item aparecem como chips "#tag"
+    em `flex flex-wrap gap-1.5` (linhas 576-582).
+
+• Existe limite de tags ou truncamento?
+  - Barra de filtro (linhas 245-253): SEM limite e SEM truncamento — TODAS as tags
+    distintas são renderizadas. Com muitas tags, o wrap empurra a lista para baixo
+    e consome altura vertical da coluna esquerda.
+  - Detalhe (linhas 576-582): SEM limite — todas as tags do item são exibidas.
+  - Comparação: no Mercado (OrganizationsView.jsx:159-165) as tags do card SÃO
+    limitadas a 3 (.slice(0, 3)). No Networking não há esse .slice — inconsistência.
+  => Não há truncamento/limite de tags no Networking; potencial de "explosão" visual.
+
+• Existe problema de scroll na lista de contatos?
+  - A lista está em contêiner com scroll próprio: `min-h-0 flex-1 overflow-y-auto`
+    (NetworkingPage.jsx:254). O pai usa `flex h-full flex-col` / `flex min-h-0 flex-1`
+    (linhas 202, 234-235), o que normalmente permite o scroll interno funcionar.
+  - RISCO identificado: a barra de filtro de tags (linhas 245-253) fica ACIMA do
+    contêiner com scroll e NÃO tem limite de altura. Se houver muitas tags, ela
+    cresce e reduz o espaço da lista rolável (a lista encolhe em vez de a página
+    inteira rolar), o que pode aparentar "lista de contatos não rola / some".
+  - No modo "map" (linha 712) o contêiner tem min-h-[600px], independente da lista.
+
+
+================================================================================
+6. MERCADO -> NETWORKING (link entre pessoas)
+================================================================================
+
+• Em OrganizationsView.jsx e ContactsProView.jsx: clicar numa pessoa navega para o
+  Networking?
+  - NÃO. Em NENHUMA das duas views há navegação para /networking ao clicar numa pessoa.
+
+  OrganizationsView.jsx:
+    - Lista de "Contatos vinculados" (OrgDetail, linhas 300-308): cada contato é
+      renderizado como <li> ESTÁTICO (Avatar + nome + cargo). NÃO é clicável, NÃO
+      há onClick, NÃO há link para Networking nem para a aba Contatos.
+    - "Adicionar Contato" (AddContactModal, linhas 481-534) apenas vincula uma
+      pessoa existente (network_people) via /api/market/contacts/link.
+
+  ContactsProView.jsx:
+    - Cards de contato (linhas 113-137): onClick chama openDetail(c.person_id), que
+      abre o detalhe DENTRO do próprio Mercado (/api/market/contacts/:id). NÃO navega
+      para o Networking.
+    - No detalhe (ContactDetail) há ações para LinkedIn/email/registrar interação,
+      mas NENHUM botão "Ver no Networking".
+
+• Como os links de pessoa são tratados hoje no Mercado?
+  - A navegação atual é UNIDIRECIONAL: Networking -> Mercado (e não o contrário).
+        * NetworkingPage (DetailPanel) tem botão "Ver perfil profissional (Mercado)"
+          (linhas 492-500) -> onViewMarket -> navigate('/market', { state:{ contactId }})
+          (NetworkingPage.jsx:337).
+        * MarketPage lê location.state.contactId, abre a aba "contacts" e foca o
+          contato via initialContactId (MarketPage.jsx:16-19, 54).
+        * ContactsProView usa initialContactId para abrir o detalhe (linhas 71-74).
+  - No sentido inverso (Mercado -> Networking) NÃO existe link. As pessoas no Mercado
+    referenciam network_people por person_id, mas a UI não oferece caminho de volta
+    para a ficha da pessoa em /networking.
+  => LACUNA confirmada: falta o link Mercado -> Networking ao clicar numa pessoa.
+
+
+================================================================================
+7. NOTAS DA REUNIÃO — onde são salvas?
+================================================================================
+
+• Em MeetingPage.jsx: o que acontece quando as notas são digitadas?
+  - As notas ("Notas da reunião") e a "Pauta de hoje" usam o componente
+    AutosaveTextarea (MeetingPage.jsx:40-78, instanciado em :366 e :376).
+  - Ao digitar, onChange atualiza o estado e agenda um salvamento com debounce de 1s
+    (setTimeout 1000ms, linhas 58-65).
+
+• São salvas em localStorage? D1? Drive?
+  - APENAS em localStorage do navegador. AutosaveTextarea chama
+    localStorage.setItem(storageKey, next) (linha 63). NÃO há chamada a /api nem a D1,
+    nem ao Google Drive.
+  - As chaves incluem a data do dia:
+        agendaKey = `aide-meeting-agenda-${today}`   (MeetingPage.jsx:212)
+        notesKey  = `aide-meeting-notes-${today}`    (MeetingPage.jsx:213)
+        (today vem de getTodayStr())
+  - IMPLICAÇÕES: as notas ficam só naquele dispositivo/navegador; NÃO sincronizam
+    entre Lauro e Alice, NÃO vão para o servidor, e são perdidas se o storage for
+    limpo. Cada dia gera uma chave nova (histórico só local).
+
+• Há alguma indicação ao usuário de ONDE as notas são salvas?
+  - PARCIAL e IMPRECISA. Abaixo dos textareas há a legenda:
+        "Salvo automaticamente por data"   (MeetingPage.jsx:382)
+  - Essa mensagem informa QUE salva e por data, mas NÃO diz que é só localmente no
+    navegador (nem que não sincroniza / não vai para servidor/Drive). O usuário pode
+    supor, incorretamente, que as notas estão sincronizadas.
+
+
+================================================================================
+8. PLANEJAMENTO — Visão Estratégica
+================================================================================
+
+• Em PlanningPage.jsx: onde está a Visão Estratégica?
+  - Bloco "Visão Estratégica — 4 Semanas" nas linhas 283-390, logo abaixo da barra
+    de navegação semanal e acima da grade de dias.
+
+• É um toggle/colapsável ou está sempre visível?
+  - É COLAPSÁVEL (toggle). Estado `stratOpen` (linha 34), começa FECHADO
+    (useState(false)). O cabeçalho é um <button> (linhas 285-294) que alterna
+    stratOpen; o conteúdo (linhas 296-388) só renderiza quando stratOpen é true.
+    O ícone ChevronDown gira 180° quando aberto (linha 293).
+  - O conteúdo estratégico só é carregado quando aberto: useEffect chama
+    loadStrategic() ao abrir (linhas 126-129), buscando /api/planning/month e
+    os 4 planos semanais.
+
+• O que contém?
+  Quando expandido (linhas 296-388):
+    1. Grade de 4 cards de semana (weekBlocks) mostrando o range da semana e a
+       contagem de tarefas; a semana atual fica destacada (linhas 298-311).
+    2. "Meta Estratégica do Mês" — textarea salva em monthPlan.strategic_goal
+       via saveMonth() / PUT /api/planning/month/:id (linhas 313-322).
+    3. "Resultados-chave (até 5)" — lista editável (add/remove), máx. 5, salva em
+       monthPlan.key_results (linhas 324-350, addKeyResult/removeKeyResult :140-152).
+    4. "Oportunidades com deadline (4 semanas)" (Etapa 6) — lista de oportunidades de
+       carreira com prazo nos próximos 28 dias, ordenada por urgência, com cores
+       (vermelho/âmbar) e clique que navega para /career (linhas 352-387; dados via
+       /api/career/opportunities, deadlineOpps :85-98).
+
+  NOTA (duplicação): além deste bloco, existe o card "Níveis estratégicos" na coluna
+  direita (linhas 514-534) com 3 textareas (Curto prazo / Tático / Estratégico) que
+  gravam no plano SEMANAL (short_term/tactical/strategic). São dois lugares distintos
+  rotulados como "estratégico" — vale consolidar para evitar confusão.
+
+
+================================================================================
+9. LIFEGAME SYNC — conclusão de tarefa
+================================================================================
+
+• Em _worker.js: o PUT /api/tasks/:id (status=done) dispara alguma notificação para
+  a bridge do Lifegame?
+  - NÃO. O handler handleTaskItem (_worker.js:931-1047) processa o PUT e, ao final
+    (linhas 1025-1038), dispara apenas:
+        * notifyTaskAssignment  — se o responsável mudou (:1027-1030)
+        * notifyTaskDue         — se a data de entrega mudou (:1031-1032)
+        * notifyCommentMentions — se houve novos comentários com @menção (:1033-1036)
+        * syncTaskToCalendar    — sincroniza com o Google Calendar (:1037)
+  - NÃO há nenhuma chamada a lifegameFetch(), a /api/bridge/* nem qualquer push para
+    o Lifegame quando o status vira "done" (ou qualquer outro status). A mudança de
+    status é apenas gravada em D1 (UPDATE tasks ... status=? ..., :986-996).
+
+• Existe alguma sincronização de status bidirecional implementada?
+  - NÃO no fluxo automático. A integração Lifegame existe, mas é MANUAL / sob demanda
+    e NÃO reage à conclusão de tarefas:
+        * AIDE -> Lifegame: só via endpoints explícitos, ex. /api/bridge/push/tasks
+          (handleBridgePushTasks, _worker.js:3184, :3416+), acionados manualmente
+          (não a partir do PUT de tarefa).
+        * Lifegame -> AIDE: via pull/import (/api/bridge/pull/tasks,
+          /api/bridge/import/tasks, :3188/:3191) e recebimento de sprints/xp/timelog
+          (/api/bridge/receive/*, :3193-3196). São upserts em massa por source='lifegame'.
+  - Não existe um caminho que, ao marcar uma tarefa como concluída no AIDE, notifique
+    o Lifegame (nem o inverso em tempo real). A ponte carrega/empurra listas inteiras
+    quando invocada, mas não há "status sync" evento-a-evento nem bidirecional.
+  => LACUNA confirmada: concluir tarefa no AIDE NÃO avisa o Lifegame; não há sync de
+     status bidirecional automático.
+
+
+================================================================================
+RESUMO DAS LACUNAS / PONTOS DE AÇÃO (derivados da auditoria)
+================================================================================
+  [1/8] Duplicação de blocos "estratégicos" no Planejamento (4 Semanas x Níveis
+        estratégicos) — consolidar.
+  [3]   Sidebar/bottom nav lotados (até 17 itens; bottom nav rola horizontalmente) —
+        agrupar itens de baixa frequência. "Avisos" só existe no dropdown.
+  [4]   Chat: botão de anexo (Paperclip) é placeholder "Em breve", desabilitado.
+  [5]   Networking: tags SEM limite/truncamento (Mercado usa .slice(0,3)); barra de
+        tags sem altura máxima pode comprimir a lista rolável.
+  [6]   Falta link Mercado -> Networking ao clicar numa pessoa (hoje só Networking ->
+        Mercado). Contatos vinculados em OrganizationsView não são clicáveis.
+  [7]   Notas da reunião salvas SOMENTE em localStorage (não D1, não Drive, sem sync);
+        legenda "Salvo automaticamente por data" não deixa isso claro.
+  [9]   Sem notificação ao Lifegame na conclusão de tarefa; sem status sync
+        bidirecional automático (integração é manual/pull-push em massa).
+
+  Observação adicional: rota /meeting (App.jsx:226) não tem ProtectedRoute, apesar de
+  ter feature 'meeting' na sidebar — inconsistência de gate.
+
+================================================================================
+FIM DO RELATÓRIO — nenhum arquivo de código foi modificado.
+================================================================================

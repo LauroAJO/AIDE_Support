@@ -20,12 +20,12 @@ import AlertsPage from './components/alerts/AlertsPage';
 import PaymentPage from './components/payment/PaymentPage';
 import DashboardPage from './components/dashboard/DashboardPage';
 import MeetingPage from './components/meeting/MeetingPage';
-import AreasPage from './components/areas/AreasPage';
 import NetworkingPage from './components/networking/NetworkingPage';
 import ChatPage from './components/chat/ChatPage';
 import ImportPage from './components/import/ImportPage';
 import MarketPage from './components/market/MarketPage';
 import CareerPage from './components/career/CareerPage';
+import HubPage from './components/hub/HubPage';
 import AdminPage from './components/admin/AdminPage';
 import PendingApprovalPage from './components/PendingApprovalPage';
 
@@ -222,11 +222,14 @@ export default function App() {
             path="/alerts"
             element={<ProtectedRoute feature="alerts"><AlertsPage /></ProtectedRoute>}
           />
-          <Route path="/meeting" element={<MeetingPage />} />
           <Route
-            path="/areas"
-            element={<ProtectedRoute feature="areas"><AreasPage /></ProtectedRoute>}
+            path="/meeting"
+            element={<ProtectedRoute feature="meeting"><MeetingPage /></ProtectedRoute>}
           />
+          {/* Áreas & Projetos agora vivem dentro do Planejamento (seção
+              colapsável). A rota antiga redireciona; PlanningPage importa e
+              renderiza AreasPage inline. */}
+          <Route path="/areas" element={<Navigate to="/planning" replace />} />
           <Route
             path="/networking"
             element={<ProtectedRoute feature="networking"><NetworkingPage /></ProtectedRoute>}
@@ -243,6 +246,7 @@ export default function App() {
           <Route path="/import" element={<FixedRoute><ImportPage /></FixedRoute>} />
           <Route path="/market" element={<FixedRoute><MarketPage /></FixedRoute>} />
           <Route path="/career" element={<FixedRoute><CareerPage /></FixedRoute>} />
+          <Route path="/hub" element={<FixedRoute><HubPage /></FixedRoute>} />
           <Route path="/admin" element={<OwnerRoute><AdminPage /></OwnerRoute>} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/profile" element={<ProfilePage />} />

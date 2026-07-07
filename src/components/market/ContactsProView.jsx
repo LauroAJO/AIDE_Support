@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  Plus, X, Pencil, Linkedin, Mail, Loader2, GraduationCap, Briefcase, Rocket, Clock, Search,
+  Plus, X, Pencil, Linkedin, Mail, Loader2, GraduationCap, Briefcase, Rocket, Clock, Search, Users,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -161,6 +162,7 @@ export default function ContactsProView({ initialContactId = null }) {
 }
 
 function ContactDetail({ data, onEdit, onRegister, onChangeStatus, onChangeRelevance }) {
+  const navigate = useNavigate();
   const { person, professional, org_links: orgLinks } = data;
   const prof = professional || {};
   const tags = parseTags(person.tags);
@@ -213,6 +215,16 @@ function ContactDetail({ data, onEdit, onRegister, onChangeStatus, onChangeRelev
           <Mail className="h-4 w-4" /> Enviar Email
         </a>
       </div>
+
+      {/* Ver no Networking — link inverso Mercado → Networking (bidirecional).
+          person.id é o network_people.id (referenciado por contact_professional). */}
+      <button
+        type="button"
+        onClick={() => navigate('/networking', { state: { contactId: person.id } })}
+        className="flex items-center gap-1.5 rounded-lg border border-indigo-300 px-3 py-1.5 text-sm font-medium text-indigo-700 transition hover:bg-indigo-50"
+      >
+        <Users className="h-4 w-4" /> Ver no Networking
+      </button>
 
       {/* Status de outreach */}
       <div>

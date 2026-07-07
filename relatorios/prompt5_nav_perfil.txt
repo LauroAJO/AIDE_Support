@@ -1,0 +1,115 @@
+================================
+AIDE — RELATÓRIO PROMPT 5
+Consolidação Menu de Perfil
+Data: 2026-07-07
+================================
+
+Pré-requisito: Layout.jsx lido por completo antes de qualquer alteração. Todo
+texto de UI em PT-BR. Nenhuma funcionalidade removida (itens apenas RELOCADOS;
+todas as rotas seguem acessíveis). Único arquivo de código alterado:
+src/components/Layout.jsx (+ src/version.js para o bump).
+
+
+MUDANÇAS IMPLEMENTADAS:
+
+1. ADMIN → PERFIL
+   - Removido da sidebar: o array OWNER_NAV (que continha Dashboard + Admin) foi
+     eliminado por completo (antes linhas ~49-52).
+   - Adicionado ao dropdown de perfil, logo após "Meu Perfil", só para owner
+     (isOwner), ícone Shield, com "dot" vermelho quando pendingUsers.length > 0
+     via badgeCount('pendingUsers') (Layout.jsx ~linhas 197-210).
+
+2. DASHBOARD → PERFIL
+   - Removido da sidebar (junto com OWNER_NAV).
+   - Adicionado ao dropdown após "Admin", só para owner, ícone LayoutDashboard
+     (Layout.jsx ~linhas 211-220).
+
+3. PAGAMENTOS → PERFIL
+   - Removido de NAV_ITEMS (a sidebar não tem mais "Pagamentos").
+   - Adicionado ao dropdown para TODOS os usuários, ícone CreditCard
+     (Layout.jsx ~linhas 221-229). Posição resultante: para owner fica após
+     Dashboard; para assistentes (sem Admin/Dashboard) fica logo após "Meu
+     Perfil" — a mesma marcação condicional produz as duas ordens corretas.
+
+4. IMPORTAR → ÚLTIMA POSIÇÃO
+   - "Importar Dados" movido para a ÚLTIMA posição do dropdown, depois de
+     "Configurações" e imediatamente antes do divisor + "Sair" (Layout.jsx
+     ~linhas 238-247). Condição de visibilidade mantida (owner || user_type
+     'fixed').
+
+5. SIDEBAR LIMPA
+   - As três arrays antigas (NAV_ITEMS + OWNER_NAV + fixedNav concatenadas) foram
+     unificadas num ÚNICO NAV_ITEMS ordenado (Layout.jsx ~linhas 33-51), com flag
+     `fixed: true` para Mercado/Carreira/Hub. Filtro único em navItems
+     (~linhas 74-84): `fixed` exige canFixed; `feature` respeita permissão; owner
+     vê tudo.
+   - "Avisos" foi MOVIDO do dropdown para a sidebar (ver DESVIOS D1), como item
+     com feature 'alerts' ("if visible").
+   - Ordem final da sidebar (owner): Tarefas, Planejamento, Timer, Calendário,
+     Drive, Notas, Reunião, Networking, Mercado, Carreira, Chat, Avisos, Hub.
+   - Bottom nav "Mais" (mobile): usa o mesmo navItems, então Admin, Dashboard e
+     Pagamentos NÃO aparecem mais lá (removidos automaticamente). Sem seções/
+     divisores órfãos.
+
+
+ORDEM FINAL DO DROPDOWN (owner):
+  1. Nome do usuário (não clicável)
+  2. [divisor]
+  3. Meu Perfil
+  4. Admin (só owner; dot vermelho se houver pendências)
+  5. Dashboard (só owner)
+  6. Pagamentos
+  7. Configurações
+  8. Importar Dados (owner || fixed)
+  9. [divisor]
+  10. Sair
+
+ORDEM FINAL DO DROPDOWN (assistente — sem role owner e sem user_type 'fixed'):
+  1. Nome do usuário (não clicável)
+  2. [divisor]
+  3. Meu Perfil
+  4. Pagamentos
+  5. Configurações
+  6. [divisor]
+  7. Sair
+  (sem Admin, sem Dashboard, sem Importar)
+  Obs.: um assistente FIXO (user_type='fixed') também vê "Importar Dados" entre
+  Configurações e o divisor, conforme a condição de visibilidade preservada.
+
+
+VERIFICAÇÃO:
+  npm run build : OK  (0 erros; 1580 módulos; "✓ built in 3.66s"; postbuild
+                       copiou _worker.js → dist/_worker.js). Único aviso é o
+                       pré-existente de tamanho de chunk (>500 kB) — não é erro.
+  Deploy        : https://1f1b5be9.aide-support.pages.dev
+                  (produção canônica: https://aide-support.pages.dev)
+  Commit        : 25af44d873415ac1d03dc9c8b0bfb23b986fc27f
+                  ("v2.3.3 — Admin/Dashboard/Pagamentos no menu de perfil")
+  Push          : origin main  488d9f8..25af44d
+  Versão        : src/version.js → '2.3.3'
+
+
+PENDÊNCIAS / DESVIOS:
+  D1) "AVISOS" MOVIDO DO DROPDOWN PARA A SIDEBAR (inferência necessária): as
+      Changes 1-4 não mencionam Avisos, mas as listas-alvo são consistentes só se
+      Avisos sair do dropdown e entrar na sidebar — a lista do dropdown (owner e
+      assistente) OMITE Avisos, enquanto a lista da sidebar (Change 5) INCLUI
+      "Avisos (if visible)". Deixá-lo no dropdown quebraria a ordem pedida; tirá-lo
+      sem recolocá-lo removeria acesso. Logo: movido para a sidebar como item de
+      feature 'alerts' (owner sempre vê; assistente vê conforme permissão). Nada
+      foi removido — a rota /alerts continua acessível.
+  D2) PAGAMENTOS PARA "TODOS OS USUÁRIOS": conforme pedido, o item passou a ser
+      exibido no dropdown SEM gate de permissão (antes era NAV_ITEM com
+      feature:'payment'). A rota /payment continua protegida (ProtectedRoute
+      feature="payment"), então quem não tiver permissão vê o item mas cai em
+      "Sem acesso" ao clicar. Seguido literalmente o "for ALL users".
+  D3) REESTRUTURAÇÃO DAS ARRAYS: para obter a ordem exata da sidebar (Hub após
+      Chat/Avisos, e Avisos intercalado), unifiquei NAV_ITEMS/OWNER_NAV/fixedNav
+      numa só lista ordenada com flag `fixed`. Comportamento de permissão
+      preservado; apenas a forma de montar a lista mudou.
+
+  Deploy feito conforme instruído (build passou primeiro).
+
+================================
+FIM DO RELATÓRIO
+================================

@@ -122,7 +122,7 @@ export default function HubPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="flex items-center gap-2 text-2xl font-bold text-ink">
           <Radar className="h-6 w-6 text-accent" />
-          Hub
+          Scraping Hub
         </h1>
         <button
           type="button"

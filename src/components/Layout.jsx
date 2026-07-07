@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   CheckSquare,
@@ -21,6 +21,9 @@ import {
   Radar,
   MoreHorizontal,
   X,
+  User,
+  Settings,
+  LogOut,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
@@ -30,34 +33,35 @@ import TimerIndicator from './timer/TimerIndicator';
 import TimerCheckMonitor from './timer/TimerCheckMonitor';
 import NotificationBell from './notifications/NotificationBell';
 
-// `feature` matches keys in user.permissions (resolved server-side). Items
-// without a `feature` are always visible. Owner always sees everything.
-// `badge` chooses which store field drives the red counter pill (if any).
 // Nav único e ordenado (sidebar + bottom nav). `feature` = permissão (owner vê
 // tudo); `fixed: true` = só owner + assistente fixo. Sem `feature` nem `fixed`
-// = sempre visível. Admin/Dashboard/Pagamentos foram movidos para o menu de
-// perfil; "Avisos" veio do menu de perfil para a sidebar (v2.3.3).
+// = sempre visível. `group: 'rede'` agrupa visualmente a "Rede Profissional".
+// v2.3.4: Timer e Avisos foram para o menu de perfil; Chat vai ao fim; Hub =
+// "Scraping Hub". O widget de start/stop do Timer (TimerIndicator) permanece na
+// sidebar/header — só o LINK de navegação saiu daqui.
 const NAV_ITEMS = [
   { to: '/tasks',      label: 'Tarefas',      icon: CheckSquare,   feature: 'tasks' },
   { to: '/planning',   label: 'Planejamento', icon: CalendarRange, feature: 'planning' },
-  { to: '/timer',      label: 'Timer',        icon: Timer,         feature: 'timer' },
   { to: '/calendar',   label: 'Calendário',   icon: Calendar,      feature: 'calendar' },
   { to: '/drive',      label: 'Drive',        icon: HardDrive,     feature: 'drive' },
   { to: '/notes',      label: 'Notas',        icon: FileText,      feature: 'notes' },
   { to: '/meeting',    label: 'Reunião',      icon: Video,         feature: 'meeting' },
-  { to: '/networking', label: 'Networking',   icon: NetworkIcon,   feature: 'networking' },
-  { to: '/market',     label: 'Mercado',      icon: Building2,     fixed: true },
-  { to: '/career',     label: 'Carreira',     icon: Briefcase,     fixed: true },
+  { to: '/networking', label: 'Networking',   icon: NetworkIcon,   feature: 'networking', group: 'rede' },
+  { to: '/market',     label: 'Mercado',      icon: Building2,     fixed: true, group: 'rede' },
+  { to: '/career',     label: 'Carreira',     icon: Briefcase,     fixed: true, group: 'rede' },
+  { to: '/hub',        label: 'Scraping Hub', icon: Radar,         fixed: true },
   { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread' },
-  { to: '/alerts',     label: 'Avisos',       icon: Bell,          feature: 'alerts' },
-  { to: '/hub',        label: 'Hub',          icon: Radar,         fixed: true },
 ];
 
-const navClass = ({ isActive }) =>
+// `inGroup` pinta os itens da "Rede Profissional" com um fundo índigo sutil
+// quando NÃO ativos; o estilo ativo (índigo cheio) é preservado.
+const navClass = (inGroup) => ({ isActive }) =>
   `flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
     isActive
       ? 'bg-accent text-white'
-      : 'text-ink2 hover:bg-surface2 hover:text-ink'
+      : inGroup
+        ? 'bg-indigo-50 text-ink2 hover:bg-indigo-100 hover:text-ink'
+        : 'text-ink2 hover:bg-surface2 hover:text-ink'
   }`;
 
 export default function Layout({ children }) {
@@ -93,7 +97,8 @@ export default function Layout({ children }) {
 
   // Bottom nav (mobile): 4 slots fixos + botão "Mais" que abre um bottom sheet
   // com o restante dos itens. Respeita as permissões (usa navItems já filtrado).
-  const MOBILE_PRIMARY = ['/tasks', '/planning', '/timer', '/notes'];
+  // '/timer' saiu da nav (virou item do menu de perfil); Calendário assume o slot.
+  const MOBILE_PRIMARY = ['/tasks', '/planning', '/calendar', '/notes'];
   const primaryNav = MOBILE_PRIMARY
     .map((to) => navItems.find((it) => it.to === to))
     .filter(Boolean);
@@ -180,13 +185,16 @@ export default function Layout({ children }) {
                   {user?.name || user?.email}
                 </div>
                 <div className="border-t border-line" />
+                {/* Meu Perfil — todos */}
                 <button
                   type="button"
                   onClick={() => go('/profile')}
-                  className="block w-full px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
-                  Meu Perfil
+                  <User className="h-4 w-4" />
+                  <span className="flex-1">👤 Meu Perfil</span>
                 </button>
+                {/* Admin — owner, com badge de pendências */}
                 {isOwner && (
                   <button
                     type="button"
@@ -194,12 +202,13 @@ export default function Layout({ children }) {
                     className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                   >
                     <Shield className="h-4 w-4" />
-                    <span className="flex-1">Admin</span>
+                    <span className="flex-1">🛡️ Admin</span>
                     {badgeCount('pendingUsers') > 0 && (
                       <span className="h-2 w-2 rounded-full bg-danger" title="Aprovações pendentes" />
                     )}
                   </button>
                 )}
+                {/* Dashboard — owner */}
                 {isOwner && (
                   <button
                     type="button"
@@ -207,24 +216,46 @@ export default function Layout({ children }) {
                     className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                   >
                     <LayoutDashboard className="h-4 w-4" />
-                    Dashboard
+                    <span className="flex-1">📊 Dashboard</span>
                   </button>
                 )}
+                {/* Timer — todos (só o LINK; o widget start/stop segue na sidebar/header) */}
+                <button
+                  type="button"
+                  onClick={() => go('/timer')}
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                >
+                  <Timer className="h-4 w-4" />
+                  <span className="flex-1">⏱️ Timer</span>
+                </button>
+                {/* Pagamentos — todos */}
                 <button
                   type="button"
                   onClick={() => go('/payment')}
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
                   <CreditCard className="h-4 w-4" />
-                  Pagamentos
+                  <span className="flex-1">💳 Pagamentos</span>
                 </button>
+                {/* Avisos — todos */}
+                <button
+                  type="button"
+                  onClick={() => go('/alerts')}
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                >
+                  <Bell className="h-4 w-4" />
+                  <span className="flex-1">🔔 Avisos</span>
+                </button>
+                {/* Configurações — todos */}
                 <button
                   type="button"
                   onClick={() => go('/settings')}
-                  className="block w-full px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
-                  Configurações
+                  <Settings className="h-4 w-4" />
+                  <span className="flex-1">⚙️ Configurações</span>
                 </button>
+                {/* Importar Dados — owner || assistente fixo */}
                 {(user?.role === 'owner' || user?.user_type === 'fixed') && (
                   <button
                     type="button"
@@ -232,16 +263,18 @@ export default function Layout({ children }) {
                     className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                   >
                     <Upload className="h-4 w-4" />
-                    Importar Dados
+                    <span className="flex-1">📥 Importar Dados</span>
                   </button>
                 )}
                 <div className="border-t border-line" />
+                {/* Sair — todos */}
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="block w-full px-3 py-2.5 text-left text-sm text-danger transition hover:bg-surface2"
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-danger transition hover:bg-surface2"
                 >
-                  Sair
+                  <LogOut className="h-4 w-4" />
+                  <span className="flex-1">🚪 Sair</span>
                 </button>
               </div>
             )}
@@ -262,19 +295,39 @@ export default function Layout({ children }) {
         {/* Sidebar (desktop) */}
         <aside className="hidden w-60 shrink-0 flex-col border-r border-line bg-surface p-3 md:flex">
           <div className="flex flex-col gap-1">
-            {navItems.map((item) => {
+            {navItems.map((item, i) => {
               const Icon = item.icon;
               const count = item.badge ? badgeCount(item.badge) : 0;
+              const inGroup = item.group === 'rede';
+              const prev = navItems[i - 1];
+              const next = navItems[i + 1];
+              const startsGroup = inGroup && (!prev || prev.group !== 'rede');
+              const endsGroup = inGroup && (!next || next.group !== 'rede');
               return (
-                <NavLink key={item.to} to={item.to} className={navClass}>
-                  <Icon className="h-5 w-5" />
-                  <span className="flex-1">{item.label}</span>
-                  {count > 0 && (
-                    <span className="rounded-full bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                      {count}
-                    </span>
+                <Fragment key={item.to}>
+                  {/* Divisor + rótulo "Rede Profissional" acima de Networking */}
+                  {startsGroup && (
+                    <div className="mt-2 border-t border-[#E8E3DB] pt-2">
+                      <span
+                        className="block px-3 pb-1 text-[10px] font-semibold uppercase text-muted"
+                        style={{ letterSpacing: '0.05em' }}
+                      >
+                        Rede Profissional
+                      </span>
+                    </div>
                   )}
-                </NavLink>
+                  <NavLink to={item.to} className={navClass(inGroup)}>
+                    <Icon className="h-5 w-5" />
+                    <span className="flex-1">{item.label}</span>
+                    {count > 0 && (
+                      <span className="rounded-full bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                        {count}
+                      </span>
+                    )}
+                  </NavLink>
+                  {/* Divisor abaixo de Carreira (fim do grupo) */}
+                  {endsGroup && <div className="mt-2 border-t border-[#E8E3DB]" />}
+                </Fragment>
               );
             })}
           </div>

@@ -33,6 +33,10 @@ import NotificationBell from './notifications/NotificationBell';
 // `feature` matches keys in user.permissions (resolved server-side). Items
 // without a `feature` are always visible. Owner always sees everything.
 // `badge` chooses which store field drives the red counter pill (if any).
+// Nav único e ordenado (sidebar + bottom nav). `feature` = permissão (owner vê
+// tudo); `fixed: true` = só owner + assistente fixo. Sem `feature` nem `fixed`
+// = sempre visível. Admin/Dashboard/Pagamentos foram movidos para o menu de
+// perfil; "Avisos" veio do menu de perfil para a sidebar (v2.3.3).
 const NAV_ITEMS = [
   { to: '/tasks',      label: 'Tarefas',      icon: CheckSquare,   feature: 'tasks' },
   { to: '/planning',   label: 'Planejamento', icon: CalendarRange, feature: 'planning' },
@@ -40,15 +44,13 @@ const NAV_ITEMS = [
   { to: '/calendar',   label: 'Calendário',   icon: Calendar,      feature: 'calendar' },
   { to: '/drive',      label: 'Drive',        icon: HardDrive,     feature: 'drive' },
   { to: '/notes',      label: 'Notas',        icon: FileText,      feature: 'notes' },
-  { to: '/payment',    label: 'Pagamentos',   icon: CreditCard,    feature: 'payment' },
   { to: '/meeting',    label: 'Reunião',      icon: Video,         feature: 'meeting' },
   { to: '/networking', label: 'Networking',   icon: NetworkIcon,   feature: 'networking' },
+  { to: '/market',     label: 'Mercado',      icon: Building2,     fixed: true },
+  { to: '/career',     label: 'Carreira',     icon: Briefcase,     fixed: true },
   { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread' },
-];
-
-const OWNER_NAV = [
-  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/admin',     label: 'Admin',     icon: Shield, ownerOnly: true, badge: 'pendingUsers' },
+  { to: '/alerts',     label: 'Avisos',       icon: Bell,          feature: 'alerts' },
+  { to: '/hub',        label: 'Hub',          icon: Radar,         fixed: true },
 ];
 
 const navClass = ({ isActive }) =>
@@ -71,25 +73,17 @@ export default function Layout({ children }) {
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
   const isOwner = user?.role === 'owner';
-  // Permission-aware nav: owner sees everything; assistants drop any feature
-  // gated at 'none'. Items without a `feature` key are always visible.
-  const visibleMain = NAV_ITEMS.filter((item) => {
+  // "Mercado", "Carreira", "Hub" (fixed) — só owner e assistente fixo (mesma regra dos endpoints).
+  const canFixed = isOwner || user?.role === 'assistant_fixed' || user?.user_type === 'fixed';
+  // Permission-aware nav numa lista única e ordenada: owner vê tudo; itens `fixed`
+  // exigem canFixed; itens com `feature` respeitam a permissão; demais sempre visíveis.
+  const navItems = NAV_ITEMS.filter((item) => {
+    if (item.fixed) return canFixed;
     if (!item.feature) return true;
     if (isOwner) return true;
     const perm = userPermissions && userPermissions[item.feature];
     return !!perm && perm !== 'none';
   });
-  const visibleOwner = isOwner ? OWNER_NAV : [];
-  // "Mercado", "Carreira" e "Importar" — só owner e assistente fixo (mesma regra dos endpoints).
-  const canFixed = isOwner || user?.role === 'assistant_fixed' || user?.user_type === 'fixed';
-  const fixedNav = canFixed
-    ? [
-        { to: '/market', label: 'Mercado', icon: Building2 },
-        { to: '/career', label: 'Carreira', icon: Briefcase },
-        { to: '/hub', label: 'Hub', icon: Radar },
-      ]
-    : [];
-  const navItems = [...visibleMain, ...fixedNav, ...visibleOwner];
   const chatUnread = useStore((s) => s.chatUnread);
   const badgeCount = (key) => {
     if (key === 'pendingUsers') return pendingUsers ? pendingUsers.length : 0;
@@ -193,12 +187,43 @@ export default function Layout({ children }) {
                 >
                   Meu Perfil
                 </button>
+                {isOwner && (
+                  <button
+                    type="button"
+                    onClick={() => go('/admin')}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                  >
+                    <Shield className="h-4 w-4" />
+                    <span className="flex-1">Admin</span>
+                    {badgeCount('pendingUsers') > 0 && (
+                      <span className="h-2 w-2 rounded-full bg-danger" title="Aprovações pendentes" />
+                    )}
+                  </button>
+                )}
+                {isOwner && (
+                  <button
+                    type="button"
+                    onClick={() => go('/dashboard')}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                  >
+                    <LayoutDashboard className="h-4 w-4" />
+                    Dashboard
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => go('/alerts')}
+                  onClick={() => go('/payment')}
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                >
+                  <CreditCard className="h-4 w-4" />
+                  Pagamentos
+                </button>
+                <button
+                  type="button"
+                  onClick={() => go('/settings')}
                   className="block w-full px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
-                  Avisos
+                  Configurações
                 </button>
                 {(user?.role === 'owner' || user?.user_type === 'fixed') && (
                   <button
@@ -210,13 +235,6 @@ export default function Layout({ children }) {
                     Importar Dados
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => go('/settings')}
-                  className="block w-full px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
-                >
-                  Configurações
-                </button>
                 <div className="border-t border-line" />
                 <button
                   type="button"

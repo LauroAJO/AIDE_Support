@@ -1,0 +1,74 @@
+================================================================================
+BACKUP PRÉ-MIGRAÇÃO — consolidação network_institutions → market_organizations
+Data: 2026-07-07
+Origem: D1 REMOTO (aide-db, v3-prod / WEUR / AMS). Somente leitura.
+================================================================================
+
+--------------------------------------------------------------------------------
+1) SELECT * FROM network_institutions;   → 2 LINHAS
+--------------------------------------------------------------------------------
+[
+  {
+    "id": "8eb81345-4231-465b-9d34-80646f0fba01",
+    "name": "NovalT",
+    "type": "company",
+    "area": "",
+    "website": "https://novelt.com/nl/",
+    "linkedin": "",
+    "notes": "",
+    "tags": "[\"StartUp\",\"RHYSE_Sim\"]",
+    "created_by": "103198267338991031428",
+    "created_at": 1779726922,
+    "updated_at": 1779726922
+  },
+  {
+    "id": "3b31a997-885a-4d61-bbf8-1776828fd5b6",
+    "name": "University of Twente",
+    "type": "university",
+    "area": "",
+    "website": "",
+    "linkedin": "",
+    "notes": "",
+    "tags": "[\"EngD\",\"PhD\",\"TFE_Department\",\"ISE_ResearchGroup\"]",
+    "created_by": "103198267338991031428",
+    "created_at": 1779727075,
+    "updated_at": 1779727075
+  }
+]
+
+--------------------------------------------------------------------------------
+2) SELECT * FROM person_roles WHERE institution_id IS NOT NULL;   → 1 LINHA
+--------------------------------------------------------------------------------
+[
+  {
+    "id": "a32e1f4e-0fde-43f8-baa7-548b76a05d6e",
+    "person_id": "57ad75c3-165b-4bb3-9d78-fc000d941829",
+    "role": "Assistant Professor",
+    "institution_id": "3b31a997-885a-4d61-bbf8-1776828fd5b6",
+    "institution_name": "University of Twente",
+    "start_date": "",
+    "end_date": "",
+    "current": 1,
+    "created_at": 1779737372
+  }
+]
+
+--------------------------------------------------------------------------------
+3) SELECT * FROM network_entity_links WHERE network_institution_id IS NOT NULL;
+   → 0 LINHAS (vazio)
+--------------------------------------------------------------------------------
+[]
+
+--------------------------------------------------------------------------------
+REFERÊNCIA — market_organizations que casam com Twente / Novel / Noval
+   (SELECT id, name, type FROM market_organizations WHERE name LIKE ...)
+--------------------------------------------------------------------------------
+  99d9e780-6329-4b7e-b771-15270a0a5223 | H2Hub Twente / IS2H4C            | consortium
+  cc4bdd0c-6a50-490e-8adb-91e4594173d8 | University of Twente            | university  ← UT já existe no Mercado
+  a7841bd6-8bc0-4db7-a2fb-ac79097882c1 | University of Twente — HyUT / SEED | university
+  15274e77-dbde-45f3-8fa3-805009a692ac | Energiehub Twente / Hydronex    | company
+  (NENHUM "Novel"/"Noval" → NovalT NÃO existe em market_organizations.)
+
+================================================================================
+FIM DO BACKUP
+================================================================================

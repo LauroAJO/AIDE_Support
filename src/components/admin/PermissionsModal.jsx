@@ -113,6 +113,7 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState(null); // { type: 'success' | 'error', msg }
   // The two maps the modal cares about. `current` starts as resolved
   // (preset + overrides) and tracks every checkbox change. `preset` is the
   // immutable preset baseline used for the diff-on-save.
@@ -141,6 +142,13 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
     load();
     return () => { cancelled = true; };
   }, [user.id]);
+
+  // Auto-descarta o toast após alguns segundos.
+  useEffect(() => {
+    if (!toast) return undefined;
+    const id = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   const toggle = (feature, action) => {
     const key = `${feature}.${action}`;
@@ -197,35 +205,55 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
     return out;
   }, [current, presetMap]);
 
+  // Salva TODAS as caixas numa ÚNICA requisição em lote. Antes eram ~48 requests
+  // concorrentes (um por checkbox), e sob concorrência alguns não persistiam —
+  // esse era o bug. Agora cada caixa vira um override explícito e atômico.
   const save = async () => {
     setBusy(true);
     setError('');
+    setToast(null);
     try {
-      const ops = [];
+      const permissions = [];
       for (const f of FEATURE_GROUPS) {
         for (const [action] of f.actions) {
-          const key = `${f.key}.${action}`;
-          const cur = !!current[key];
-          const def = !!presetMap[key];
-          if (cur === def) {
-            // Matches preset → remove any override on the server.
-            ops.push(apiFetch(`/api/users/${user.id}/granular-permissions`, {
-              method: 'DELETE',
-              body: JSON.stringify({ feature: f.key, action }),
-            }).catch(() => null));
-          } else {
-            // Differs from preset → upsert override.
-            ops.push(apiFetch(`/api/users/${user.id}/granular-permissions`, {
-              method: 'PUT',
-              body: JSON.stringify({ feature: f.key, action, allowed: cur }),
-            }));
-          }
+          permissions.push({ feature: f.key, action, allowed: !!current[`${f.key}.${action}`] });
         }
       }
-      await Promise.all(ops);
-      onSaved && onSaved();
+      await apiFetch(`/api/users/${user.id}/granular-permissions`, {
+        method: 'PUT',
+        body: JSON.stringify({ permissions }),
+      });
+      setToast({ type: 'success', msg: 'Permissões salvas com sucesso' });
+      onSaved && onSaved(); // refresh em segundo plano; modal permanece aberto
     } catch (e) {
       setError(String((e && e.message) || e).slice(0, 200));
+      setToast({ type: 'error', msg: 'Erro ao salvar — nem todas as permissões foram salvas' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Restaura o preset: remove TODOS os overrides granulares do usuário (volta ao
+  // preset puro) e recarrega as caixas. Confirma antes de executar.
+  const resetToPreset = async () => {
+    if (!window.confirm('Restaurar o preset deste usuário? Todos os ajustes personalizados serão removidos.')) return;
+    setBusy(true);
+    setError('');
+    setToast(null);
+    try {
+      await apiFetch(`/api/users/${user.id}/granular-permissions`, {
+        method: 'DELETE',
+        body: JSON.stringify({ all: true }),
+      });
+      const fresh = await apiFetch(`/api/users/${user.id}/granular-permissions`);
+      setPresetId(fresh?.preset || presetId);
+      setPresetMap(listToMap(fresh?.presetPerms));
+      setCurrent(fresh?.resolved || listToMap(fresh?.presetPerms));
+      setToast({ type: 'success', msg: 'Preset restaurado' });
+      onSaved && onSaved(); // refresh em segundo plano; modal permanece aberto
+    } catch (e) {
+      setError(String((e && e.message) || e).slice(0, 200));
+      setToast({ type: 'error', msg: 'Erro ao restaurar preset' });
     } finally {
       setBusy(false);
     }
@@ -253,6 +281,18 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
           {error && (
             <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
               {error}
+            </div>
+          )}
+
+          {toast && (
+            <div
+              className={`rounded-lg px-3 py-2 text-xs font-medium ${
+                toast.type === 'success'
+                  ? 'border border-emerald-300 bg-emerald-50 text-emerald-700'
+                  : 'border border-danger/30 bg-danger/10 text-danger'
+              }`}
+            >
+              {toast.msg}
             </div>
           )}
 
@@ -345,20 +385,30 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
           )}
         </div>
 
-        <div className="flex shrink-0 justify-end gap-2 border-t border-line px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-line px-4 py-3">
           <button
-            onClick={onClose}
-            className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2"
-          >
-            Cancelar
-          </button>
-          <button
-            onClick={save}
+            onClick={resetToPreset}
             disabled={busy || loading}
-            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
+            title="Remove todos os ajustes personalizados e volta ao preset"
+            className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2 disabled:opacity-60"
           >
-            {busy ? 'Salvando…' : 'Salvar permissões'}
+            Restaurar preset
           </button>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={save}
+              disabled={busy || loading}
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
+            >
+              {busy ? 'Salvando…' : 'Salvar permissões'}
+            </button>
+          </div>
         </div>
       </div>
     </div>

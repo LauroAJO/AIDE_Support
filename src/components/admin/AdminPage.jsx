@@ -329,7 +329,9 @@ export default function AdminPage() {
         <PermissionsModal
           user={permsTarget}
           onClose={() => setPermsTarget(null)}
-          onSaved={() => { setPermsTarget(null); refresh(); }}
+          // Refresh apenas: o modal permanece aberto após salvar para mostrar o
+          // toast de sucesso; o owner fecha manualmente (Cancelar/X).
+          onSaved={() => { refresh(); }}
         />
       )}
     </div>

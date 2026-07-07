@@ -98,12 +98,14 @@ export default function NetworkingPage() {
   const [proIds, setProIds] = useState(() => new Set());
   // Mapa person_id → outreach_status (do Mercado) p/ exibir no card e no detalhe.
   const [proStatus, setProStatus] = useState(() => ({}));
+  // Perfil profissional completo (contact_professional) por person_id — enriquece o detalhe.
+  const [proProfile, setProProfile] = useState(() => ({}));
   const navigate = useNavigate();
   const location = useLocation();
 
   const loadAll = async () => {
     try {
-      const [routes, st, ar, pr, fr, ts, mc] = await Promise.all([
+      const [routes, st, ar, pr, fr, ts, mc, mo] = await Promise.all([
         apiFetch('/api/network/routes').catch(() => ({ people: [], institutions: [], connections: [], person_roles: [] })),
         apiFetch('/api/bridge/sync-status').catch(() => null),
         apiFetch('/api/areas').catch(() => []),
@@ -111,15 +113,24 @@ export default function NetworkingPage() {
         apiFetch('/api/fronts').catch(() => []),
         tasksInStore.length === 0 ? apiFetch('/api/tasks').catch(() => []) : Promise.resolve(tasksInStore),
         apiFetch('/api/market/contacts').catch(() => []),
+        apiFetch('/api/market/organizations').catch(() => []),
       ]);
       setPeople(routes.people || []);
-      setInstitutions(routes.institutions || []);
+      // Consolidação v2.4: "instituições" agora vêm de market_organizations (Mercado)
+      // e alimentam apenas o seletor de organização nas funções da pessoa.
+      setInstitutions(mo || []);
       setConnections(routes.connections || []);
       setPersonRoles(routes.person_roles || []);
       setProIds(new Set((mc || []).map((c) => c.person_id)));
       const statusMap = {};
-      (mc || []).forEach((c) => { if (c.person_id) statusMap[c.person_id] = c.outreach_status || 'not_contacted'; });
+      const profMap = {};
+      (mc || []).forEach((c) => {
+        if (!c.person_id) return;
+        statusMap[c.person_id] = c.outreach_status || 'not_contacted';
+        profMap[c.person_id] = c;
+      });
       setProStatus(statusMap);
+      setProProfile(profMap);
       if (st) setBridgeStatus(st);
       if (ar) setAreas(ar);
       if (pr) setProjects(pr);
@@ -175,23 +186,18 @@ export default function NetworkingPage() {
   const allTags = useMemo(() => {
     const s = new Set();
     people.forEach((p) => (p.tags || []).forEach((t) => s.add(t)));
-    institutions.forEach((i) => (i.tags || []).forEach((t) => s.add(t)));
     return [...s];
-  }, [people, institutions]);
+  }, [people]);
 
+  // Consolidação v2.4: a lista de Networking mostra SOMENTE pessoas (instituições
+  // foram unificadas em Mercado/market_organizations).
   const items = useMemo(() => {
     const q = search.trim().toLowerCase();
-    let all = [];
-    if (filter === 'all' || filter === 'people') {
-      all = all.concat(people.map((p) => ({ ...p, _kind: 'person' })));
-    }
-    if (filter === 'all' || filter === 'institutions') {
-      all = all.concat(institutions.map((i) => ({ ...i, _kind: 'institution' })));
-    }
+    const all = people.map((p) => ({ ...p, _kind: 'person' }));
     return all.filter((it) => {
       if (tagFilter && !(it.tags || []).includes(tagFilter)) return false;
       if (q) {
-        const roleStr = it._kind === 'person' && it.roles
+        const roleStr = it.roles
           ? it.roles.map((r) => `${r.role} ${r.institution_name}`).join(' ')
           : '';
         const hay = `${it.name} ${it.role || ''} ${it.institution || ''} ${it.area || ''} ${roleStr}`.toLowerCase();
@@ -199,14 +205,12 @@ export default function NetworkingPage() {
       }
       return true;
     });
-  }, [people, institutions, filter, search, tagFilter]);
+  }, [people, search, tagFilter]);
 
   const selectedItem = useMemo(() => {
     if (!selected) return null;
-    return selected.kind === 'person'
-      ? people.find((p) => p.id === selected.id)
-      : institutions.find((i) => i.id === selected.id);
-  }, [selected, people, institutions]);
+    return people.find((p) => p.id === selected.id) || null;
+  }, [selected, people]);
 
   const removeItem = async (kind, id) => {
     const label = kind === 'person' ? 'esta pessoa' : 'esta instituição';
@@ -268,12 +272,6 @@ export default function NetworkingPage() {
           >
             <Plus className="h-3.5 w-3.5" /> Pessoa
           </button>
-          <button
-            onClick={() => setEditor({ kind: 'institution', mode: 'create', payload: emptyInstitution() })}
-            className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm font-medium text-ink2 hover:bg-surface2"
-          >
-            <Plus className="h-3.5 w-3.5" /> Instituição
-          </button>
         </div>
       </div>
 
@@ -282,12 +280,7 @@ export default function NetworkingPage() {
           <div className="flex w-full min-w-0 min-h-0 flex-col md:w-[35%]">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar pessoas/instituições..." className="input pl-8" />
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1">
-              <Chip active={filter === 'all'} onClick={() => setFilter('all')}>Todos</Chip>
-              <Chip active={filter === 'people'} onClick={() => setFilter('people')}>Pessoas</Chip>
-              <Chip active={filter === 'institutions'} onClick={() => setFilter('institutions')}>Instituições</Chip>
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar pessoas..." className="input pl-8" />
             </div>
             {allTags.length > 0 && (
               <div className="mt-2 flex max-h-32 flex-wrap gap-1 overflow-y-auto">
@@ -400,6 +393,7 @@ export default function NetworkingPage() {
                 connections={connections}
                 hasPro={selected.kind === 'person' && proIds.has(selectedItem.id)}
                 outreachStatus={proStatus[selectedItem.id]}
+                proProfile={proProfile[selectedItem.id] || null}
                 onChangeOutreach={(s) => changeOutreach(selectedItem.id, s)}
                 onViewMarket={() => navigate('/market', { state: { contactId: selectedItem.id } })}
                 onEdit={() => setEditor({ kind: selected.kind, mode: 'edit', payload: { ...selectedItem } })}
@@ -428,7 +422,7 @@ export default function NetworkingPage() {
           >
             <NetworkMap
               people={Array.isArray(people) ? people : []}
-              institutions={Array.isArray(institutions) ? institutions : []}
+              institutions={[]}
               connections={Array.isArray(connections) ? connections : []}
               personRoles={Array.isArray(personRoles) ? personRoles : []}
               onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
@@ -510,7 +504,21 @@ function BridgeBadge({ status }) {
   );
 }
 
-function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, onChangeOutreach, onViewMarket, onEdit, onDelete, onReloadConnections }) {
+// Estrelas 0-5 para relevância (PhD/Emprego/Spin-off) no detalhe da pessoa.
+function RelevanceStars({ label, value }) {
+  const v = Math.max(0, Math.min(5, Number(value) || 0));
+  return (
+    <div className="rounded-lg border border-line px-2 py-1.5 text-center">
+      <div className="text-[10px] font-medium text-ink2">{label}</div>
+      <div className="mt-0.5 text-xs">
+        <span className="text-amber-500">{'★'.repeat(v)}</span>
+        <span className="text-line">{'★'.repeat(5 - v)}</span>
+      </div>
+    </div>
+  );
+}
+
+function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, proProfile, onChangeOutreach, onViewMarket, onEdit, onDelete, onReloadConnections }) {
   const isPerson = kind === 'person';
   const linked = useMemo(() => {
     if (!isPerson) return [];
@@ -585,6 +593,24 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
                 ))}
               </select>
             </div>
+          </div>
+        )}
+
+        {/* Relevância (PhD/Emprego/Spin-off) + próxima ação — do contact_professional (Mercado) */}
+        {isPerson && hasPro && proProfile && (
+          <div className="space-y-2">
+            <div className="grid grid-cols-3 gap-2">
+              <RelevanceStars label="PhD" value={proProfile.relevance_for_phd} />
+              <RelevanceStars label="Emprego" value={proProfile.relevance_for_job} />
+              <RelevanceStars label="Spin-off" value={proProfile.relevance_for_spinoff} />
+            </div>
+            {(proProfile.next_action || proProfile.next_action_date) && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <span className="font-semibold">Próxima ação:</span>{' '}
+                {proProfile.next_action || '—'}
+                {proProfile.next_action_date ? ` · ${proProfile.next_action_date}` : ''}
+              </div>
+            )}
           </div>
         )}
 
@@ -1082,7 +1108,7 @@ function NetworkEditor({ editor, institutions, people, areas, projects, fronts, 
                           }}
                           className="input"
                         >
-                          <option value="">— Instituição —</option>
+                          <option value="">— Organização (Mercado) —</option>
                           {institutions.map((i) => (<option key={i.id} value={i.id}>{i.name}</option>))}
                         </select>
                       </div>
@@ -1090,7 +1116,7 @@ function NetworkEditor({ editor, institutions, people, areas, projects, fronts, 
                         <input
                           value={r.institution_name || ''}
                           onChange={(e) => updateRole(idx, { institution_name: e.target.value })}
-                          placeholder="Ou digite a instituição livre"
+                          placeholder="Ou digite a organização livre"
                           className="input"
                         />
                       )}

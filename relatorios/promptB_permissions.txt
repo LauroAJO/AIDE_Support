@@ -1,0 +1,101 @@
+================================
+AIDE — RELATÓRIO PROMPT B
+Fix Permissões Granulares
+Data: 2026-07-07
+================================
+
+Arquivos alterados: _worker.js, src/components/admin/PermissionsModal.jsx,
+src/components/admin/AdminPage.jsx. Sem migração. Sem deploy. Texto de UI em PT-BR.
+
+
+INVESTIGAÇÃO (localização exata do bug, antes da correção):
+
+  1. PermissionsModal.jsx — como salvava:
+     - Lista de features/actions: constante FEATURE_GROUPS (linhas 6-97). JÁ está
+       COMPLETA e idêntica ao spec do prompt (conferido feature a feature: tasks 9,
+       planning 5, calendar 5, drive 4, notes 7, areas 4, networking 4, payment 5,
+       chat 3, meeting 4). => Nenhuma ação faltando na UI.
+     - Ao clicar "Salvar" (função save, linhas ~200-232 do original): montava um
+       array `ops` e disparava UMA requisição HTTP POR checkbox (~48 no total) com
+       Promise.all:
+          * se a caixa == preset  → DELETE (com .catch(()=>null), erro engolido);
+          * se difere do preset    → PUT { feature, action, allowed }.
+       => Dezenas de requests concorrentes ao mesmo endpoint, cada um com uma
+          escrita no D1. Sob concorrência, algumas escritas falhavam/racejavam; os
+          DELETEs eram silenciados e o Promise.all só propaga a 1ª rejeição → certas
+          permissões (ex.: tasks.view_all/create, notes.view_own/create) não
+          persistiam, sem erro visível. ESSE é o bug.
+
+  2. _worker.js — PUT /api/users/:id/granular-permissions (handleUserGranular-
+     Permissions, ~linha 7057):
+     - PUT aceitava APENAS um item único { feature, action, allowed } e fazia
+       INSERT ... ON CONFLICT(user_id, feature, action) DO UPDATE (linhas 7084+).
+       Não havia modo em lote. Combinado com o modal disparando dezenas de PUT/
+       DELETE únicos e concorrentes, era o caminho frágil.
+     - Sem validação que "derrube" features específicas — o problema era a
+       concorrência, não a validação.
+     - GET/DELETE existiam; DELETE só removia 1 override por vez.
+
+  ⇒ LOCAL DO BUG: PermissionsModal.save() (fan-out de ~48 requests concorrentes,
+    com DELETEs silenciados) + PUT do worker aceitando só item único (sem lote
+    atômico). Corrige-se batendo tudo numa requisição/transação única.
+
+
+MUDANÇAS IMPLEMENTADAS:
+
+  BACKEND — _worker.js (handleUserGranularPermissions):
+    1. PUT agora aceita LOTE: body { permissions: [{feature, action, allowed}, ...] }
+       → grava tudo numa única transação via env.DB.batch() com
+       INSERT ... ON CONFLICT(user_id,feature,action) DO UPDATE (linhas ~7092-7118).
+       Mantido o modo item-único para compatibilidade (linhas ~7121-7140).
+    2. DELETE agora aceita { all: true } → DELETE FROM granular_permissions
+       WHERE user_id = ? (reset total ao preset) (linhas ~7148-7156). Mantido o
+       DELETE de item único.
+
+  FRONTEND — src/components/admin/PermissionsModal.jsx:
+    3. save() reescrita (linhas ~208-228): monta UM array com TODAS as caixas
+       (feature, action, allowed) e envia UMA requisição
+       PUT { permissions } → fim do fan-out concorrente; cada caixa vira override
+       explícito e atômico. Toast de sucesso/erro + onSaved() (refresh em 2º plano).
+    4. resetToPreset() novo (linhas ~236-258): confirma no dialog, chama
+       DELETE { all:true }, recarrega as permissões do preset e mostra toast.
+    5. Toast de feedback: estado `toast` (linha ~116) + auto-dismiss em 4s
+       (useEffect) + render (banner verde/vermelho) no corpo do modal.
+    6. Botão "Restaurar preset" no rodapé (esquerda); "Cancelar"/"Salvar
+       permissões" à direita; botão de salvar já mostra "Salvando…" (loading).
+
+  FRONTEND — src/components/admin/AdminPage.jsx:
+    7. onSaved do PermissionsModal passou a APENAS refresh() (não fecha mais o
+       modal), para o toast de sucesso ficar visível; o owner fecha manualmente.
+
+
+VERIFICAÇÃO:
+  npm run build           : OK (0 erros; "✓ built in 3.57s"; _worker.js copiado
+                               para dist/). Único aviso é o pré-existente de
+                               tamanho de chunk (>500 kB) — não é erro.
+  node --check _worker.js : OK (WORKER_OK).
+
+
+PENDÊNCIAS / DESVIOS:
+  D1) LISTA DE FEATURES/ACTIONS já estava completa e correta (conferida contra o
+      spec). Nenhuma alteração necessária ali.
+  D2) MODELO DE SALVAMENTO mudou de "diff vs preset" (só overrides que diferem)
+      para "todas as caixas explícitas". Agora cada caixa salva vira um override
+      em granular_permissions. É mais robusto (não depende do preset por-ação) e
+      combina com "Restaurar preset" (apaga todos os overrides → volta ao preset).
+      Efeito colateral: após salvar, mudar o preset do usuário não afeta mais as
+      ações já salvas (todas viram override) — use "Restaurar preset" para voltar
+      a herdar do preset. Comportamento efetivo de permissão é idêntico.
+  D3) UX: "Salvar permissões" NÃO fecha mais o modal (fica aberto exibindo o toast
+      "Permissões salvas com sucesso"); o refresh da lista de admin roda em 2º
+      plano via onSaved. Fechamento é manual (Cancelar/X). Necessário para o toast
+      ser visível (não há sistema de toast global).
+  D4) Dependência de schema: o ON CONFLICT(user_id,feature,action) e o batch
+      exigem o índice UNIQUE(user_id,feature,action) da migração 0024 (já
+      existente). Nenhuma migração nova foi criada.
+  D5) NENHUM deploy feito — aguardando aprovação. (Fix é só código; sem mudança de
+      banco, vai ao ar com um npm run deploy normal.)
+
+================================
+FIM DO RELATÓRIO
+================================

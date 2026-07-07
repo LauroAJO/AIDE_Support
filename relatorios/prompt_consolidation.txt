@@ -1,0 +1,111 @@
+================================
+AIDE — RELATÓRIO CONSOLIDAÇÃO
+network_institutions → market_organizations
+Data: 2026-07-07
+OPÇÃO B (consolidação total) — aprovada explicitamente pelo usuário.
+STATUS: implementado + validado localmente. SEM deploy. SEM migração remota ainda.
+================================
+
+BACKUP:
+  relatorios/backup_pre_migration.txt (3 queries remotas):
+   - network_institutions ................ 2 linhas (NovalT, University of Twente)
+   - person_roles com institution_id ..... 1 linha (Assistant Professor @ UT)
+   - network_entity_links c/ instituição . 0 linhas
+  Confirmado.
+
+IDs ENCONTRADOS (exatos, do remoto — usados na migração):
+  NovalT   (network_institutions) : 8eb81345-4231-465b-9d34-80646f0fba01
+  UTwente  (network_institutions) : 3b31a997-885a-4d61-bbf8-1776828fd5b6
+  UTwente  (market_organizations) : cc4bdd0c-6a50-490e-8adb-91e4594173d8  ← JÁ EXISTIA
+  (Novel-T NÃO existia em market_organizations → inserido com id
+   '8eb81345-nova-t-migration'.)
+  person_role afetado: a32e1f4e-... (person 57ad75c3-...), reapontado UT→cc4bdd0c.
+
+  Observação importante: havia DOIS "University of Twente" tipo university no
+  Mercado (cc4bdd0c e "University of Twente — HyUT / SEED" a7841bd6). O subquery por
+  LIKE do prompt seria AMBÍGUO; por isso a migração usa o id EXATO cc4bdd0c.
+
+BLOQUEIO RESOLVIDO (por que Opção B):
+  person_roles.institution_id tinha FK RÍGIDA → network_institutions (enforçada;
+  PRAGMA foreign_keys=1 local e remoto). Repontar para um id de market_organizations
+  falhava com "FOREIGN KEY constraint failed" (testado). `PRAGMA foreign_keys=OFF`
+  em `wrangler d1 execute --file` NÃO funciona (roda em transação — testado). Logo,
+  a única saída é RECONSTRUIR person_roles com a FK apontando para
+  market_organizations — exceção à regra "never drop tables", que você autorizou.
+
+MIGRAÇÃO SQL (migrations/0030_consolidate_institutions.sql):
+  1) INSERT OR IGNORE Novel-T em market_organizations (id 8eb81345-nova-t-migration).
+  2) Reconstrói person_roles:
+       - CREATE person_roles_new (... institution_id REFERENCES market_organizations
+         ON DELETE SET NULL ...);
+       - INSERT ... SELECT com CASE que reaponta institution_id:
+             3b31a997 (UT net_inst) → cc4bdd0c (UT market_org)
+             8eb81345 (NovalT net_inst) → 8eb81345-nova-t-migration
+             demais → NULL
+         (a cópia já usa o novo destino, então o INSERT é FK-válido);
+       - DROP person_roles; ALTER person_roles_new RENAME TO person_roles;
+       - recria índices idx_person_roles_person / idx_person_roles_institution.
+  3) network_entity_links: 0 linhas → nada a reapontar.
+  IDs conferidos e fixos (sem placeholders).
+
+  VALIDAÇÃO LOCAL (seed espelhando produção → rodar 0030 → verificar → limpar):
+   - "🚣 3 commands executed successfully" — SEM erro de FK.
+   - person_roles.institution_id passou a cc4bdd0c ✓
+   - novo schema: `institution_id TEXT REFERENCES market_organizations` ✓
+   - Novel-T presente em market_organizations ✓
+   - linhas de teste locais removidas ao final ✓
+
+MUDANÇAS IMPLEMENTADAS (código):
+  _worker.js
+   - Step 3: fetchRolesForPeople — JOIN trocado de network_institutions →
+     market_organizations (resolve institution_name das funções). (~L6602-6607)
+   - Step 4: handleNetworkInstitutions e handleNetworkInstitutionItem DEPRECADOS —
+     retornam 301 { deprecated, message, redirect:'/api/market/organizations' }.
+     Handlers mantidos (não deletados). (~L5388-5410)
+   - Step 6: handleNetworkRoutes — não lê mais network_institutions; institutions=[]
+     no payload (forma preservada). (~L6764-6775)
+  src/components/networking/NetworkingPage.jsx
+   - Step 5: loadAll agora busca /api/market/organizations e alimenta `institutions`
+     (fonte do seletor de organização das funções). (~L104-118)
+   - Lista mostra SÓ pessoas (removido concat de instituições); allTags só de
+     pessoas; selectedItem só pessoa. (~L175-209)
+   - Removidos: botão "+ Instituição", chips de filtro (Todos/Pessoas/Instituições),
+     e nós de instituição no mapa (institutions={[]}). Placeholder de busca ajustado.
+   - Editor de função: seletor de organização vem de market_organizations; rótulos
+     "— Organização (Mercado) —" / "Ou digite a organização livre". (~L1111-1119)
+   - Step 7: detalhe da pessoa enriquecido com contact_professional (via
+     /api/market/contacts): status de outreach (dot + select, já de v2.3),
+     RELEVÂNCIA PhD/Emprego/Spin-off (estrelas) e PRÓXIMA AÇÃO + data; botão
+     "Ver perfil profissional (Mercado)" (navega ao Mercado). (~proProfile + DetailPanel)
+
+VERIFICAÇÃO:
+  npm run build           : OK (0 erros; "✓ built in 3.85s"; _worker.js → dist/).
+                            Único aviso: tamanho de chunk (>500 kB) — pré-existente.
+  node --check _worker.js : OK (WORKER_OK).
+  Migração local          : OK (validada, ver acima).
+
+⚠️ ORDEM OBRIGATÓRIA NO DEPLOY (crítico):
+  APLICAR A MIGRAÇÃO REMOTA **ANTES** (ou junto) de subir o código. O novo editor
+  de função grava ids de market_organizations em person_roles.institution_id, o que
+  só é FK-válido DEPOIS que a tabela é reconstruída (0030). Se o código subir antes
+  da migração, salvar função com organização falharia por FK.
+
+COMANDO MIGRAÇÃO REMOTA:
+  npx wrangler d1 execute aide-db --remote --file=migrations/0030_consolidate_institutions.sql
+
+PENDÊNCIAS / DESVIOS:
+  D1) Editor de função usa um <select> de market_organizations (não um widget de
+      autocomplete completo). Funcionalmente "mesma fonte de dados" (Mercado), com
+      fallback de texto livre preservado. Autocomplete pode ser um follow-up.
+  D2) Código morto tolerado (não removido p/ limitar risco): Chip, emptyInstitution,
+      estado `filter`, ramo de instituição no NetworkEditor, shapeInstitution no
+      worker. Inofensivos (build passa).
+  D3) network_entity_links (0 linhas) NÃO foi reconstruída; sua FK segue →
+      network_institutions (vazia, deprecada).
+  D4) network_institutions NÃO foi dropada (deprecada; ainda existe no banco). As
+      rotas dela respondem 301. Pode ser removida num passo futuro se desejado.
+  D5) SEM deploy — aguardando aprovação.
+
+================================
+FIM DO RELATÓRIO
+================================

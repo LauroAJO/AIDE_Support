@@ -3440,7 +3440,13 @@ async function handleBridgePushTasks(env, config) {
     }, 400);
   }
   const { results } = await env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC`).all();
-  const tasks = (results || []).map(shapeTask);
+  // Anti-loop de eco: carimba cada tarefa de ORIGEM AIDE com aideTaskId + source
+  // 'aide'. Se o Lifegame devolvê-la, o import a reconhece como eco e a ignora
+  // (ver handleBridgeImport). Tarefas de origem 'lifegame' seguem SEM aideTaskId
+  // para continuarem sincronizando normalmente pelo lifegame_id no retorno.
+  const tasks = (results || []).map(shapeTask).map((t) =>
+    (t.source || 'aide') !== 'lifegame' ? { ...t, aideTaskId: t.id, source: 'aide' } : t
+  );
   const requestBody = JSON.stringify({ tasks });
   const r = await lifegameFetch(config, '/api/bridge/tasks', {
     method: 'POST', body: requestBody,
@@ -3734,9 +3740,23 @@ async function handleBridgeImport(env, config, entity) {
   await ensureLifegameColumns(env);
   await cacheLifegamePayload(env, entity, items);
 
-  let inserted = 0, updated = 0;
+  let inserted = 0, updated = 0, skippedEcho = 0;
   const errors = [];
   for (const item of items) {
+    // Anti-loop de eco (só tarefas): descarta o que o próprio AIDE originou e o
+    // Lifegame está devolvendo — identificado por aideTaskId (marcado no push)
+    // ou source='aide'. Sem isso, as tarefas do AIDE duplicariam a cada sync.
+    if (entity === 'tasks' && (item?.aideTaskId || item?.source === 'aide')) {
+      skippedEcho += 1;
+      await logBridge(env, {
+        direction: 'skipped_echo',
+        entity_type: 'task',
+        entity_id: item.aideTaskId ? String(item.aideTaskId) : (item.id ? String(item.id) : null),
+        status: 'skipped',
+        payload: JSON.stringify({ reason: 'echo_loop_prevention', aideTaskId: item.aideTaskId || null }),
+      }).catch(() => {});
+      continue;
+    }
     try {
       const result = entity === 'tasks'
         ? await upsertLifegameTask(env, item)
@@ -3750,7 +3770,7 @@ async function handleBridgeImport(env, config, entity) {
 
   await logBridge(env, {
     direction: 'inbound', entity_type: entity, status: errors.length ? 'error' : 'success',
-    payload: `import: ${inserted} novos, ${updated} atualizados, ${errors.length} erros`,
+    payload: `import: ${inserted} novos, ${updated} atualizados, ${skippedEcho} eco ignorados, ${errors.length} erros`,
     error: errors.length ? errors.slice(0, 3).map((e) => `${e.id}: ${e.error}`).join('; ') : null,
   });
 
@@ -3758,6 +3778,7 @@ async function handleBridgeImport(env, config, entity) {
     fetched: items.length,
     inserted,
     updated,
+    skipped_echo: skippedEcho,
     errors_count: errors.length,
     errors: errors.slice(0, 10),
   });
@@ -5364,68 +5385,23 @@ async function handleNetworkPersonItem(request, env, user, id) {
   return json({ error: 'Método não permitido' }, 405);
 }
 
+// DEPRECADO (consolidação v2.4): network_institutions foi consolidada em
+// market_organizations. Os handlers são mantidos (não removidos) e respondem 301
+// apontando para /api/market/organizations, para não quebrar clientes antigos.
 async function handleNetworkInstitutions(request, env, user) {
-  if (request.method !== 'GET' && !requirePermission(user, 'networking', 'view')) {
-    return json({ error: 'Sem permissão' }, 403);
-  }
-  if (request.method === 'GET' && !requirePermission(user, 'networking', 'view')) {
-    return json([]);
-  }
-  if (request.method === 'GET') {
-    try {
-      const { results } = await env.DB.prepare('SELECT * FROM network_institutions ORDER BY name').all();
-      return json((results || []).map(shapeInstitution));
-    } catch { return json([]); }
-  }
-  if (request.method === 'POST') {
-    const body = (await readJson(request)) || {};
-    if (!body.name) return json({ error: 'name é obrigatório' }, 400);
-    const id = crypto.randomUUID();
-    const now = Math.floor(Date.now() / 1000);
-    try {
-      await env.DB.prepare(
-        `INSERT INTO network_institutions
-          (id, name, type, area, website, linkedin, notes, tags, created_by, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
-      ).bind(
-        id, body.name, body.type || 'company', body.area || '', body.website || '',
-        body.linkedin || '', body.notes || '', JSON.stringify(body.tags || []),
-        user.id, now, now
-      ).run();
-    } catch (e) {
-      return json({ error: 'Falha ao criar instituição', detail: String(e) }, 500);
-    }
-    const row = await env.DB.prepare('SELECT * FROM network_institutions WHERE id = ?').bind(id).first();
-    return json(shapeInstitution(row), 201);
-  }
-  return json({ error: 'Método não permitido' }, 405);
+  return json({
+    deprecated: true,
+    message: 'Use /api/market/organizations instead',
+    redirect: '/api/market/organizations',
+  }, 301);
 }
 
 async function handleNetworkInstitutionItem(request, env, user, id) {
-  if (!id) return json({ error: 'ID ausente' }, 400);
-  if (request.method === 'PUT') {
-    const body = (await readJson(request)) || {};
-    const existing = await env.DB.prepare('SELECT * FROM network_institutions WHERE id = ?').bind(id).first();
-    if (!existing) return json({ error: 'Instituição não encontrada' }, 404);
-    const now = Math.floor(Date.now() / 1000);
-    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
-    await env.DB.prepare(
-      `UPDATE network_institutions SET name=?, type=?, area=?, website=?, linkedin=?, notes=?, tags=?, updated_at=? WHERE id=?`
-    ).bind(
-      pick('name', existing.name), pick('type', existing.type), pick('area', existing.area),
-      pick('website', existing.website), pick('linkedin', existing.linkedin),
-      pick('notes', existing.notes),
-      body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
-      now, id
-    ).run();
-    const row = await env.DB.prepare('SELECT * FROM network_institutions WHERE id = ?').bind(id).first();
-    return json(shapeInstitution(row));
-  }
-  if (request.method === 'DELETE') {
-    await env.DB.prepare('DELETE FROM network_institutions WHERE id = ?').bind(id).run();
-    return json({ ok: true });
-  }
-  return json({ error: 'Método não permitido' }, 405);
+  return json({
+    deprecated: true,
+    message: 'Use /api/market/organizations instead',
+    redirect: '/api/market/organizations',
+  }, 301);
 }
 
 async function handleNetworkConnections(request, env, user) {
@@ -6581,7 +6557,7 @@ async function fetchRolesForPeople(env, peopleIds) {
     const r = await env.DB.prepare(
       `SELECT r.*, i.name AS institution_lookup_name
        FROM person_roles r
-       LEFT JOIN network_institutions i ON r.institution_id = i.id
+       LEFT JOIN market_organizations i ON r.institution_id = i.id
        WHERE r.person_id IN (${placeholders})`
     ).bind(...peopleIds).all();
     rows = r.results || [];
@@ -6741,16 +6717,16 @@ async function handleNetworkRoutes(request, env, user) {
     return json({ people: [], institutions: [], connections: [], person_roles: [] });
   }
   let peopleRows = [];
-  let institutions = [];
+  // Consolidação v2.4: instituições foram unificadas em market_organizations.
+  // /api/network/routes não lê mais network_institutions; o array segue no payload
+  // (vazio) por compatibilidade de forma. As funções de pessoas (person_roles) já
+  // resolvem o nome via JOIN em market_organizations (fetchRolesForPeople).
+  const institutions = [];
   let connections = [];
   try {
     const r = await env.DB.prepare('SELECT * FROM network_people ORDER BY name').all();
     peopleRows = r.results || [];
   } catch { /* missing table */ }
-  try {
-    const r = await env.DB.prepare('SELECT * FROM network_institutions ORDER BY name').all();
-    institutions = (r.results || []).map(shapeInstitution);
-  } catch { /* missing */ }
   try {
     const r = await env.DB.prepare('SELECT * FROM network_connections').all();
     connections = r.results || [];
@@ -7062,11 +7038,46 @@ async function handleUserGranularPermissions(request, env, user, targetUserId) {
 
   if (request.method === 'PUT') {
     const body = (await readJson(request)) || {};
+    const now = Math.floor(Date.now() / 1000);
+
+    // Modo LOTE (novo): { permissions: [{feature, action, allowed}, ...] }.
+    // Salva TODAS as caixas numa ÚNICA requisição/transação (env.DB.batch),
+    // eliminando a corrida de dezenas de requests concorrentes que fazia algumas
+    // permissões não persistirem (bug das permissões granulares).
+    if (Array.isArray(body.permissions)) {
+      const rows = body.permissions
+        .map((p) => ({
+          feature: String((p && p.feature) || '').trim(),
+          action: String((p && p.action) || '').trim(),
+          allowed: p && p.allowed ? 1 : 0,
+        }))
+        .filter((p) => p.feature && p.action);
+      if (rows.length === 0) return json({ ok: true, saved: 0 });
+      try {
+        await env.DB.batch(rows.map((p) =>
+          env.DB.prepare(
+            `INSERT INTO granular_permissions (id, user_id, feature, action, allowed, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, feature, action) DO UPDATE SET
+               allowed = excluded.allowed,
+               updated_at = excluded.updated_at`
+          ).bind(crypto.randomUUID(), targetUserId, p.feature, p.action, p.allowed, now)
+        ));
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        if (/no such table/i.test(msg)) {
+          return json({ error: 'Tabela granular_permissions não existe — aplique 0024_granular_permissions.sql' }, 503);
+        }
+        return json({ error: 'Falha ao salvar permissões', detail: msg }, 500);
+      }
+      return json({ ok: true, saved: rows.length });
+    }
+
+    // Modo ITEM ÚNICO (compat): { feature, action, allowed }.
     const feature = String(body.feature || '').trim();
     const action = String(body.action || '').trim();
     if (!feature || !action) return json({ error: 'feature e action são obrigatórios' }, 400);
     const allowed = body.allowed ? 1 : 0;
-    const now = Math.floor(Date.now() / 1000);
     try {
       await env.DB.prepare(
         `INSERT INTO granular_permissions (id, user_id, feature, action, allowed, updated_at)
@@ -7087,6 +7098,17 @@ async function handleUserGranularPermissions(request, env, user, targetUserId) {
 
   if (request.method === 'DELETE') {
     const body = (await readJson(request)) || {};
+    // Reset total (novo): { all: true } → remove TODOS os overrides do usuário,
+    // fazendo-o voltar ao preset puro ("Restaurar preset" no modal).
+    if (body.all === true) {
+      try {
+        await env.DB.prepare('DELETE FROM granular_permissions WHERE user_id = ?')
+          .bind(targetUserId).run();
+      } catch (e) {
+        return json({ error: 'Falha ao restaurar preset', detail: String((e && e.message) || e) }, 500);
+      }
+      return json({ reset: true });
+    }
     const feature = String(body.feature || '').trim();
     const action = String(body.action || '').trim();
     if (!feature || !action) return json({ error: 'feature e action são obrigatórios' }, 400);

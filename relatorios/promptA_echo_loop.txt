@@ -1,0 +1,109 @@
+================================
+AIDE — RELATÓRIO PROMPT A
+Lifegame Echo Loop Fix
+Data: 2026-07-07
+================================
+
+Escopo: apenas _worker.js (bridge/import de tarefas). Nada de frontend. NÃO houve
+deploy. Todo texto novo em PT-BR.
+
+
+INVESTIGAÇÃO (lógica de deduplicação encontrada ANTES da correção):
+
+  1. POST /api/bridge/push/tasks → handleBridgePushTasks (_worker.js:3428)
+     - Envia { tasks } com TODAS as tarefas do AIDE, mapeadas por shapeTask,
+       para o Lifegame (POST /api/bridge/tasks).
+     - shapeTask (_worker.js:724) inclui: id (o id DO AIDE), source ('aide' por
+       padrão), lifegame_id, e os demais campos.
+     - NÃO existia um campo dedicado `aideTaskId`. O id do AIDE ia só como `id`,
+       que o Lifegame reatribui do lado dele.
+
+  2. POST /api/bridge/receive/tasks → NÃO EXISTE.
+     - O router (_worker.js:3198-3210) tem receive/sprints, receive/xp,
+       receive/people, receive/timelog — mas NÃO receive/tasks.
+     - A entrada de tarefas vindas do Lifegame acontece SÓ pelo caminho de PULL:
+       handleBridgeImport(env, config, 'tasks') (rota /api/bridge/import/tasks,
+       _worker.js:3205 / função :3711), que busca no LG e faz upsert.
+
+  3. Deduplicação real → upsertLifegameTask (_worker.js:3656):
+         const existing = SELECT id FROM tasks WHERE lifegame_id = ?  [bind t.id]
+         if (existing) UPDATE title/urgency/importance/status/tags
+         else INSERT novo com source='lifegame', lifegame_id = t.id
+     - Casava APENAS por lifegame_id. Nenhum filtro por aideTaskId/source.
+
+  ⇒ BUG CONFIRMADO: uma tarefa de origem AIDE (que tem lifegame_id = NULL) ao
+    voltar do Lifegame nunca casa no WHERE lifegame_id = ? e é INSERIDA como nova
+    tarefa source='lifegame'. A cada round-trip, duplicatas acumulam.
+
+
+MUDANÇAS IMPLEMENTADAS (_worker.js):
+
+  1. PUSH — handleBridgePushTasks (~linhas 3442-3450):
+     Cada tarefa de ORIGEM AIDE é carimbada com aideTaskId (= id do AIDE) e
+     source='aide' antes de enviar:
+         const tasks = (results||[]).map(shapeTask).map((t) =>
+           (t.source||'aide') !== 'lifegame' ? { ...t, aideTaskId: t.id, source: 'aide' } : t);
+     Tarefas de origem 'lifegame' seguem SEM aideTaskId, para continuarem
+     sincronizando normalmente pelo lifegame_id no retorno (sem regressão).
+
+  2. IMPORT — handleBridgeImport, loop de itens (~linhas 3743-3783):
+     Passo 1 (filtro anti-eco, só entity==='tasks'):
+         if (item.aideTaskId || item.source === 'aide') { skip + log; continue; }
+       → conta skippedEcho e registra no bridge_sync_log:
+         { direction:'skipped_echo', entity_type:'task', status:'skipped',
+           entity_id: aideTaskId|id,
+           payload: JSON.stringify({ reason:'echo_loop_prevention', aideTaskId }) }
+     Passo 2 (tarefas externas restantes): segue o upsert existente
+       (upsertLifegameTask), que já deduplica por lifegame_id (INSERT/UPDATE).
+     Resposta e log de resumo agora incluem `skipped_echo` / "eco ignorados".
+
+  Observação de projeto: a dedup por lifegame_id foi MANTIDA (upsertLifegameTask
+  inalterado). O campo lifegame_id já é o "id próprio do Lifegame" e é indexado
+  por idx_tasks_lifegame_id.
+
+
+MIGRAÇÃO:
+  Arquivo: N/A (NÃO criei migrations/0029_lifegame_taskid.sql).
+  Motivo: o prompt pedia adicionar as colunas lifegame_task_id + task_source, mas
+    a tabela tasks JÁ possui as colunas equivalentes:
+       - lifegame_id  → id próprio do Lifegame (chave de dedup), criado pela
+         migração 0018_lifegame_sync.sql e indexado por idx_tasks_lifegame_id;
+       - source       → origem da tarefa ('aide' | 'lifegame').
+    Além disso, ensureLifegameColumns(env) (_worker.js:3641) adiciona essas
+    colunas + o índice em runtime, como rede de segurança, e é chamado no início
+    de handleBridgeImport. Criar colunas paralelas (lifegame_task_id/task_source)
+    duplicaria dados e, pior, faria as tarefas LG já importadas (que têm
+    lifegame_id preenchido mas lifegame_task_id NULL) deixarem de casar → RE-
+    DUPLICAÇÃO. Por isso reaproveitei as colunas existentes.
+  Local: N/A (nenhuma migração nova a aplicar).
+  Remota: PENDENTE → N/A (nenhuma migração nova; nada a rodar em produção).
+
+
+VERIFICAÇÃO:
+  node --check _worker.js : OK (WORKER_OK).
+  npm run build           : OK (0 erros; "✓ built in 3.71s"; _worker.js copiado
+                               para dist/). Único aviso é o pré-existente de
+                               tamanho de chunk (>500 kB) — não é erro.
+
+
+PENDÊNCIAS / DESVIOS:
+  D1) NÃO existe POST /api/bridge/receive/tasks; a entrada de tarefas é por PULL
+      (handleBridgeImport). O filtro anti-eco foi aplicado nesse caminho real,
+      preservando a intenção do prompt (Passo 1 filtra ecos; Passo 2 deduplica os
+      externos).
+  D2) SEM migração 0029 / colunas lifegame_task_id/task_source — reaproveitei
+      lifegame_id + source (já existentes e indexados). Ver "MIGRAÇÃO".
+  D3) PUSH marca aideTaskId só em tarefas de origem AIDE (não em origem
+      'lifegame'). Refinamento sobre o literal do prompt (que marcava todas) para
+      evitar regressão: tarefas LG reenviadas continuam podendo ser atualizadas
+      pelo import via lifegame_id, em vez de serem silenciosamente ignoradas.
+  D4) Dependência do lado Lifegame: o anti-eco no retorno funciona plenamente se
+      o Lifegame PRESERVAR o campo aideTaskId (e/ou source='aide') ao devolver as
+      tarefas. Como fallback, o filtro também checa source==='aide'. Se o LG
+      descartar ambos, a proteção por marcador não se aplica (mas nesse caso a
+      dedup por lifegame_id volta a valer para o que o LG identificar como seu).
+  D5) NENHUM deploy feito — aguardando aprovação.
+
+================================
+FIM DO RELATÓRIO
+================================

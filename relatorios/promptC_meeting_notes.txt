@@ -1,0 +1,87 @@
+================================
+AIDE — RELATÓRIO PROMPT C
+Verificação Meeting Notes
+Data: 2026-07-07
+================================
+
+Tarefa: verificação de src/components/meeting/MeetingPage.jsx (navegação por dia,
+D1, indicador de save, migração localStorage, "Salvar como Nota"). Arquivo lido
+por completo. NENHUMA alteração de código foi necessária. Sem deploy.
+
+
+INVESTIGAÇÃO (o que funciona / o que não funciona):
+
+  1. NAVEGAÇÃO POR DIA (← Anterior / Próximo →) — FUNCIONA.
+     - MeetingPage.jsx:496-523. "Anterior" → setMeetingDate(addDaysStr(-1));
+       "Próximo" → addDaysStr(+1), desabilitado por `isToday || meetingDate > today`
+       (não navega para o futuro); botão "Hoje" aparece quando não é hoje; data
+       exibida por formatMeetingDate ("Quinta, 03 Jul 2026").
+     - Datas com mais de 7 dias entram em somente-leitura (readOnly, past>7) com
+       banner (:527-531); hoje + últimos 7 dias são editáveis.
+
+  2. CARREGAMENTO DO D1 POR DATA — FUNCIONA/CORRETO.
+     - useEffect com dep [meetingDate] (:276-319): primeiro dá flushPending() das
+       edições da data ANTERIOR, depois GET /api/meeting/notes?date=<meetingDate>.
+       Usa o dado do D1 se existir; senão cai no localStorage. loadSeqRef protege
+       contra carregamentos assíncronos fora de ordem (troca rápida de data).
+
+  3. INDICADOR DE SAVE ("Salvo na nuvem ✓") — FUNCIONA.
+     - Componente SaveIndicator (:76-83): 'saving' → "Salvando..."; 'saved' →
+       "Salvo na nuvem ✓" (verde); 'error' → "Erro ao salvar — dados locais
+       preservados" (âmbar). onChangeField marca 'saving'; o debounce de 1500ms
+       chama flushPending que marca 'saved'/'error'.
+
+  4. MIGRAÇÃO DO localStorage — FUNCIONA.
+     - No load (:291-310): se o D1 está vazio e há dado legado no localStorage para
+       uma data editável (past 0–7), faz PUT no D1 + toast "Notas anteriores
+       migradas para a nuvem". Além disso, o localStorage é gravado a CADA tecla
+       (:265) como fallback offline (mesmo que o PUT no D1 falhe, o dado não se
+       perde e migra na próxima abertura).
+
+  5. BOTÃO "SALVAR COMO NOTA" — PRESENTE E FUNCIONAL.
+     - :562-569 → saveAsFormalNote (:445-465): POST /api/notes com
+       title "Reunião — DD/MM/YYYY", body = agenda + "\n\n---\n\n" + notes,
+       tags ["reunião"]; toast "Nota criada → Ver em Notas" (link para /notes).
+
+  6. BUGS / PEÇAS FALTANDO — NENHUM bug funcional encontrado.
+     Caminhos delicados revisados e corretos:
+       * Corrida debounce × troca de data: o load faz `await flushPending()` antes
+         de carregar, e pendingRef carrega a PRÓPRIA data no payload — a edição da
+         data anterior é salva na data certa, sem perda.
+       * flushPending lê pendingRef e o zera de forma síncrona (sem await entre a
+         leitura e o null), então onChangeField não interleava/corrompe o pending.
+       * Fronteira readOnly/editable correta (past=7 editável; past=8 read-only).
+         Textareas readOnly não disparam onChange, então datas antigas ficam de
+         fato travadas.
+       * Flush no unmount (:322-326) + localStorage por tecla cobrem o fechamento
+         da aba durante o debounce.
+       * "Próximo" nunca passa de hoje (comparação de string YYYY-MM-DD é
+         cronológica).
+
+
+FIXES APLICADOS:
+  Nenhum. A implementação está completa e correta; alterar código que já funciona
+  só introduziria risco de regressão.
+
+  OBSERVAÇÕES (não são bugs — não alterados sem sua orientação):
+   - O `meetingDate` fica no store (Zustand). Assim, se o usuário navega para uma
+     data passada e depois sai/volta ao Reunião na MESMA sessão, a página reabre
+     na data que ficou selecionada (não reseta para "hoje"). É o comportamento
+     projetado no Prompt 3 (data no store). Se preferir que reabra sempre em hoje,
+     é um ajuste de 3 linhas (resetar meetingDate no mount) — posso aplicar.
+   - Após navegar de data, o indicador volta a 'idle' (não mantém "Salvo na nuvem
+     ✓" da data anterior). Intencional.
+
+
+VERIFICAÇÃO:
+  npm run build           : OK (0 erros; "✓ built in 4.02s"; _worker.js copiado
+                               para dist/). Único aviso é o pré-existente de
+                               tamanho de chunk (>500 kB) — não é erro.
+  node --check _worker.js : OK (WORKER_OK). Nota: _worker.js não foi alterado
+                               neste prompt; verificado por garantia.
+
+  NENHUM deploy feito — aguardando aprovação (nada a implantar; sem mudanças).
+
+================================
+FIM DO RELATÓRIO
+================================

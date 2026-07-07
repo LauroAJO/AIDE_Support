@@ -1,0 +1,197 @@
+================================================================================
+AIDE — PRE-MIGRATION AUDIT (limpeza de arquitetura) — v2 (expandida)
+Data: 2026-07-07
+Natureza: SOMENTE LEITURA — nenhum código alterado. Queries D1 remotas de leitura.
+Substitui a versão anterior deste arquivo (mesma auditoria, mais itens).
+================================================================================
+
+CONTEXTO: coexistem DUAS tabelas de "organização/instituição":
+  network_institutions (área Networking)  vs  market_organizations (área Mercado).
+Esta auditoria mede os dados e mapeia as dependências antes de consolidar.
+
+
+================================================================================
+CONSULTAS AO BANCO (REMOTO — v3-prod / WEUR / AMS)
+================================================================================
+
+1) SELECT id, name, type, area FROM network_institutions;   → 2 LINHAS
+   [1] id: 8eb81345-4231-465b-9d34-80646f0fba01  name: NovalT
+       type: company      area: "" (vazio)
+   [2] id: 3b31a997-885a-4d61-bbf8-1776828fd5b6  name: University of Twente
+       type: university   area: "" (vazio)
+
+2) SELECT COUNT(*) FROM network_people ............. 65
+3) SELECT COUNT(*) FROM contact_professional ....... 56
+4) SELECT COUNT(*) FROM contact_org_links .......... 44
+5) SELECT COUNT(*) FROM market_organizations ....... 28
+6) SELECT COUNT(*) FROM person_roles ............... 1   ⚠ apenas 1 linha
+
+7) SELECT DISTINCT organization_id FROM contact_org_links LIMIT 5:
+      cc4bdd0c-6a50-490e-8adb-91e4594173d8
+      5d219375-b673-46ae-8fea-aff1bbda955a
+      4adfbf57-c2c3-4cac-8803-79c6d31429d5
+      2e82a2c3-ff88-426b-bb70-7bdda0cd0dcb
+      47906115-77e7-41d2-a3ad-be9a7297dbdf
+   → NENHUM desses ids é uma das 2 network_institutions; são ids de
+     market_organizations. Confirma: contact_org_links.organization_id →
+     market_organizations.
+
+8) SELECT DISTINCT institution_id FROM person_roles WHERE institution_id IS NOT NULL LIMIT 5:
+      3b31a997-885a-4d61-bbf8-1776828fd5b6   (= "University of Twente")
+   → 1 valor distinto, que É uma network_institutions. Confirma:
+     person_roles.institution_id → network_institutions.
+     (E há só 1 person_role no banco inteiro — uso mínimo.)
+
+
+================================================================================
+9. _worker.js — TODAS AS OCORRÊNCIAS DE 'network_institutions'
+================================================================================
+  (9 ocorrências; L = leitura, W = escrita)
+
+  L 5397  SELECT * FROM network_institutions ORDER BY name
+          → handleNetworkInstitutions (GET lista) — rota /api/network/institutions
+  W 5408  INSERT INTO network_institutions (...)
+          → handleNetworkInstitutions (POST criar) — rota /api/network/institutions
+  L 5419  SELECT * FROM network_institutions WHERE id = ?
+          → handleNetworkInstitutions (retorno da linha recém-criada)
+  L 5429  SELECT * FROM network_institutions WHERE id = ?
+          → handleNetworkInstitutionItem (checagem de existência no PUT) —
+            rota /api/network/institutions/:id
+  W 5434  UPDATE network_institutions SET name=?, type=?, area=?, website=?,
+            linkedin=?, notes=?, tags=?, updated_at=? WHERE id=?
+          → handleNetworkInstitutionItem (PUT editar)
+  L 5442  SELECT * FROM network_institutions WHERE id = ?
+          → handleNetworkInstitutionItem (retorno após UPDATE)
+  W 5446  DELETE FROM network_institutions WHERE id = ?
+          → handleNetworkInstitutionItem (DELETE)
+  L 6605  LEFT JOIN network_institutions i ON r.institution_id = i.id
+          → fetchRolesForPeople (helper que hidrata funções de pessoas com o nome
+            da instituição). Chamado por hydratePeople (:6701).
+  L 6772  SELECT * FROM network_institutions ORDER BY name
+          → handleNetworkRoutes — rota /api/network/routes (array institutions)
+
+  ROTAS QUE LEEM network_institutions:
+   - GET /api/network/routes            (:6772 + JOIN via hydratePeople :6605)
+   - GET /api/network/institutions      (:5397)
+   - GET|PUT /api/network/institutions/:id (:5429, :5442)
+   - GET /api/network/people            (hydratePeople :5308 → JOIN :6605)
+   - GET|PUT /api/network/people/:id    (hydratePeople :5340, :5378 → JOIN :6605)
+
+  ROTAS QUE ESCREVEM network_institutions:
+   - POST   /api/network/institutions      (INSERT :5408)
+   - PUT    /api/network/institutions/:id   (UPDATE :5434)
+   - DELETE /api/network/institutions/:id   (DELETE :5446)
+
+  Dispatch no router: _worker.js:108 (routes), :111 (institutions), :112 (item).
+
+
+================================================================================
+10. NetworkingPage.jsx — INSTITUIÇÕES SÃO RENDERIZADAS SEPARADAS DE PESSOAS?
+================================================================================
+  RESPOSTA: São uma ENTIDADE separada (dados, filtro, editor e endpoint próprios),
+  mas EXIBIDAS na MESMA lista/mapa unificados das pessoas, distintas por _kind.
+
+  - Store: `institutions` = networkInstitutions (:73-74), separado de `people`.
+  - Carregamento: /api/network/routes → routes.institutions → setInstitutions
+    (:107, :116). (pessoas vêm de routes.people.)
+  - Lista unificada: `items` concatena pessoas e instituições, marcando
+    _kind:'person' | 'institution' (:187-189); tipo exibido por INSTITUTION_TYPES
+    (:349). Chip de filtro dedicado "Instituições" (:290). Tags agregam ambos (:178).
+  - Detalhe: painel usa selectedItem = people OU institutions (:208); rótulo de
+    tipo (:538).
+  - Exclusão: caminho DELETE difere por kind (/api/network/institutions/:id) (:214).
+  - Criação/edição: botão "+ Instituição" (:272), emptyInstitution (:475),
+    componente NetworkEditor (:956); dropdown de instituição no editor de PESSOA
+    por função (:1086, :1011, :1077).
+  - Mapa: NetworkMap desenha nós de instituição (institutionNodes :759; comp :703),
+    recebendo institutions como prop (:431, :443).
+
+  Linhas onde dados de network_institutions são usados: 73-74, 107, 116, 178,
+  187-189, 208, 214, 272, 290, 349, 431, 443, 475, 538, 703, 759, 1011, 1077, 1086.
+
+
+================================================================================
+11. contact_org_links.organization_id — REFERENCIA?
+================================================================================
+  → market_organizations(id)   (migration 0025_mercado_carreira.sql:96)
+      organization_id TEXT REFERENCES market_organizations(id) ON DELETE CASCADE
+  Confirmado pelos dados (Q7: os 5 ids distintos são de market_organizations, não
+  de network_institutions). NÃO referencia network_institutions.
+
+
+================================================================================
+12. person_roles.institution_id — REFERENCIA?
+================================================================================
+  → network_institutions(id)   (migration 0016_files.sql:38)
+      institution_id TEXT REFERENCES network_institutions(id) ON DELETE SET NULL
+  Confirmado pelos dados (Q8: único valor = University of Twente, uma
+  network_institutions). NÃO referencia market_organizations.
+
+
+================================================================================
+13. network_people — TODAS AS COLUNAS (19)
+================================================================================
+  Base: migration 0015_hierarchy.sql (18 colunas):
+    id (PK), name (NOT NULL), type (def 'person'), institution (def ''),
+    role (def ''), area_of_work (def ''), email (def ''), phone (def ''),
+    linkedin (def ''), notes (def ''), connection_to_lauro (def ''),
+    connection_strength (INTEGER def 3), tags (def '[]'),
+    lifegame_person_id (def ''), dex_contact_id (def ''),
+    created_by (REFERENCES users(id)), created_at (unixepoch), updated_at (unixepoch)
+  + migration 0018_lifegame_sync.sql:11 (1 coluna):
+    source (TEXT def 'aide')
+  → Confirmado por PRAGMA table_info(network_people) no remoto: 19 colunas, a
+    última sendo `source`.
+
+
+================================================================================
+14. contact_professional — TODAS AS COLUNAS (15)
+================================================================================
+  Migration 0025_mercado_carreira.sql:
+    person_id (PK, REFERENCES network_people(id) ON DELETE CASCADE),
+    organization_id (REFERENCES market_organizations(id)),
+    outreach_status (def 'not_contacted'),
+    outreach_channel (def ''),
+    last_contact_date (def ''),
+    next_action (def ''),
+    next_action_date (def ''),
+    relevance_for_phd (INTEGER def 0),
+    relevance_for_job (INTEGER def 0),
+    relevance_for_spinoff (INTEGER def 0),
+    interaction_history (def '[]'  — array {date,type,notes}),
+    confirmed_email (def ''),
+    confirmed_linkedin (def ''),
+    notes (def ''),
+    updated_at (unixepoch)
+  → Confirmado por PRAGMA table_info(contact_professional) no remoto: 15 colunas.
+
+
+================================================================================
+SÍNTESE PARA A MIGRAÇÃO
+================================================================================
+  • Dois cadastros de organização, SEM FK entre si:
+      - network_institutions: 2 linhas (NovalT, University of Twente). Referenciada
+        por person_roles.institution_id (0016) e network_entity_links.
+        network_institution_id (0016). USO REAL MÍNIMO: person_roles tem só 1 linha
+        (→ University of Twente).
+      - market_organizations: 28 linhas. Hub verdadeiro — referenciada por
+        contact_org_links (44), contact_professional (56), market_projects,
+        career_opportunities.
+  • network_people (65) é a base de "pessoa" compartilhada entre Networking e
+    Mercado; contact_professional (56) estende ~86% das pessoas com dados de
+    Mercado (organization_id → market_organizations).
+  • Consolidar Networking → Mercado (network_institutions → market_organizations):
+      - Dados a migrar: só 2 instituições. Atenção a DUPLICATA: "University of
+        Twente" pode já existir em market_organizations (checar por nome antes).
+      - Remapear FKs: person_roles.institution_id (1 linha) e
+        network_entity_links.network_institution_id para market_organizations.
+      - Código: reescrever/retirar as rotas /api/network/institutions* e o array
+        institutions em /api/network/routes; ajustar o JOIN de fetchRolesForPeople;
+        e atualizar NetworkingPage (lista, mapa, detalhe, editores).
+    → Volume de dados trivial; superfície de código ampla (9 pontos no worker + ~20
+      pontos no NetworkingPage).
+
+  NENHUMA alteração de código feita. Auditoria somente-leitura.
+================================================================================
+FIM DO RELATÓRIO
+================================================================================

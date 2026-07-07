@@ -485,7 +485,13 @@ export default function NetworkingPage() {
                 proProfile={proProfile[selectedItem.id] || null}
                 onChangeOutreach={(s) => changeOutreach(selectedItem.id, s)}
                 onPatchProfessional={(patch) => patchProfessional(selectedItem.id, patch)}
-                onViewMarket={() => navigate('/market', { state: { contactId: selectedItem.id } })}
+                onViewMarket={() => {
+                  // A sub-aba de contatos do Mercado não existe mais: vai direto
+                  // à página da organização vinculada (contact_professional.organization_id)
+                  // ou, se não houver vínculo, à aba Organizações do Mercado.
+                  const orgId = proProfile[selectedItem.id]?.organization_id;
+                  navigate(orgId ? `/market/org/${orgId}` : '/market');
+                }}
                 onEdit={() => setEditor({ kind: selected.kind, mode: 'edit', payload: { ...selectedItem } })}
                 onDelete={() => removeItem(selected.kind, selectedItem.id)}
                 onReloadConnections={() => apiFetch('/api/network/connections').then(setConnections)}
@@ -813,7 +819,7 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
             onClick={onViewMarket}
             className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
           >
-            <Briefcase className="h-4 w-4" /> Ver perfil profissional (Mercado)
+            <Briefcase className="h-4 w-4" /> Ver organização no Mercado →
           </button>
         )}
 

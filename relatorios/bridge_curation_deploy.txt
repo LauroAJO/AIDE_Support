@@ -1,0 +1,45 @@
+================================
+AIDE — Bridge Curation Deploy
+v2.4.4
+Data: 2026-07-07
+================================
+
+MIGRAÇÕES REMOTAS:
+0032_bridge_staging: OK (aplicada agora — 3 queries: CREATE bridge_task_staging
+  + idx_staging_reviewed + idx_staging_lifegame_id).
+0033_contact_enrichment: JÁ APLICADA anteriormente (durante v2.4.3). A re-execução
+  retornou "duplicate column name: acquaintance_context" e sofreu rollback — sem
+  perda, pois todos os objetos já existiam no remoto. Verificado:
+    - contact_professional tem as 4 colunas (acquaintance_context, acquaintance_notes,
+      referral_potential, referral_score);
+    - contact_interactions existe com as 10 colunas esperadas
+      (id, person_id, interaction_type, date, summary, outcome, next_step,
+       next_step_date, created_by, created_at);
+    - índices idx_interactions_person e idx_interactions_date presentes.
+  Resultado efetivo: esquema 0033 100% presente no remoto.
+
+TAREFAS LIFEGAME DELETADAS:
+Antes: 0
+Depois: 0
+  (Nenhuma tarefa direta do Lifegame no remoto — o novo fluxo de staging faz as
+   tarefas passarem por bridge_task_staging, então nenhuma entrou em `tasks`.
+   O DELETE foi executado mesmo assim: 0 linhas afetadas.)
+
+DEPLOY:
+Versão: v2.4.4 (src/version.js já estava em 2.4.4 — sem bump necessário)
+Commit (código v2.4.4): 34668a3 — "v2.4.4 — bridge task curation, staging flow"
+  (já commitado e pushado antes deste deploy)
+Build: OK — 0 erros (único aviso pré-existente: chunk > 500 kB).
+Deploy: npm run deploy — "Deployment complete!"
+URL de produção: https://aide-support.pages.dev
+URL do deployment: https://6bf2d223.aide-support.pages.dev
+
+OBS.:
+- O código da curadoria de bridge já havia sido commitado/pushado pela sessão
+  paralela (34668a3); esta tarefa aplicou as migrações remotas, validou o esquema,
+  fez a limpeza de tarefas Lifegame e publicou (npm run deploy).
+- Migração 0033 é NÃO-idempotente (ALTER ADD COLUMN puro): não re-executar no remoto.
+
+================================
+FIM DO RELATÓRIO
+================================

@@ -49,8 +49,8 @@ migração local 0032 : OK
 COMANDO MIGRAÇÃO REMOTA (rodar ANTES do deploy):
   npx wrangler d1 execute aide-db --remote --file=migrations/0032_bridge_staging.sql
 
-Deploy: v2.4.4  — [PENDENTE: aguardando confirmação do DELETE + migração remota + deploy]
-Commit: [pendente]
+Deploy: v2.4.4  — OK  (https://566c03bd.aide-support.pages.dev)
+Commit: 34668a3  (push origin main: b8674ee..34668a3)
 
 NOTA: `npm run db:migrate` está hardcoded para 0001 — usei
 `wrangler d1 execute --local --file=migrations/0032_bridge_staging.sql`.

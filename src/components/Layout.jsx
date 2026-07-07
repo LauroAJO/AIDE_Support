@@ -271,26 +271,26 @@ export default function Layout({ children }) {
                   <Bell className="h-4 w-4" />
                   <span className="flex-1">Avisos</span>
                 </button>
-                {/* Configurações — todos */}
-                <button
-                  type="button"
-                  onClick={() => go('/settings')}
-                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
-                >
-                  <Settings className="h-4 w-4" />
-                  <span className="flex-1">Configurações</span>
-                </button>
-                {/* Importar Dados — owner || assistente fixo */}
-                {(user?.role === 'owner' || user?.user_type === 'fixed') && (
+                {/* Configurações — owner only */}
+                {isOwner && (
                   <button
                     type="button"
-                    onClick={() => go('/import')}
+                    onClick={() => go('/settings')}
                     className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                   >
-                    <Upload className="h-4 w-4" />
-                    <span className="flex-1">Importar Dados</span>
+                    <Settings className="h-4 w-4" />
+                    <span className="flex-1">Configurações</span>
                   </button>
                 )}
+                {/* Importar Dados — todos (owner + fixo + externo) */}
+                <button
+                  type="button"
+                  onClick={() => go('/import')}
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                >
+                  <Upload className="h-4 w-4" />
+                  <span className="flex-1">Importar Dados</span>
+                </button>
                 {/* Revisar Bridge — owner only, com badge de pendências */}
                 {isOwner && (
                   <button

@@ -34,33 +34,43 @@ import TimerCheckMonitor from './timer/TimerCheckMonitor';
 import NotificationBell from './notifications/NotificationBell';
 
 // Nav único e ordenado (sidebar + bottom nav). `feature` = permissão (owner vê
-// tudo); `fixed: true` = só owner + assistente fixo. Sem `feature` nem `fixed`
-// = sempre visível. `group: 'rede'` agrupa visualmente a "Rede Profissional".
-// v2.3.4: Timer e Avisos foram para o menu de perfil; Chat vai ao fim; Hub =
-// "Scraping Hub". O widget de start/stop do Timer (TimerIndicator) permanece na
-// sidebar/header — só o LINK de navegação saiu daqui.
+// tudo); `fixed: true` = só owner + assistente fixo. `group` agrupa visualmente
+// a sidebar em quatro seções (Trabalho / Conteúdo / Rede Profissional /
+// Ferramentas). O widget de start/stop do Timer (TimerIndicator) permanece na
+// sidebar/header — o LINK de Timer vive no menu de perfil.
 const NAV_ITEMS = [
-  { to: '/tasks',      label: 'Tarefas',      icon: CheckSquare,   feature: 'tasks' },
-  { to: '/planning',   label: 'Planejamento', icon: CalendarRange, feature: 'planning' },
-  { to: '/calendar',   label: 'Calendário',   icon: Calendar,      feature: 'calendar' },
-  { to: '/drive',      label: 'Drive',        icon: HardDrive,     feature: 'drive' },
-  { to: '/notes',      label: 'Notas',        icon: FileText,      feature: 'notes' },
-  { to: '/meeting',    label: 'Reunião',      icon: Video,         feature: 'meeting' },
+  { to: '/tasks',      label: 'Tarefas',      icon: CheckSquare,   feature: 'tasks',      group: 'trabalho' },
+  { to: '/planning',   label: 'Planejamento', icon: CalendarRange, feature: 'planning',   group: 'trabalho' },
+  { to: '/notes',      label: 'Notas',        icon: FileText,      feature: 'notes',      group: 'conteudo' },
+  { to: '/calendar',   label: 'Calendário',   icon: Calendar,      feature: 'calendar',   group: 'conteudo' },
+  { to: '/meeting',    label: 'Reunião',      icon: Video,         feature: 'meeting',    group: 'conteudo' },
+  { to: '/drive',      label: 'Drive',        icon: HardDrive,     feature: 'drive',      group: 'conteudo' },
   { to: '/networking', label: 'Networking',   icon: NetworkIcon,   feature: 'networking', group: 'rede' },
-  { to: '/market',     label: 'Mercado',      icon: Building2,     fixed: true, group: 'rede' },
-  { to: '/career',     label: 'Carreira',     icon: Briefcase,     fixed: true, group: 'rede' },
-  { to: '/hub',        label: 'Scraping Hub', icon: Radar,         fixed: true },
-  { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread' },
+  { to: '/market',     label: 'Mercado',      icon: Building2,     fixed: true,           group: 'rede' },
+  { to: '/career',     label: 'Carreira',     icon: Briefcase,     fixed: true,           group: 'rede' },
+  { to: '/hub',        label: 'Scraping Hub', icon: Radar,         fixed: true,           group: 'ferramentas' },
+  { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread', group: 'ferramentas' },
 ];
 
-// `inGroup` pinta os itens da "Rede Profissional" com um fundo índigo sutil
-// quando NÃO ativos; o estilo ativo (índigo cheio) é preservado.
-const navClass = (inGroup) => ({ isActive }) =>
+// Metadados de cada grupo: rótulo + fundo (estado NÃO-ativo). Cores exatas:
+// Trabalho #EFF6FF (blue-50) · Conteúdo #F0FDF4 (green-50) · Rede #EEF2FF
+// (indigo-50) · Ferramentas #F9FAFB (gray-50). As classes são literais completas
+// para o JIT do Tailwind detectá-las.
+const GROUP_META = {
+  trabalho:    { label: 'Trabalho',          bg: 'bg-blue-50 hover:bg-blue-100' },
+  conteudo:    { label: 'Conteúdo',          bg: 'bg-green-50 hover:bg-green-100' },
+  rede:        { label: 'Rede Profissional', bg: 'bg-indigo-50 hover:bg-indigo-100' },
+  ferramentas: { label: 'Ferramentas',       bg: 'bg-gray-50 hover:bg-gray-100' },
+};
+
+// `groupBg` pinta o item com o fundo do seu grupo quando NÃO ativo; o estilo
+// ativo (índigo cheio) tem prioridade.
+const navClass = (groupBg) => ({ isActive }) =>
   `flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
     isActive
       ? 'bg-accent text-white'
-      : inGroup
-        ? 'bg-indigo-50 text-ink2 hover:bg-indigo-100 hover:text-ink'
+      : groupBg
+        ? `${groupBg} text-ink2 hover:text-ink`
         : 'text-ink2 hover:bg-surface2 hover:text-ink'
   }`;
 
@@ -192,7 +202,7 @@ export default function Layout({ children }) {
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
                   <User className="h-4 w-4" />
-                  <span className="flex-1">👤 Meu Perfil</span>
+                  <span className="flex-1">Meu Perfil</span>
                 </button>
                 {/* Admin — owner, com badge de pendências */}
                 {isOwner && (
@@ -202,7 +212,7 @@ export default function Layout({ children }) {
                     className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                   >
                     <Shield className="h-4 w-4" />
-                    <span className="flex-1">🛡️ Admin</span>
+                    <span className="flex-1">Admin</span>
                     {badgeCount('pendingUsers') > 0 && (
                       <span className="h-2 w-2 rounded-full bg-danger" title="Aprovações pendentes" />
                     )}
@@ -216,7 +226,7 @@ export default function Layout({ children }) {
                     className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                   >
                     <LayoutDashboard className="h-4 w-4" />
-                    <span className="flex-1">📊 Dashboard</span>
+                    <span className="flex-1">Dashboard</span>
                   </button>
                 )}
                 {/* Timer — todos (só o LINK; o widget start/stop segue na sidebar/header) */}
@@ -226,7 +236,7 @@ export default function Layout({ children }) {
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
                   <Timer className="h-4 w-4" />
-                  <span className="flex-1">⏱️ Timer</span>
+                  <span className="flex-1">Timer</span>
                 </button>
                 {/* Pagamentos — todos */}
                 <button
@@ -235,7 +245,7 @@ export default function Layout({ children }) {
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
                   <CreditCard className="h-4 w-4" />
-                  <span className="flex-1">💳 Pagamentos</span>
+                  <span className="flex-1">Pagamentos</span>
                 </button>
                 {/* Avisos — todos */}
                 <button
@@ -244,7 +254,7 @@ export default function Layout({ children }) {
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
                   <Bell className="h-4 w-4" />
-                  <span className="flex-1">🔔 Avisos</span>
+                  <span className="flex-1">Avisos</span>
                 </button>
                 {/* Configurações — todos */}
                 <button
@@ -253,7 +263,7 @@ export default function Layout({ children }) {
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
                   <Settings className="h-4 w-4" />
-                  <span className="flex-1">⚙️ Configurações</span>
+                  <span className="flex-1">Configurações</span>
                 </button>
                 {/* Importar Dados — owner || assistente fixo */}
                 {(user?.role === 'owner' || user?.user_type === 'fixed') && (
@@ -263,7 +273,7 @@ export default function Layout({ children }) {
                     className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                   >
                     <Upload className="h-4 w-4" />
-                    <span className="flex-1">📥 Importar Dados</span>
+                    <span className="flex-1">Importar Dados</span>
                   </button>
                 )}
                 <div className="border-t border-line" />
@@ -274,7 +284,7 @@ export default function Layout({ children }) {
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-danger transition hover:bg-surface2"
                 >
                   <LogOut className="h-4 w-4" />
-                  <span className="flex-1">🚪 Sair</span>
+                  <span className="flex-1">Sair</span>
                 </button>
               </div>
             )}
@@ -298,25 +308,26 @@ export default function Layout({ children }) {
             {navItems.map((item, i) => {
               const Icon = item.icon;
               const count = item.badge ? badgeCount(item.badge) : 0;
-              const inGroup = item.group === 'rede';
+              const meta = GROUP_META[item.group] || null;
               const prev = navItems[i - 1];
-              const next = navItems[i + 1];
-              const startsGroup = inGroup && (!prev || prev.group !== 'rede');
-              const endsGroup = inGroup && (!next || next.group !== 'rede');
+              // O 1º item visível de cada grupo abre a seção (divisor + rótulo).
+              // O divisor de abertura do próximo grupo serve de "divisor abaixo"
+              // do anterior — sem linhas duplicadas; após o último grupo não há
+              // divisor (Chat é o fim).
+              const startsGroup = !prev || prev.group !== item.group;
               return (
                 <Fragment key={item.to}>
-                  {/* Divisor + rótulo "Rede Profissional" acima de Networking */}
-                  {startsGroup && (
-                    <div className="mt-2 border-t border-[#E8E3DB] pt-2">
+                  {startsGroup && meta && (
+                    <div className="mt-2 border-t border-[#E8E3DB]">
                       <span
-                        className="block px-3 pb-1 text-[10px] font-semibold uppercase text-muted"
-                        style={{ letterSpacing: '0.05em' }}
+                        className="block text-[10px] font-semibold uppercase"
+                        style={{ color: '#9CA3AF', letterSpacing: '0.08em', padding: '4px 12px 2px 12px' }}
                       >
-                        Rede Profissional
+                        {meta.label}
                       </span>
                     </div>
                   )}
-                  <NavLink to={item.to} className={navClass(inGroup)}>
+                  <NavLink to={item.to} className={navClass(meta ? meta.bg : '')}>
                     <Icon className="h-5 w-5" />
                     <span className="flex-1">{item.label}</span>
                     {count > 0 && (
@@ -325,8 +336,6 @@ export default function Layout({ children }) {
                       </span>
                     )}
                   </NavLink>
-                  {/* Divisor abaixo de Carreira (fim do grupo) */}
-                  {endsGroup && <div className="mt-2 border-t border-[#E8E3DB]" />}
                 </Fragment>
               );
             })}

@@ -1,0 +1,73 @@
+================================
+AIDE — RELATÓRIO Bridge Pessoas
+Data: 2026-07-07
+================================
+
+INVESTIGAÇÃO (antes de codificar):
+1. POST /api/bridge/push/people   -> EXISTIA (handleBridgePushPeople). Empurra
+   todas as network_people para o Lifegame /api/bridge/people. NÃO carimbava
+   aidePersonId/source (sem anti-eco). -> agora carimba (Change 4).
+   POST /api/bridge/receive/people -> EXISTE (handleBridgeReceivePeople). Push
+   do Lifegame->AIDE, insere direto em network_people. NÃO alterado (fora do
+   escopo do prompt; ver NOTA abaixo).
+   POST /api/bridge/import/people  -> handleBridgeImport(entity='people') ->
+   upsertLifegamePerson (caminho PULL). ERA insert direto; agora usa staging.
+2. network_people.lifegame_person_id -> EXISTE (migração 0015, indexado). Coluna
+   source adicionada em 0018. Nada a migrar nesse ponto.
+3. bridge_person_staging -> NÃO existia. Só bridge_task_staging (0032). Criada em 0034.
+
+MIGRAÇÃO 0034 (bridge_person_staging):
+Local: APLICADA (wrangler d1 execute --local, success)
+
+MUDANÇAS:
+migrations/
+  - 0034_bridge_people_staging.sql (novo): tabela + índices.
+
+_worker.js
+  - upsertLifegamePerson(env, p): pessoas NOVAS -> INSERT OR IGNORE em
+    bridge_person_staging (retorna 'staged'); existentes -> UPDATE em
+    network_people (retorna 'updated'). connectionStrength clamp 0..10.
+  - handleBridgeImport(): anti-eco generalizado para pessoas
+    (aidePersonId || source==='aide'); contador 'staged' já existente reutilizado.
+  - handleBridgePushPeople(): carimba lifegamePersonId, aidePersonId, source='aide'
+    em cada pessoa enviada ao Lifegame (anti-eco, igual às tarefas).
+  - Novas rotas (handleBridge, owner-only via sessão):
+      GET  /api/bridge/people/staging          (lista reviewed=0, ?search=, ordena por connection_strength DESC, name ASC)
+      GET  /api/bridge/people/staging/count     ({ pending })
+      POST /api/bridge/people/staging/approve   ({ ids[] } -> insere em network_people + marca reviewed/approved/imported)
+      POST /api/bridge/people/staging/reject    ({ ids[] } -> reviewed=1, approved=0)
+  - handleBridgeStagingCount(): contagem COMBINADA -> { tasks, people, total, pending: total }.
+    (pending = total mantém o badge do menu de perfil funcionando sem mudar Layout.jsx.)
+  - runDailyNotifications(): aviso 'bridge_pending' agora soma tarefas + pessoas;
+    corpo "X tarefa(s) e Y pessoa(s) aguardando sua aprovação em Revisar Bridge".
+
+src/components/bridge/BridgeCurationPage.jsx
+  - Abas [Tarefas] [Pessoas]. Tarefas = comportamento anterior (refatorado em
+    TasksTab). Pessoas = PeopleTab: busca por nome, selecionar todas,
+    aprovar/rejeitar em lote e individual, avatar, força de conexão (10 pontos),
+    tags, badge "Lifegame", estado vazio. Hook useStaging + Controls/RowActions
+    compartilhados entre as duas abas.
+
+NÃO alterado:
+  - src/components/networking/NetworkingPage.jsx (nenhuma das 6 mudanças toca nele).
+  - src/components/Layout.jsx (badge já lê r.pending, que agora é o total combinado).
+
+NOTA (fora do escopo do prompt):
+  handleBridgeReceivePeople (push Lifegame->AIDE) continua inserindo direto em
+  network_people, sem staging. O prompt só pediu staging no caminho de PULL
+  (import) e o anti-eco no push. Se quiser que TODO caminho inbound passe por
+  curadoria, é preciso adaptar handleBridgeReceivePeople também.
+
+VERIFICAÇÃO:
+npm run build: OK — zero erros (apenas warning pré-existente de chunk >500 kB)
+node --check _worker.js: OK
+migração local 0034: OK
+
+COMANDO MIGRAÇÃO REMOTA (rodar ANTES do deploy):
+npx wrangler d1 execute aide-db --remote --file=migrations/0034_bridge_people_staging.sql
+
+Deploy: NÃO realizado (aguardando aprovação, conforme instrução).
+
+================================
+FIM DO RELATÓRIO
+================================

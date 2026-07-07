@@ -9,8 +9,8 @@
     "dev:full": "concurrently \"npm run dev\" \"npm run worker\"",
     "build": "vite build && node scripts/postbuild.mjs",
     "deploy": "npm run build && wrangler pages deploy dist",
-    "db:migrate": "wrangler d1 execute aide-db --local --file=migrations/0001_initial.sql",
-    "db:migrate:remote": "wrangler d1 execute aide-db --remote --file=migrations/0001_initial.sql"
+    "db:migrate": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/migrate.ps1",
+    "db:migrate:remote": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/migrate.ps1 -Remote"
   },
   "dependencies": {
     "react": "^18.3.1",

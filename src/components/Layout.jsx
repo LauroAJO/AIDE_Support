@@ -47,7 +47,7 @@ const NAV_ITEMS = [
   { to: '/calendar',   label: 'Calendário',   icon: Calendar,      feature: 'calendar',   group: 'conteudo' },
   { to: '/meeting',    label: 'Reunião',      icon: Video,         feature: 'meeting',    group: 'conteudo' },
   { to: '/drive',      label: 'Drive',        icon: HardDrive,     feature: 'drive',      group: 'conteudo' },
-  { to: '/networking', label: 'Networking',   icon: NetworkIcon,   feature: 'networking', group: 'rede' },
+  { to: '/networking', label: 'Contatos-Networking', shortLabel: 'Contatos', icon: NetworkIcon, feature: 'networking', group: 'rede' },
   { to: '/market',     label: 'Mercado',      icon: Building2,     fixed: true,           group: 'rede' },
   { to: '/career',     label: 'Carreira',     icon: Briefcase,     fixed: true,           group: 'rede' },
   { to: '/hub',        label: 'Scraping Hub', icon: Radar,         fixed: true,           group: 'ferramentas' },
@@ -459,7 +459,7 @@ export default function Layout({ children }) {
                     }
                   >
                     <Icon className="h-6 w-6" />
-                    <span>{item.label}</span>
+                    <span>{item.shortLabel || item.label}</span>
                     {count > 0 && (
                       <span className="absolute right-1 top-1 rounded-full bg-danger px-1 py-0 text-[9px] font-semibold leading-tight text-white">
                         {count}

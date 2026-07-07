@@ -1,22 +1,17 @@
 import { useState } from 'react';
-import { useLocation } from 'react-router-dom';
-import { Building2, FolderKanban, Users } from 'lucide-react';
+import { Building2, FolderKanban } from 'lucide-react';
 import OrganizationsView from './OrganizationsView';
 import ProjectsView from './ProjectsView';
-import ContactsProView from './ContactsProView';
 
 const TABS = [
   { key: 'orgs', label: 'Organizações', icon: Building2 },
   { key: 'projects', label: 'Projetos & Iniciativas', icon: FolderKanban },
-  { key: 'contacts', label: 'Contatos-Networking', icon: Users },
 ];
 
 export default function MarketPage() {
-  const location = useLocation();
-  // Etapa 6 — quando navegado do Networking com { state: { contactId } },
-  // abre direto a sub-aba Contatos focando aquele contato.
-  const focusContactId = location.state?.contactId || null;
-  const [tab, setTab] = useState(focusContactId ? 'contacts' : 'orgs');
+  // Contatos deixaram de ser uma sub-aba do Mercado — agora são acessados
+  // direto pela barra lateral (item "Contatos-Networking" → /networking).
+  const [tab, setTab] = useState('orgs');
 
   return (
     <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
@@ -51,7 +46,6 @@ export default function MarketPage() {
       <div className="min-h-0 flex-1">
         {tab === 'orgs' && <OrganizationsView />}
         {tab === 'projects' && <ProjectsView />}
-        {tab === 'contacts' && <ContactsProView initialContactId={focusContactId} />}
       </div>
     </div>
   );

@@ -1,0 +1,60 @@
+================================
+AIDE — RELATÓRIO Bridge Curation
+Data: 2026-07-07
+================================
+
+STEP 1 — Tasks deleted:
+Before: 343   (SELECT COUNT(*) FROM tasks WHERE source='lifegame' OR lifegame_id IS NOT NULL)
+After:  0     (DELETE executado em produção — aprovado pelo usuário; success:true)
+
+MIGRAÇÃO 0032 (bridge_task_staging):
+Local:  APLICADA (wrangler d1 execute --local, success)
+Remota: APLICADA (wrangler d1 execute --remote, 3 queries, success, num_tables=57)
+
+MUDANÇAS:
+Backend (_worker.js)
+  - upsertLifegameTask(): tarefas NOVAS do Lifegame agora vão para
+    bridge_task_staging (INSERT OR IGNORE) em vez de entrar direto em `tasks`.
+    Tarefas já aprovadas (existem em tasks com o lifegame_id) seguem sendo
+    atualizadas. Retornos: 'updated' | 'staged'.
+  - handleBridgeImport(): novo contador `staged`; resposta agora
+    { fetched, staged, updated, inserted, skipped_echo, errors_count, errors }.
+    Echo-loop (aideTaskId / source='aide') mantido.
+  - Novas rotas (dentro de handleBridge, owner-only via sessão):
+      GET    /api/bridge/staging          → lista reviewed=0, ?search=, ordena por (urgency+importance) DESC
+      GET    /api/bridge/staging/count     → { pending }
+      POST   /api/bridge/staging/approve   → { ids[] } → insere em tasks + marca reviewed/approved/imported
+      POST   /api/bridge/staging/reject    → { ids[] } → reviewed=1, approved=0
+      DELETE /api/bridge/staging/clear     → apaga reviewed=1 (owner)
+  - runDailyNotifications(): novo aviso 'bridge_pending' (1x/dia) ao owner
+    quando há itens em staging com reviewed=0.
+
+Frontend
+  - src/components/bridge/BridgeCurationPage.jsx (novo): "Revisar Tarefas do
+    Lifegame" — busca, selecionar todas, aprovar/rejeitar em lote e individual,
+    limpar processadas, score (U+I), badges de status, estados vazios.
+  - src/App.jsx: import + <Route path="/bridge/staging"> dentro de <OwnerRoute>.
+  - src/components/Layout.jsx: item "Revisar Bridge" (GitMerge) no menu de perfil
+    (owner only) com badge de pendências (GET /api/bridge/staging/count no mount).
+  - src/version.js: 2.4.3 → 2.4.4
+
+Migração
+  - migrations/0032_bridge_staging.sql (novo)
+
+VERIFICAÇÃO:
+npm run build : OK — zero erros (apenas warning pré-existente de chunk >500 kB)
+node --check _worker.js : OK
+migração local 0032 : OK
+
+COMANDO MIGRAÇÃO REMOTA (rodar ANTES do deploy):
+  npx wrangler d1 execute aide-db --remote --file=migrations/0032_bridge_staging.sql
+
+Deploy: v2.4.4  — [PENDENTE: aguardando confirmação do DELETE + migração remota + deploy]
+Commit: [pendente]
+
+NOTA: `npm run db:migrate` está hardcoded para 0001 — usei
+`wrangler d1 execute --local --file=migrations/0032_bridge_staging.sql`.
+
+================================
+FIM DO RELATÓRIO
+================================

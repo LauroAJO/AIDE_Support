@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Shield,
   Upload,
+  GitMerge,
   Building2,
   Briefcase,
   Radar,
@@ -27,6 +28,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store';
 import { clearToken } from '../lib/auth';
+import { apiFetch } from '../lib/api';
 import { APP_VERSION } from '../version';
 import Avatar from './shared/Avatar';
 import TimerIndicator from './timer/TimerIndicator';
@@ -87,6 +89,7 @@ export default function Layout({ children }) {
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [bridgePending, setBridgePending] = useState(0);
   const menuRef = useRef(null);
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
@@ -141,6 +144,14 @@ export default function Layout({ children }) {
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
   }, []);
+
+  // Owner-only: quantas tarefas do Lifegame aguardam revisão (badge no menu).
+  useEffect(() => {
+    if (!isOwner) return;
+    apiFetch('/api/bridge/staging/count')
+      .then((r) => setBridgePending((r && r.pending) || 0))
+      .catch(() => {});
+  }, [isOwner]);
 
   return (
     <div className="flex h-screen flex-col bg-base text-ink">
@@ -278,6 +289,22 @@ export default function Layout({ children }) {
                   >
                     <Upload className="h-4 w-4" />
                     <span className="flex-1">Importar Dados</span>
+                  </button>
+                )}
+                {/* Revisar Bridge — owner only, com badge de pendências */}
+                {isOwner && (
+                  <button
+                    type="button"
+                    onClick={() => go('/bridge/staging')}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                  >
+                    <GitMerge className="h-4 w-4" />
+                    <span className="flex-1">Revisar Bridge</span>
+                    {bridgePending > 0 && (
+                      <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+                        {bridgePending}
+                      </span>
+                    )}
                   </button>
                 )}
                 <div className="border-t border-line" />

@@ -3235,7 +3235,128 @@ async function handleBridge(request, env, ctx, path) {
   if (path === '/api/bridge/receive/people') return handleBridgeReceivePeople(request, env);
   if (path === '/api/bridge/receive/timelog') return handleBridgeReceiveTimelog(request, env);
   if (path === '/api/bridge/sync-status') return handleBridgeSyncStatus(env);
+
+  // --- Curadoria de tarefas do Lifegame (v2.4.4) ---------------------------
+  // Rotas acessadas pelo owner via browser (sessão, não secret).
+  if (path === '/api/bridge/staging' && method === 'GET') return handleBridgeStagingList(request, env, user);
+  if (path === '/api/bridge/staging/count' && method === 'GET') return handleBridgeStagingCount(env, user);
+  if (path === '/api/bridge/staging/approve' && method === 'POST') return handleBridgeStagingApprove(request, env, user);
+  if (path === '/api/bridge/staging/reject' && method === 'POST') return handleBridgeStagingReject(request, env, user);
+  if (path === '/api/bridge/staging/clear' && method === 'DELETE') return handleBridgeStagingClear(env, user);
+
   return json({ error: 'Rota não encontrada' }, 404);
+}
+
+// --- Curadoria: handlers ----------------------------------------------------
+// Todas exigem owner (a bridge por secret não usa curadoria — user será null).
+function requireOwner(user) {
+  return user && user.role === 'owner';
+}
+
+function shapeStagingRow(r) {
+  if (!r) return r;
+  return {
+    ...r,
+    tags: parseJsonArray(r.tags),
+    reviewed: !!r.reviewed,
+    approved: !!r.approved,
+    score: (Number(r.urgency) || 0) + (Number(r.importance) || 0),
+  };
+}
+
+async function handleBridgeStagingList(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  const url = new URL(request.url);
+  const search = (url.searchParams.get('search') || '').trim();
+  let sql = 'SELECT * FROM bridge_task_staging WHERE reviewed = 0';
+  const args = [];
+  if (search) { sql += ' AND title LIKE ?'; args.push(`%${search}%`); }
+  sql += ' ORDER BY (urgency + importance) DESC, staged_at DESC';
+  try {
+    const { results } = await env.DB.prepare(sql).bind(...args).all();
+    return json((results || []).map(shapeStagingRow));
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/no such table/i.test(msg)) return json({ error: 'Migração 0032 não aplicada', detail: msg }, 503);
+    return json({ error: 'Falha ao listar staging', detail: msg }, 500);
+  }
+}
+
+async function handleBridgeStagingCount(env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  try {
+    const row = await env.DB.prepare(
+      'SELECT COUNT(*) AS pending FROM bridge_task_staging WHERE reviewed = 0'
+    ).first();
+    return json({ pending: (row && row.pending) || 0 });
+  } catch {
+    return json({ pending: 0 });
+  }
+}
+
+async function handleBridgeStagingApprove(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.ids) ? body.ids : [];
+  if (!ids.length) return json({ error: 'ids é obrigatório' }, 400);
+  const now = Math.floor(Date.now() / 1000);
+  let approved = 0;
+  const errors = [];
+  for (const id of ids) {
+    try {
+      const s = await env.DB.prepare('SELECT * FROM bridge_task_staging WHERE id = ?').bind(id).first();
+      if (!s) { errors.push({ id, error: 'não encontrado' }); continue; }
+      if (s.imported_task_id) { errors.push({ id, error: 'já importado' }); continue; }
+      // Evita duplicar caso já exista uma task com o mesmo lifegame_id.
+      const dup = await env.DB.prepare('SELECT id FROM tasks WHERE lifegame_id = ?').bind(s.lifegame_id).first();
+      const taskId = dup ? dup.id : crypto.randomUUID();
+      if (!dup) {
+        await env.DB.prepare(
+          `INSERT INTO tasks
+            (id, title, description, urgency, importance, energy, status, tags, comments, subtasks, time_entries,
+             favorited, drive_attachments, source, lifegame_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 5, ?, ?, '[]', '[]', '[]', 0, '[]', 'lifegame', ?, ?, ?)`
+        ).bind(
+          taskId, s.title, s.description || '', s.urgency, s.importance, s.status,
+          s.tags || '[]', s.lifegame_id, now, now
+        ).run();
+      }
+      await env.DB.prepare(
+        'UPDATE bridge_task_staging SET reviewed=1, approved=1, imported_at=?, imported_task_id=? WHERE id=?'
+      ).bind(now, taskId, id).run();
+      approved += 1;
+    } catch (e) {
+      errors.push({ id, error: String((e && e.message) || e).slice(0, 200) });
+    }
+  }
+  return json({ approved, errors });
+}
+
+async function handleBridgeStagingReject(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.ids) ? body.ids : [];
+  if (!ids.length) return json({ error: 'ids é obrigatório' }, 400);
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    await env.DB.prepare(
+      `UPDATE bridge_task_staging SET reviewed=1, approved=0 WHERE id IN (${placeholders})`
+    ).bind(...ids).run();
+    return json({ rejected: ids.length });
+  } catch (e) {
+    return json({ error: 'Falha ao rejeitar', detail: String((e && e.message) || e) }, 500);
+  }
+}
+
+async function handleBridgeStagingClear(env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  try {
+    const res = await env.DB.prepare('DELETE FROM bridge_task_staging WHERE reviewed = 1').run();
+    const deleted = (res && res.meta && res.meta.changes) || 0;
+    return json({ deleted });
+  } catch (e) {
+    return json({ error: 'Falha ao limpar', detail: String((e && e.message) || e) }, 500);
+  }
 }
 
 // Helper centralizado para chamadas ao Lifegame com logging detalhado.
@@ -3685,29 +3806,40 @@ async function ensureLifegameColumns(env) {
   }
 }
 
+// v2.4.4 — curadoria: tarefas novas do Lifegame NÃO entram direto em `tasks`.
+// Vão para bridge_task_staging e aguardam aprovação do owner em "Revisar Bridge".
+// Tarefas já aprovadas (que existem em `tasks` com o mesmo lifegame_id) continuam
+// sendo atualizadas normalmente a cada sync.
 async function upsertLifegameTask(env, t) {
   if (!t || !t.id) throw new Error('task sem id');
   const now = Math.floor(Date.now() / 1000);
   const tags = JSON.stringify(Array.isArray(t.tags) ? t.tags : []);
-  const title = (t.title || '').trim() || '(sem título)';
+  const title = (t.title || '').trim() || 'sem título';
+  const description = t.description || '';
   const urgency = Math.max(0, Math.min(10, Number(t.urgency) || 5));
   const importance = Math.max(0, Math.min(10, Number(t.importance) || 5));
   const status = ['backlog', 'todo', 'doing', 'done', 'blocked'].includes(t.status) ? t.status : 'backlog';
 
+  // Já importada (aprovada) → atualiza a task real.
   const existing = await env.DB.prepare('SELECT id FROM tasks WHERE lifegame_id = ?').bind(t.id).first();
   if (existing) {
     await env.DB.prepare(
-      'UPDATE tasks SET title=?, urgency=?, importance=?, status=?, tags=?, updated_at=? WHERE id=?'
-    ).bind(title, urgency, importance, status, tags, now, existing.id).run();
+      'UPDATE tasks SET title=?, urgency=?, importance=?, status=?, tags=?, updated_at=? WHERE lifegame_id=?'
+    ).bind(title, urgency, importance, status, tags, now, t.id).run();
     return 'updated';
   }
+
+  // Nova → estaciona para revisão. UNIQUE(lifegame_id) + INSERT OR IGNORE deixa
+  // idempotente: reenvios não duplicam nem reabrem uma já rejeitada.
   await env.DB.prepare(
-    `INSERT INTO tasks
-      (id, title, description, urgency, importance, energy, status, tags, comments, subtasks, time_entries,
-       favorited, drive_attachments, source, lifegame_id, created_at, updated_at)
-     VALUES (?, ?, '', ?, ?, 5, ?, ?, '[]', '[]', '[]', 0, '[]', 'lifegame', ?, ?, ?)`
-  ).bind(crypto.randomUUID(), title, urgency, importance, status, tags, t.id, now, now).run();
-  return 'inserted';
+    `INSERT OR IGNORE INTO bridge_task_staging
+      (id, lifegame_id, title, description, urgency, importance, status, tags, source, raw_payload, staged_at, staged_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'lifegame', ?, ?, 'bridge')`
+  ).bind(
+    crypto.randomUUID(), t.id, title, description, urgency, importance, status, tags,
+    JSON.stringify(t).slice(0, 100000), now
+  ).run();
+  return 'staged';
 }
 
 async function upsertLifegamePerson(env, p) {
@@ -3766,7 +3898,7 @@ async function handleBridgeImport(env, config, entity) {
   await ensureLifegameColumns(env);
   await cacheLifegamePayload(env, entity, items);
 
-  let inserted = 0, updated = 0, skippedEcho = 0;
+  let inserted = 0, updated = 0, staged = 0, skippedEcho = 0;
   const errors = [];
   for (const item of items) {
     // Anti-loop de eco (só tarefas): descarta o que o próprio AIDE originou e o
@@ -3789,6 +3921,7 @@ async function handleBridgeImport(env, config, entity) {
         : await upsertLifegamePerson(env, item);
       if (result === 'inserted') inserted += 1;
       else if (result === 'updated') updated += 1;
+      else if (result === 'staged') staged += 1;
     } catch (e) {
       errors.push({ id: item && item.id, error: String((e && e.message) || e).slice(0, 200) });
     }
@@ -3796,14 +3929,15 @@ async function handleBridgeImport(env, config, entity) {
 
   await logBridge(env, {
     direction: 'inbound', entity_type: entity, status: errors.length ? 'error' : 'success',
-    payload: `import: ${inserted} novos, ${updated} atualizados, ${skippedEcho} eco ignorados, ${errors.length} erros`,
+    payload: `import: ${staged} em revisão, ${inserted} novos, ${updated} atualizados, ${skippedEcho} eco ignorados, ${errors.length} erros`,
     error: errors.length ? errors.slice(0, 3).map((e) => `${e.id}: ${e.error}`).join('; ') : null,
   });
 
   return json({
     fetched: items.length,
-    inserted,
+    staged,
     updated,
+    inserted,
     skipped_echo: skippedEcho,
     errors_count: errors.length,
     errors: errors.slice(0, 10),
@@ -4049,6 +4183,32 @@ async function runDailyNotifications(env) {
     sent += career.deadlines + career.contacts + career.inactive;
   } catch { /* migration 0025/0026 não aplicada — ignora */ }
 
+  // --- Tarefas do Lifegame aguardando revisão (v2.4.4) --------------------
+  // Uma vez por dia, avisa o owner se houver itens pendentes em staging.
+  let bridgePending = 0;
+  try {
+    const owner = await env.DB.prepare("SELECT id FROM users WHERE role = 'owner' LIMIT 1").first();
+    if (owner) {
+      const row = await env.DB.prepare(
+        'SELECT COUNT(*) AS n FROM bridge_task_staging WHERE reviewed = 0'
+      ).first();
+      bridgePending = (row && row.n) || 0;
+      if (bridgePending > 0) {
+        const key = `notif:${owner.id}:bridge_pending:${today}`;
+        if (!(await dedupCheck(key, env))) {
+          await createNotification(env, null, {
+            to_user_id: owner.id,
+            type: 'bridge_pending',
+            title: 'Tarefas do Lifegame aguardando revisão',
+            body: `${bridgePending} tarefa(s) aguardando sua aprovação em Revisar Bridge`,
+          });
+          await dedupSet(key, 86400, env);
+          sent += 1;
+        }
+      }
+    }
+  } catch { /* migração 0032 não aplicada — ignora */ }
+
   await evaluateAlertRules(env);
 
   return {
@@ -4056,6 +4216,7 @@ async function runDailyNotifications(env) {
     overdue: (overdue.results || []).length,
     sent,
     career,
+    bridgePending,
   };
 }
 

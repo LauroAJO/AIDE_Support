@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Mail, RefreshCw, Star, Search, ExternalLink, Loader2, X, Plus, Inbox, AlertCircle,
@@ -403,16 +403,6 @@ export default function GmailPage() {
 
 // --- Leitor do email (corpo em iframe sandboxed quando há HTML) -------------
 function EmailReader({ email, onStar, onPipeline }) {
-  const iframeRef = useRef(null);
-
-  // Ajusta a altura do iframe ao conteúdo (limitada por CSS/max-height).
-  const onFrameLoad = () => {
-    try {
-      const doc = iframeRef.current.contentDocument;
-      if (doc) iframeRef.current.style.height = `${Math.min(doc.body.scrollHeight + 24, 900)}px`;
-    } catch { /* cross-origin — mantém altura padrão */ }
-  };
-
   const openGmail = () => window.open(email.gmail_link, '_blank', 'noopener');
 
   return (
@@ -449,20 +439,19 @@ function EmailReader({ email, onStar, onPipeline }) {
         </div>
       </div>
 
-      {/* Corpo */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4" style={{ maxHeight: '60vh' }}>
+      {/* Corpo — preenche todo o espaço restante abaixo do cabeçalho, sem cap de
+          altura. O iframe ocupa 100% da área e rola internamente (scrolling="yes"). */}
+      <div className="min-h-0 flex-1 overflow-hidden">
         {email.body_html ? (
           <iframe
-            ref={iframeRef}
             title="Corpo do email"
-            sandbox=""
+            sandbox="allow-same-origin allow-popups"
             srcDoc={email.body_html}
-            onLoad={onFrameLoad}
-            className="w-full rounded border border-line bg-white"
-            style={{ minHeight: 200 }}
+            className="block bg-white"
+            style={{ width: '100%', height: '100%', minHeight: '500px', border: 'none' }}
           />
         ) : (
-          <pre className="whitespace-pre-wrap break-words font-sans text-sm text-ink2">{email.body_text || '(sem conteúdo)'}</pre>
+          <pre className="h-full overflow-y-auto whitespace-pre-wrap break-words px-5 py-4 font-sans text-sm text-ink2">{email.body_text || '(sem conteúdo)'}</pre>
         )}
       </div>
 

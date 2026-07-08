@@ -70,6 +70,7 @@ export default function GmailPage() {
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState('');
   const [banner, setBanner] = useState('');
+  const [needsReconnect, setNeedsReconnect] = useState(false);
 
   const [selectedId, setSelectedId] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -123,13 +124,30 @@ export default function GmailPage() {
       if (r && typeof r.synced === 'number' && r.synced > 0) {
         setBanner(`${r.synced} novo(s) email(s) sincronizado(s).`);
       }
+      setNeedsReconnect(false);
       await loadList();
     } catch (e) {
-      setError(`Falha ao sincronizar: ${String(e.message || e)}`);
+      const msg = String(e.message || e);
+      // Token guardado sem o escopo gmail.readonly — oferece "Reconectar".
+      if (msg.includes('SCOPE_INSUFFICIENT')) {
+        setNeedsReconnect(true);
+        setError('A conexão não tem permissão de leitura do Gmail. Reconecte a conta.');
+      } else {
+        setError(`Falha ao sincronizar: ${msg}`);
+      }
     } finally {
       setSyncing(false);
     }
   }, [loadList]);
+
+  // Reconecta: desconecta a conta atual (limpa o token sem escopo) e reinicia o
+  // OAuth com os escopos corretos. Só o owner consegue (a rota é owner-only).
+  const reconnect = useCallback(async () => {
+    try {
+      await apiFetch('/api/gmail/disconnect');
+    } catch { /* segue mesmo se falhar — o novo OAuth sobrescreve o registro */ }
+    window.location.href = `/api/gmail/auth?token=${encodeURIComponent(getToken() || '')}`;
+  }, []);
 
   // Auto-sync a cada 5 min enquanto a aba estiver visível.
   useEffect(() => {
@@ -216,8 +234,17 @@ export default function GmailPage() {
         </div>
       )}
       {error && (
-        <div className="flex items-center gap-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-          <AlertCircle className="h-4 w-4 shrink-0" /> {error}
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          <AlertCircle className="h-4 w-4 shrink-0" /> <span className="min-w-0 flex-1">{error}</span>
+          {needsReconnect && isOwner && (
+            <button
+              type="button"
+              onClick={reconnect}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90"
+            >
+              <Mail className="h-3.5 w-3.5" /> Reconectar conta →
+            </button>
+          )}
         </div>
       )}
 

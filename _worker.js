@@ -297,6 +297,7 @@ async function handleAPI(request, env, ctx) {
   // Gmail (conta externa lcestech) — sincronização e leitura. Todos os usuários
   // autenticados podem sincronizar/ler; só o owner conecta a conta (rota pública
   // acima). A ordem importa: rotas específicas antes das genéricas de item.
+  if (path === '/api/gmail/disconnect') return handleGmailDisconnect(request, env, user);
   if (path === '/api/gmail/sync') return handleGmailSync(request, env, user);
   if (path === '/api/gmail/mark-read') return handleGmailMarkRead(request, env, user);
   if (path.match(/^\/api\/gmail\/emails\/[^/]+\/star$/)) {
@@ -568,9 +569,10 @@ async function handleLogout(request, env) {
 // ---------------------------------------------------------------------------
 
 const GMAIL_SCOPES = [
-  'https://www.googleapis.com/auth/gmail.readonly',
+  'openid',
   'email',
   'profile',
+  'https://www.googleapis.com/auth/gmail.readonly',
 ].join(' ');
 const GMAIL_API_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
@@ -752,6 +754,21 @@ function parseGmailAddress(raw) {
   return { name: '', email: s };
 }
 
+// GET /api/gmail/disconnect — remove a(s) conta(s) Gmail conectada(s) para
+// forçar um novo OAuth (owner only). Usado quando o token guardado não tem o
+// escopo gmail.readonly: o front chama isto e em seguida redireciona para /auth.
+async function handleGmailDisconnect(request, env, user) {
+  if (!user || user.role !== 'owner') {
+    return json({ error: 'Apenas o owner pode desconectar a conta Gmail' }, 403);
+  }
+  try {
+    await env.DB.prepare("DELETE FROM external_accounts WHERE account_type = 'gmail'").run();
+  } catch (e) {
+    return json({ error: 'Falha ao desconectar', detail: String(e) }, 500);
+  }
+  return json({ disconnected: true });
+}
+
 // GET /api/gmail/sync — sincroniza as contas gmail ativas. INSERT OR IGNORE:
 // nunca sobrescreve e-mails já guardados (preserva is_read/is_starred locais).
 async function handleGmailSync(request, env, user) {
@@ -773,6 +790,11 @@ async function handleGmailSync(request, env, user) {
   const listResp = await fetch(listUrl, { headers: authH });
   if (!listResp.ok) {
     const detail = await listResp.text().catch(() => '');
+    // Token guardado sem o escopo gmail.readonly: sinaliza para o front oferecer
+    // "Reconectar" (desconecta + reinicia o OAuth com o escopo correto).
+    if (listResp.status === 403 && /ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficient/i.test(detail)) {
+      return json({ error: 'SCOPE_INSUFFICIENT', detail, synced: 0 }, 403);
+    }
     return json({ error: 'Falha ao listar mensagens', detail, synced: 0 }, 502);
   }
   const listData = await listResp.json();

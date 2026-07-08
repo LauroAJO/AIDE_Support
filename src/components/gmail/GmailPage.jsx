@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Mail, RefreshCw, Star, Search, ExternalLink, Loader2, X, Plus, Inbox, AlertCircle,
+  Mail, RefreshCw, Star, Search, Loader2, X, Plus, Inbox, AlertCircle,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -148,6 +148,20 @@ export default function GmailPage() {
     } catch { /* segue mesmo se falhar — o novo OAuth sobrescreve o registro */ }
     window.location.href = `/api/gmail/auth?token=${encodeURIComponent(getToken() || '')}`;
   }, []);
+
+  // Marca o email como lido (otimista). No fluxo normal abrir já marca lido no
+  // servidor, então o botão raramente aparece — fica como rede de segurança.
+  const markRead = useCallback(async (id) => {
+    setEmails((list) => list.map((e) => (e.id === id ? { ...e, is_read: true } : e)));
+    setSelected((s) => (s && s.id === id ? { ...s, is_read: true } : s));
+    setUnreadCount((c) => {
+      const was = emails.find((e) => e.id === id);
+      return was && !was.is_read ? Math.max(0, c - 1) : c;
+    });
+    try {
+      await apiFetch('/api/gmail/mark-read', { method: 'POST', body: JSON.stringify({ ids: [id] }) });
+    } catch { /* otimista — ignora falha */ }
+  }, [emails]);
 
   // Auto-sync a cada 5 min enquanto a aba estiver visível.
   useEffect(() => {
@@ -368,6 +382,7 @@ export default function GmailPage() {
               email={selected}
               onStar={() => toggleStar(selected.id)}
               onPipeline={canPipeline ? () => setPipelineFor(selected) : null}
+              onMarkRead={() => markRead(selected.id)}
             />
           )}
         </div>
@@ -389,6 +404,7 @@ export default function GmailPage() {
               email={selected}
               onStar={() => toggleStar(selected.id)}
               onPipeline={canPipeline ? () => setPipelineFor(selected) : null}
+              onMarkRead={() => markRead(selected.id)}
             />
           )}
         </div>
@@ -402,61 +418,71 @@ export default function GmailPage() {
 }
 
 // --- Leitor do email (corpo em iframe sandboxed quando há HTML) -------------
-function EmailReader({ email, onStar, onPipeline }) {
-  const openGmail = () => window.open(email.gmail_link, '_blank', 'noopener');
+// Layout: cabeçalho compacto fixo em cima, corpo preenchendo o resto e barra de
+// ações fixa embaixo. A altura do corpo é baseada na viewport (calc(100vh-…)) e
+// não na cadeia flex de ancestrais — assim preenche a tela mesmo que algum pai
+// não propague a altura. `--body-min` = altura mínima garantida do corpo.
+const BODY_MIN_HEIGHT = 'calc(100vh - 260px)';
 
+function EmailReader({ email, onStar, onPipeline, onMarkRead }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Cabeçalho */}
-      <div className="border-b border-line px-5 py-4">
+      {/* Cabeçalho compacto */}
+      <div className="shrink-0 border-b border-line px-5 py-3">
         <div className="flex items-start justify-between gap-3">
-          <h2 className="text-lg font-bold text-ink">{email.subject}</h2>
+          <h2 className="text-base font-bold text-ink">{email.subject}</h2>
           <button type="button" onClick={onStar} title="Estrela" className="shrink-0 rounded-md p-1 hover:bg-surface2">
             <Star className={`h-5 w-5 ${email.is_starred ? 'fill-amber-400 text-amber-400' : 'text-muted'}`} />
           </button>
         </div>
-        <div className="mt-1.5 text-sm text-ink2">
+        <div className="mt-1 text-sm text-ink2">
           <span className="font-medium text-ink">{email.from_name || email.from_email}</span>
           {email.from_name && <span className="text-muted"> &lt;{email.from_email}&gt;</span>}
           <span className="text-muted"> · {fullDate(email.date_sent)}</span>
         </div>
         {email.to_email && <div className="text-xs text-muted">Para: {email.to_email}</div>}
         {Array.isArray(email.labels) && email.labels.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1">
+          <div className="mt-1.5 flex flex-wrap gap-1">
             {email.labels.map((l) => (
               <span key={l} className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-ink2">{l}</span>
             ))}
           </div>
         )}
-        <div className="mt-3">
-          <button
-            type="button"
-            onClick={openGmail}
-            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white transition hover:opacity-90"
-          >
-            Abrir no Gmail <ExternalLink className="h-4 w-4" />
-          </button>
-        </div>
       </div>
 
-      {/* Corpo — preenche todo o espaço restante abaixo do cabeçalho, sem cap de
-          altura. O iframe ocupa 100% da área e rola internamente (scrolling="yes"). */}
-      <div className="min-h-0 flex-1 overflow-hidden">
+      {/* Corpo — preenche o resto da tela (altura baseada na viewport, sem cap
+          pequeno). O iframe rola internamente quando o email é maior. */}
+      <div className="min-h-0 flex-1 overflow-auto">
         {email.body_html ? (
           <iframe
             title="Corpo do email"
             sandbox="allow-same-origin allow-popups"
             srcDoc={email.body_html}
             className="block bg-white"
-            style={{ width: '100%', height: '100%', minHeight: '500px', border: 'none' }}
+            style={{ width: '100%', height: '100%', minHeight: BODY_MIN_HEIGHT, border: 'none' }}
           />
         ) : (
-          <pre className="h-full overflow-y-auto whitespace-pre-wrap break-words px-5 py-4 font-sans text-sm text-ink2">{email.body_text || '(sem conteúdo)'}</pre>
+          <pre
+            className="whitespace-pre-wrap break-words px-5 py-4 font-sans text-sm text-ink2"
+            style={{ minHeight: BODY_MIN_HEIGHT }}
+          >
+            {email.body_text || '(sem conteúdo)'}
+          </pre>
         )}
       </div>
 
-      {/* Barra de ações */}
-      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line px-5 py-3">
+      {/* Barra de ações — sem "Abrir no Gmail" (abria o Gmail do próprio usuário,
+          não a conta lcestech). Só ações úteis: marcar como lido + pipeline. */}
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line px-5 py-3">
+        {onMarkRead && !email.is_read && (
+          <button
+            type="button"
+            onClick={onMarkRead}
+            className="flex items-center gap-1.5 rounded-lg border border-line px-4 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+          >
+            <Mail className="h-4 w-4" /> Marcar como lido
+          </button>
+        )}
         {onPipeline && (
           <button
             type="button"
@@ -466,13 +492,6 @@ function EmailReader({ email, onStar, onPipeline }) {
             <Plus className="h-4 w-4" /> Adicionar ao Pipeline
           </button>
         )}
-        <button
-          type="button"
-          onClick={openGmail}
-          className="flex items-center gap-1.5 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition hover:opacity-90"
-        >
-          Abrir no Gmail <ExternalLink className="h-4 w-4" />
-        </button>
       </div>
     </div>
   );

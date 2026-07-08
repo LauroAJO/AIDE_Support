@@ -47,6 +47,12 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/auth/logout') return handleLogout(request, env);
   if (path === '/api/push/vapid-key') return json({ publicKey: env.VAPID_PUBLIC_KEY || null });
 
+  // Gmail (conta externa lcestech) — OAuth. `auth` autentica o owner via ?token=
+  // (é uma navegação do browser, sem header Authorization); `callback` é público
+  // porque o Google redireciona o browser para cá sem sessão.
+  if (path === '/api/gmail/auth') return handleGmailAuth(request, env);
+  if (path === '/api/gmail/callback') return handleGmailCallback(request, env);
+
   // Bridge — auth handled inside (AIDE session OR X-Bridge-Secret).
   if (path.startsWith('/api/bridge/')) return handleBridge(request, env, ctx, path);
 
@@ -287,6 +293,17 @@ async function handleAPI(request, env, ctx) {
   // (POST /api/hub/items é tratado acima, antes do gate de sessão.)
   if (path === '/api/hub/items') return handleHubItems(request, env, user);
   if (path === '/api/hub/stats') return handleHubStats(request, env, user);
+
+  // Gmail (conta externa lcestech) — sincronização e leitura. Todos os usuários
+  // autenticados podem sincronizar/ler; só o owner conecta a conta (rota pública
+  // acima). A ordem importa: rotas específicas antes das genéricas de item.
+  if (path === '/api/gmail/sync') return handleGmailSync(request, env, user);
+  if (path === '/api/gmail/mark-read') return handleGmailMarkRead(request, env, user);
+  if (path.match(/^\/api\/gmail\/emails\/[^/]+\/star$/)) {
+    return handleGmailEmailStar(request, env, user, path.split('/')[4]);
+  }
+  if (path === '/api/gmail/emails') return handleGmailEmails(request, env, user);
+  if (path.startsWith('/api/gmail/emails/')) return handleGmailEmailItem(request, env, user, path.split('/')[4]);
 
   return json({ error: 'Rota não encontrada' }, 404);
 }
@@ -539,6 +556,386 @@ async function handleLogout(request, env) {
     await env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run();
   }
   return json({ ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Gmail — conta externa dedicada (lcestech.consulting@gmail.com)
+//
+// Uma única conta compartilhada: o owner autoriza uma vez (scope gmail.readonly)
+// e o token/refresh_token ficam em external_accounts. Todos os usuários AIDE
+// leem os e-mails sincronizados em gmail_emails; ninguém responde pelo AIDE
+// (o botão "Abrir no Gmail" leva ao webmail). Escopo somente-leitura.
+// ---------------------------------------------------------------------------
+
+const GMAIL_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'email',
+  'profile',
+].join(' ');
+const GMAIL_API_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
+
+// Callback próprio da integração Gmail (distinto de /api/auth/callback). Segue a
+// mesma lógica de PROD_HOST/override do login para funcionar em dev e produção.
+function getGmailRedirectUri(request, env) {
+  const url = new URL(request.url);
+  if (url.host === PROD_HOST) return `https://${PROD_HOST}/api/gmail/callback`;
+  if (env.GMAIL_REDIRECT_URI) return env.GMAIL_REDIRECT_URI.trim();
+  return `${url.origin}/api/gmail/callback`;
+}
+
+// Resolve o usuário a partir de um token de sessão avulso (query param). O fluxo
+// OAuth começa com uma navegação do browser, sem header Authorization, então o
+// front envia ?token=<sessão> e validamos o owner aqui.
+async function getUserByToken(token, env) {
+  if (!token) return null;
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    return await env.DB.prepare(
+      `SELECT u.* FROM sessions s JOIN users u ON s.user_id = u.id
+        WHERE s.token = ? AND s.expires_at > ?`
+    ).bind(token, now).first();
+  } catch { return null; }
+}
+
+// GET /api/gmail/auth — inicia o OAuth da conta externa (owner only).
+async function handleGmailAuth(request, env) {
+  const url = new URL(request.url);
+  const headerToken = (request.headers.get('Authorization') || '').replace('Bearer ', '').trim();
+  const token = url.searchParams.get('token') || headerToken;
+  const user = await getUserByToken(token, env);
+  if (!user || user.role !== 'owner') {
+    return json({ error: 'Apenas o owner pode conectar a conta Gmail' }, 403);
+  }
+  const params = new URLSearchParams({
+    client_id: clientId(env),
+    redirect_uri: getGmailRedirectUri(request, env),
+    response_type: 'code',
+    scope: GMAIL_SCOPES,
+    state: 'gmail_external',
+    access_type: 'offline',
+    prompt: 'consent',
+    include_granted_scopes: 'true',
+  });
+  return Response.redirect(`${GOOGLE_AUTH_URL}?${params.toString()}`, 302);
+}
+
+// GET /api/gmail/callback — troca o code por tokens, descobre o e-mail da conta
+// e faz upsert em external_accounts; redireciona para /gmail?connected=true.
+async function handleGmailCallback(request, env) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get('code');
+  const error = url.searchParams.get('error');
+  const redirectBase = new URL(getGmailRedirectUri(request, env)).origin;
+  const back = (params) => Response.redirect(new URL(`/gmail?${params}`, redirectBase).toString(), 302);
+
+  if (error) return back(`error=${encodeURIComponent(error)}`);
+  if (!code) return back('error=missing_code');
+
+  const tokenResp = await fetch(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: clientId(env),
+      client_secret: clientSecret(env),
+      redirect_uri: getGmailRedirectUri(request, env),
+      grant_type: 'authorization_code',
+    }),
+  });
+  if (!tokenResp.ok) return back('error=token_exchange_failed');
+  const tokenData = await tokenResp.json();
+  const { access_token, refresh_token, expires_in } = tokenData;
+  if (!access_token) return back('error=no_access_token');
+
+  const profileResp = await fetch(GOOGLE_USERINFO_URL, {
+    headers: { Authorization: `Bearer ${access_token}` },
+  });
+  if (!profileResp.ok) return back('error=userinfo_failed');
+  const profile = await profileResp.json();
+  const email = (profile.email || '').toLowerCase();
+  if (!email) return back('error=no_email');
+
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + (expires_in || 3600);
+  // Preserva o refresh_token existente se o Google não reenviar um (acontece
+  // quando o usuário já concedeu consentimento antes).
+  const existing = await env.DB.prepare('SELECT id, refresh_token FROM external_accounts WHERE email = ?')
+    .bind(email).first();
+  const id = existing ? existing.id : crypto.randomUUID();
+  const refresh = refresh_token || (existing && existing.refresh_token) || null;
+
+  const ownerToken = (request.headers.get('Authorization') || '').replace('Bearer ', '').trim();
+  const owner = await getUserByToken(ownerToken, env);
+
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO external_accounts
+       (id, email, account_type, display_name, access_token, refresh_token,
+        token_expires_at, authorized_by, authorized_at, active, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,1,?,?)`
+  ).bind(
+    id, email, 'gmail', profile.name || 'LCEStech', access_token, refresh,
+    expiresAt, owner ? owner.id : null, now,
+    existing ? now : now, now
+  ).run();
+
+  return back('connected=true');
+}
+
+// Renova o access_token de uma conta externa quando está a menos de 5 min de
+// expirar. Retorna o token válido, ou null se não há refresh_token / falhou.
+async function refreshExternalToken(accountId, env) {
+  const account = await env.DB.prepare(
+    'SELECT * FROM external_accounts WHERE id = ?'
+  ).bind(accountId).first();
+  if (!account?.refresh_token) return account?.access_token || null;
+
+  const now = Math.floor(Date.now() / 1000);
+  if (account.token_expires_at && account.token_expires_at > now + 300) {
+    return account.access_token;
+  }
+
+  const res = await fetch(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId(env),
+      client_secret: clientSecret(env),
+      refresh_token: account.refresh_token,
+      grant_type: 'refresh_token',
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!data.access_token) return null;
+
+  await env.DB.prepare(
+    `UPDATE external_accounts SET access_token = ?, token_expires_at = ?, updated_at = unixepoch() WHERE id = ?`
+  ).bind(data.access_token, now + (data.expires_in || 3600), accountId).run();
+  return data.access_token;
+}
+
+// base64url → string UTF-8 (corpos do Gmail vêm em base64url, muitas vezes com
+// caracteres multibyte que o atob simples corromperia).
+function decodeGmailB64(data) {
+  if (!data) return '';
+  try {
+    const b64 = data.replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder('utf-8').decode(bytes);
+  } catch { return ''; }
+}
+
+// Percorre o payload (com partes aninhadas) e extrai o primeiro text/plain e o
+// primeiro text/html encontrados.
+function extractGmailBodies(payload) {
+  let text = '';
+  let html = '';
+  const walk = (part) => {
+    if (!part) return;
+    const mime = part.mimeType || '';
+    if (part.body && part.body.data) {
+      if (mime === 'text/plain' && !text) text = decodeGmailB64(part.body.data);
+      else if (mime === 'text/html' && !html) html = decodeGmailB64(part.body.data);
+    }
+    if (Array.isArray(part.parts)) part.parts.forEach(walk);
+  };
+  walk(payload);
+  return { text, html };
+}
+
+// Extrai "Nome" e "email@dominio" de um header From/To (ex.: `Fulano <a@b.com>`).
+function parseGmailAddress(raw) {
+  const s = String(raw || '').trim();
+  const m = s.match(/^\s*(.*?)\s*<([^>]+)>\s*$/);
+  if (m) return { name: m[1].replace(/^"|"$/g, '').trim(), email: m[2].trim() };
+  return { name: '', email: s };
+}
+
+// GET /api/gmail/sync — sincroniza as contas gmail ativas. INSERT OR IGNORE:
+// nunca sobrescreve e-mails já guardados (preserva is_read/is_starred locais).
+async function handleGmailSync(request, env, user) {
+  let account;
+  try {
+    account = await env.DB.prepare(
+      "SELECT * FROM external_accounts WHERE account_type = 'gmail' AND active = 1 ORDER BY created_at ASC LIMIT 1"
+    ).first();
+  } catch {
+    return json({ error: 'Tabela não migrada' }, 500);
+  }
+  if (!account) return json({ error: 'Nenhuma conta Gmail conectada', synced: 0 }, 404);
+
+  const token = await refreshExternalToken(account.id, env);
+  if (!token) return json({ error: 'Falha ao renovar token — reconectar a conta', synced: 0 }, 401);
+
+  const authH = { Authorization: `Bearer ${token}` };
+  const listUrl = `${GMAIL_API_BASE}/messages?maxResults=50&q=${encodeURIComponent('is:unread OR newer_than:7d')}`;
+  const listResp = await fetch(listUrl, { headers: authH });
+  if (!listResp.ok) {
+    const detail = await listResp.text().catch(() => '');
+    return json({ error: 'Falha ao listar mensagens', detail, synced: 0 }, 502);
+  }
+  const listData = await listResp.json();
+  const messages = listData.messages || [];
+
+  let synced = 0;
+  for (const m of messages) {
+    // Pula se já temos essa mensagem (evita refetch e preserva estado local).
+    const known = await env.DB.prepare('SELECT id FROM gmail_emails WHERE gmail_message_id = ?')
+      .bind(m.id).first();
+    if (known) continue;
+
+    const msgResp = await fetch(`${GMAIL_API_BASE}/messages/${m.id}?format=full`, { headers: authH });
+    if (!msgResp.ok) continue;
+    const msg = await msgResp.json();
+    const payload = msg.payload || {};
+    const headers = payload.headers || [];
+    const h = (name) => {
+      const found = headers.find((x) => (x.name || '').toLowerCase() === name.toLowerCase());
+      return found ? found.value : '';
+    };
+    const from = parseGmailAddress(h('From'));
+    const to = parseGmailAddress(h('To'));
+    const { text, html } = extractGmailBodies(payload);
+    const labels = Array.isArray(msg.labelIds) ? msg.labelIds : [];
+    const isUnread = labels.includes('UNREAD');
+    const isStarred = labels.includes('STARRED');
+    const dateSent = msg.internalDate
+      ? Math.floor(Number(msg.internalDate) / 1000)
+      : (Date.parse(h('Date')) ? Math.floor(Date.parse(h('Date')) / 1000) : Math.floor(Date.now() / 1000));
+    const gmailLink = `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(account.email)}#all/${m.id}`;
+
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO gmail_emails
+         (id, account_id, gmail_message_id, thread_id, subject, from_email, from_name,
+          to_email, snippet, body_text, body_html, date_sent, is_read, is_starred,
+          labels, gmail_link, synced_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,unixepoch())`
+    ).bind(
+      crypto.randomUUID(), account.id, m.id, msg.threadId || '',
+      h('Subject') || '(sem assunto)', from.email, from.name, to.email,
+      msg.snippet || '', text, html, dateSent,
+      isUnread ? 0 : 1, isStarred ? 1 : 0, JSON.stringify(labels), gmailLink
+    ).run();
+    synced += 1;
+  }
+
+  return json({ synced, account: account.email });
+}
+
+// GET /api/gmail/emails — lista paginada com filtros ?unread=true / ?search= /
+// ?label= / ?page= / ?limit=. Retorna também connected + unread_count.
+async function handleGmailEmails(request, env, user) {
+  const url = new URL(request.url);
+  let account;
+  try {
+    account = await env.DB.prepare(
+      "SELECT id, email, display_name FROM external_accounts WHERE account_type = 'gmail' AND active = 1 ORDER BY created_at ASC LIMIT 1"
+    ).first();
+  } catch {
+    return json({ connected: false, emails: [], total: 0, unread_count: 0 });
+  }
+  if (!account) return json({ connected: false, emails: [], total: 0, unread_count: 0 });
+
+  const wh = ['account_id = ?'];
+  const args = [account.id];
+  if (url.searchParams.get('unread') === 'true') wh.push('is_read = 0');
+  if (url.searchParams.get('starred') === 'true') wh.push('is_starred = 1');
+  const label = url.searchParams.get('label');
+  if (label) { wh.push('labels LIKE ?'); args.push(`%"${label}"%`); }
+  const search = (url.searchParams.get('search') || '').trim();
+  if (search) {
+    wh.push('(subject LIKE ? OR from_email LIKE ? OR from_name LIKE ? OR snippet LIKE ?)');
+    const like = `%${search}%`;
+    args.push(like, like, like, like);
+  }
+  const where = `WHERE ${wh.join(' AND ')}`;
+
+  const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+  const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 25));
+  const offset = (page - 1) * limit;
+
+  const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS n FROM gmail_emails ${where}`).bind(...args).first();
+  const unreadRow = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM gmail_emails WHERE account_id = ? AND is_read = 0'
+  ).bind(account.id).first();
+
+  // Lista sem body_html/body_text (payloads grandes) — o corpo vem no item.
+  const { results } = await env.DB.prepare(
+    `SELECT id, gmail_message_id, thread_id, subject, from_email, from_name, to_email,
+            snippet, date_sent, is_read, is_starred, labels, gmail_link
+       FROM gmail_emails ${where}
+      ORDER BY date_sent DESC LIMIT ? OFFSET ?`
+  ).bind(...args, limit, offset).all();
+
+  return json({
+    connected: true,
+    account: { email: account.email, display_name: account.display_name },
+    emails: (results || []).map(shapeGmailEmail),
+    total: (totalRow && totalRow.n) || 0,
+    unread_count: (unreadRow && unreadRow.n) || 0,
+    page,
+    limit,
+  });
+}
+
+// GET /api/gmail/emails/:id — e-mail completo (com corpo). Marca como lido.
+async function handleGmailEmailItem(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  const row = await env.DB.prepare('SELECT * FROM gmail_emails WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: 'E-mail não encontrado' }, 404);
+  if (!row.is_read) {
+    await env.DB.prepare('UPDATE gmail_emails SET is_read = 1 WHERE id = ?').bind(id).run();
+    row.is_read = 1;
+  }
+  return json(shapeGmailEmail(row, true));
+}
+
+// POST /api/gmail/emails/:id/star — alterna o estado de estrela (local).
+async function handleGmailEmailStar(request, env, user, id) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  const row = await env.DB.prepare('SELECT id, is_starred FROM gmail_emails WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: 'E-mail não encontrado' }, 404);
+  const next = row.is_starred ? 0 : 1;
+  await env.DB.prepare('UPDATE gmail_emails SET is_starred = ? WHERE id = ?').bind(next, id).run();
+  return json({ id, is_starred: !!next });
+}
+
+// POST /api/gmail/mark-read — marca vários e-mails como lidos de uma vez.
+async function handleGmailMarkRead(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.ids) ? body.ids.filter(Boolean) : [];
+  if (!ids.length) return json({ error: 'ids é obrigatório', updated: 0 }, 400);
+  const placeholders = ids.map(() => '?').join(',');
+  await env.DB.prepare(`UPDATE gmail_emails SET is_read = 1 WHERE id IN (${placeholders})`).bind(...ids).run();
+  return json({ updated: ids.length });
+}
+
+function shapeGmailEmail(row, withBody = false) {
+  let labels = [];
+  try { labels = JSON.parse(row.labels || '[]'); } catch { labels = []; }
+  const base = {
+    id: row.id,
+    gmail_message_id: row.gmail_message_id,
+    thread_id: row.thread_id || '',
+    subject: row.subject || '(sem assunto)',
+    from_email: row.from_email || '',
+    from_name: row.from_name || '',
+    to_email: row.to_email || '',
+    snippet: row.snippet || '',
+    date_sent: row.date_sent || 0,
+    is_read: !!row.is_read,
+    is_starred: !!row.is_starred,
+    labels,
+    gmail_link: row.gmail_link || '',
+  };
+  if (withBody) {
+    base.body_text = row.body_text || '';
+    base.body_html = row.body_html || '';
+  }
+  return base;
 }
 
 // ---------------------------------------------------------------------------
@@ -4343,6 +4740,31 @@ async function runDailyNotifications(env) {
     }
   } catch { /* migração de staging não aplicada — ignora */ }
 
+  // --- E-mails não lidos da conta LCEStech (v2.4.10) ----------------------
+  // Uma vez por dia, avisa cada usuário ativo se houver e-mails não lidos na
+  // conta Gmail externa. Envolvido em try/catch: se a migration 0035 não
+  // existir, o cron principal segue normalmente.
+  let gmailUnread = 0;
+  try {
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM gmail_emails WHERE is_read = 0').first();
+    gmailUnread = (row && row.n) || 0;
+    if (gmailUnread > 0) {
+      const users = await env.DB.prepare("SELECT id FROM users WHERE status = 'active'").all();
+      for (const u of users.results || []) {
+        const key = `notif:${u.id}:gmail_unread:${today}`;
+        if (await dedupCheck(key, env)) continue;
+        await createNotification(env, null, {
+          to_user_id: u.id,
+          type: 'gmail_unread',
+          title: 'Emails não lidos — LCEStech',
+          body: `${gmailUnread} email(s) não lido(s) em lcestech.consulting@gmail.com`,
+        });
+        await dedupSet(key, 86400, env);
+        sent += 1;
+      }
+    }
+  } catch { /* migration 0035 não aplicada — ignora */ }
+
   await evaluateAlertRules(env);
 
   return {
@@ -4351,6 +4773,7 @@ async function runDailyNotifications(env) {
     sent,
     career,
     bridgePending,
+    gmailUnread,
   };
 }
 

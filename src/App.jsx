@@ -26,6 +26,7 @@ import ImportPage from './components/import/ImportPage';
 import MarketPage from './components/market/MarketPage';
 import OrgDetailPage from './components/market/OrgDetailPage';
 import CareerPage from './components/career/CareerPage';
+import GmailPage from './components/gmail/GmailPage';
 import HubPage from './components/hub/HubPage';
 import AdminPage from './components/admin/AdminPage';
 import BridgeCurationPage from './components/bridge/BridgeCurationPage';
@@ -249,6 +250,8 @@ export default function App() {
           <Route path="/market" element={<FixedRoute><MarketPage /></FixedRoute>} />
           <Route path="/market/org/:id" element={<FixedRoute><OrgDetailPage /></FixedRoute>} />
           <Route path="/career" element={<FixedRoute><CareerPage /></FixedRoute>} />
+          {/* Gmail LCEStech — acessível a todos os usuários autenticados. */}
+          <Route path="/gmail" element={<GmailPage />} />
           <Route path="/hub" element={<FixedRoute><HubPage /></FixedRoute>} />
           <Route path="/admin" element={<OwnerRoute><AdminPage /></OwnerRoute>} />
           <Route path="/bridge/staging" element={<OwnerRoute><BridgeCurationPage /></OwnerRoute>} />

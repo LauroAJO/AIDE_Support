@@ -19,6 +19,7 @@ export default function TimerCheckMonitor() {
   const [tasks, setTasks] = useState([]);
   const [picker, setPicker] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
   const lastBucket = useRef(0);
 
   // Reset the bucket whenever the active entry changes (or stops). Without
@@ -46,18 +47,21 @@ export default function TimerCheckMonitor() {
 
   const stopTimer = async () => {
     setBusy(true);
+    setErr('');
     try {
       await apiFetch('/api/timer/stop', { method: 'POST' });
       setActiveEntry(null);
-    } catch { /* ignore */ }
-    finally {
-      setBusy(false);
       close();
+    } catch (e) {
+      setErr(String((e && e.message) || 'Falha ao parar o timer').slice(0, 160));
+    } finally {
+      setBusy(false);
     }
   };
 
   const openPicker = async () => {
     setBusy(true);
+    setErr('');
     try {
       await apiFetch('/api/timer/stop', { method: 'POST' });
       setActiveEntry(null);
@@ -68,24 +72,27 @@ export default function TimerCheckMonitor() {
           .sort((a, b) => (b.score || 0) - (a.score || 0))
       );
       setPicker(true);
-    } catch { /* ignore */ }
-    finally {
+    } catch (e) {
+      setErr(String((e && e.message) || 'Falha ao trocar de tarefa').slice(0, 160));
+    } finally {
       setBusy(false);
     }
   };
 
   const switchTo = async (taskId) => {
     setBusy(true);
+    setErr('');
     try {
       const entry = await apiFetch('/api/timer/start', {
         method: 'POST',
         body: JSON.stringify({ task_id: taskId }),
       });
       setActiveEntry(entry);
-    } catch { /* ignore */ }
-    finally {
-      setBusy(false);
       close();
+    } catch (e) {
+      setErr(String((e && e.message) || 'Falha ao iniciar o timer').slice(0, 160));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -108,6 +115,12 @@ export default function TimerCheckMonitor() {
         <p className="text-sm text-ink2">
           O timer está rodando há {formatDuration(elapsedSeconds)}.
         </p>
+
+        {err && (
+          <p className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+            {err}
+          </p>
+        )}
 
         {picker ? (
           <div className="mt-4 max-h-60 overflow-y-auto rounded-lg border border-line">

@@ -49,6 +49,7 @@ export default function TimerPage() {
   const [tasks, setTasks] = useState([]);
   const [filter, setFilter] = useState('all');
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
   const [pickTask, setPickTask] = useState('');
   const [showAvail, setShowAvail] = useState(false);
   const [availForm, setAvailForm] = useState(null);
@@ -88,6 +89,7 @@ export default function TimerPage() {
 
   const start = async () => {
     setBusy(true);
+    setErr('');
     try {
       const entry = await apiFetch('/api/timer/start', {
         method: 'POST',
@@ -95,6 +97,8 @@ export default function TimerPage() {
       });
       setActiveEntry(entry);
       await loadEntries();
+    } catch (e) {
+      setErr(String((e && e.message) || 'Falha ao iniciar o timer').slice(0, 160));
     } finally {
       setBusy(false);
     }
@@ -102,10 +106,13 @@ export default function TimerPage() {
 
   const stop = async () => {
     setBusy(true);
+    setErr('');
     try {
       await apiFetch('/api/timer/stop', { method: 'POST' });
       setActiveEntry(null);
       await loadEntries();
+    } catch (e) {
+      setErr(String((e && e.message) || 'Falha ao parar o timer').slice(0, 160));
     } finally {
       setBusy(false);
     }
@@ -165,6 +172,12 @@ export default function TimerPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <h1 className="text-2xl font-bold text-ink">Timer</h1>
+
+      {err && (
+        <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          {err}
+        </div>
+      )}
 
       {/* Section 1 — active timer */}
       <section className="rounded-xl border border-line bg-surface p-5">

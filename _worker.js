@@ -1120,6 +1120,10 @@ async function resolveGranularPermissions(userId, env) {
 // Boolean gate: true if the user may perform the (feature, action) pair.
 // Owner always returns true. Missing key = denied (default-deny).
 function canDo(granular, feature, action) {
+  // Timer is a universal feature — available to every authenticated user and
+  // never seeded into the granular grid (see migration 0024 / 0036). Short-
+  // circuit so a future timer gate can't fail closed on the empty grid.
+  if (feature === 'timer') return true;
   if (granular === null || granular === undefined) return true;
   return !!granular[`${feature}.${action}`];
 }
@@ -1645,9 +1649,14 @@ async function handleTimerStart(request, env, user) {
   const body = (await readJson(request)) || {};
   const now = Math.floor(Date.now() / 1000);
 
-  const avail = await env.DB.prepare(
-    'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
-  ).bind(user.id).first();
+  // Defensive: a missing availability table/column must not 500 the whole
+  // start (parity with stopActiveEntry). Falls back to rate 0.
+  let avail = null;
+  try {
+    avail = await env.DB.prepare(
+      'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
+    ).bind(user.id).first();
+  } catch { /* availability ausente — mantém taxa 0 */ }
   const defaultRate = (avail && (avail.hourly_rate_brl || avail.hourly_rate)) || 0;
   const rate = body.hourly_rate != null ? Number(body.hourly_rate) || 0 : defaultRate;
 

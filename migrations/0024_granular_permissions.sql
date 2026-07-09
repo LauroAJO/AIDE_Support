@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS preset_granular_permissions (
 
 CREATE INDEX IF NOT EXISTS idx_preset_granular_preset ON preset_granular_permissions(preset_id);
 
+-- NOTE (timer): the "timer" feature is intentionally NOT seeded here. It is a
+-- universal feature available to every authenticated user — the timer routes
+-- in _worker.js require only a valid session, and canDo() short-circuits
+-- `feature === 'timer'` to true. Fresh installs get timer access with no rows.
+-- Migration 0036 seeds timer.use=1 into both presets purely as forward
+-- consistency; it is not required for the timer to work.
+
 -- ---------------------------------------------------------------------------
 -- Seed: preset_fixed (broad access — current assistant_fixed behavior).
 -- ---------------------------------------------------------------------------

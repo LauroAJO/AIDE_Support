@@ -16,6 +16,7 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
   const [open, setOpen] = useState(false);
   const [tasks, setTasks] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
   const ref = useRef(null);
 
   useEffect(() => {
@@ -63,6 +64,7 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
 
   const start = async (taskId) => {
     setBusy(true);
+    setErr('');
     setOpen(false);
     try {
       const entry = await apiFetch('/api/timer/start', {
@@ -70,8 +72,8 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
         body: JSON.stringify({ task_id: taskId }),
       });
       setActiveEntry(entry);
-    } catch {
-      /* ignore */
+    } catch (e) {
+      setErr(String((e && e.message) || 'Falha ao iniciar o timer').slice(0, 120));
     } finally {
       setBusy(false);
     }
@@ -79,11 +81,12 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
 
   const stop = async () => {
     setBusy(true);
+    setErr('');
     try {
       await apiFetch('/api/timer/stop', { method: 'POST' });
       setActiveEntry(null);
-    } catch {
-      /* ignore */
+    } catch (e) {
+      setErr(String((e && e.message) || 'Falha ao parar o timer').slice(0, 120));
     } finally {
       setBusy(false);
     }
@@ -97,7 +100,12 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
         className={`flex items-center gap-2 rounded-lg px-3 py-1.5 ${isHeader ? '' : 'mb-2'}`}
         style={{ background: 'rgba(99,102,241,0.10)' }}
       >
-        <button onClick={stop} disabled={busy} className="text-accent" title="Parar timer">
+        <button
+          onClick={stop}
+          disabled={busy}
+          className="text-accent"
+          title={err || 'Parar timer'}
+        >
           {busy ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
@@ -145,6 +153,7 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
           )}
         </div>
       )}
+      {err && <p className="mt-1 text-[10px] text-danger">{err}</p>}
     </div>
   );
 }

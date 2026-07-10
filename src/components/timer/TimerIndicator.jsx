@@ -4,6 +4,11 @@ import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { formatHMS } from '../../lib/time';
 
+// Tarefas prontas para cronometrar, na ordem em que aparecem no seletor.
+// 'backlog' entra porque toda tarefa nasce nesse status (worker: POST /api/tasks),
+// e sem ela um usuário que só criou tarefas novas ficava sem nada para iniciar.
+const STATUS_ORDER = ['doing', 'todo', 'backlog'];
+
 // Lives in the sidebar; always mounted, so it owns the 1s tick that keeps
 // store.elapsedSeconds in sync for every component reading the timer.
 export default function TimerIndicator({ variant = 'sidebar' }) {
@@ -49,15 +54,21 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
     const next = !open;
     setOpen(next);
     if (next) {
+      setErr('');
       try {
         const all = await apiFetch('/api/tasks');
         setTasks(
-          all
-            .filter((t) => t.status === 'todo' || t.status === 'doing')
-            .sort((a, b) => b.score - a.score)
+          (all || [])
+            .filter((t) => t.status !== 'done')
+            .sort(
+              (a, b) =>
+                STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status) ||
+                (b.score || 0) - (a.score || 0)
+            )
         );
-      } catch {
+      } catch (e) {
         setTasks([]);
+        setErr(String((e && e.message) || 'Falha ao carregar tarefas').slice(0, 120));
       }
     }
   };
@@ -138,6 +149,16 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
             isHeader ? 'top-full mt-1 w-56' : 'bottom-full mb-1 w-full'
           }`}
         >
+          {/* Sempre disponível: sem esta opção, quem não tem nenhuma tarefa
+              listada (ex.: assistente que só vê as próprias) não consegue
+              iniciar o timer. O backend aceita task_id nulo. */}
+          <button
+            onClick={() => start(null)}
+            disabled={busy}
+            className="block w-full border-b border-line px-3 py-2 text-left text-xs font-medium text-ink hover:bg-surface2 disabled:opacity-60"
+          >
+            Sem tarefa específica
+          </button>
           {tasks.length === 0 ? (
             <p className="p-3 text-center text-xs text-muted">Nenhuma tarefa ativa</p>
           ) : (
@@ -145,7 +166,8 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
               <button
                 key={t.id}
                 onClick={() => start(t.id)}
-                className="block w-full truncate px-3 py-2 text-left text-xs text-ink hover:bg-surface2"
+                disabled={busy}
+                className="block w-full truncate px-3 py-2 text-left text-xs text-ink hover:bg-surface2 disabled:opacity-60"
               >
                 {t.title}
               </button>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Network, Plus, Minus, Home, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
+  Network, Plus, Minus, Home, Maximize2, Settings, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
   Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase,
 } from 'lucide-react';
 import { useStore } from '../../store';
@@ -1020,6 +1020,10 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   // Distingue um "arrastar" (pan) de um clique no vazio (deselecionar).
   const draggedRef = useRef(false);
+  // Ajustes de layout (painel "⚙ Ajustes"): raios dos anéis ajustáveis ao vivo.
+  const [showSettings, setShowSettings] = useState(false);
+  const [outerRadius, setOuterRadius] = useState(0.43); // anel externo (pessoas)
+  const [innerRadius, setInnerRadius] = useState(0.25);  // anel interno (organizações)
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -1057,8 +1061,9 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
     const list = Array.isArray(people) ? people.filter((p) => p && p.id) : [];
     const cx = safeW / 2;
     const cy = safeH / 2;
-    // Anel externo mais amplo para acomodar 56+ pessoas sem sobreposição.
-    const r = Math.min(safeW, safeH) * 0.43;
+    // Anel externo ajustável (slider "Raio do anel externo") para acomodar
+    // muitas pessoas sem sobreposição.
+    const r = Math.min(safeW, safeH) * outerRadius;
     const denom = Math.max(1, list.length);
     return list.map((p, i) => {
       const angle = (i / denom) * Math.PI * 2;
@@ -1071,13 +1076,14 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
         radius,
       };
     });
-  }, [people, safeW, safeH]);
+  }, [people, safeW, safeH, outerRadius]);
 
   const institutionNodes = useMemo(() => {
     const list = Array.isArray(institutions) ? institutions.filter((i) => i && i.id) : [];
     const cx = safeW / 2;
     const cy = safeH / 2;
-    const r = Math.min(safeW, safeH) * 0.25;
+    // Anel interno ajustável (slider "Raio do anel interno").
+    const r = Math.min(safeW, safeH) * innerRadius;
     const denom = Math.max(1, list.length);
     return list.map((it, i) => {
       const angle = (i / denom) * Math.PI * 2 + Math.PI / 4;
@@ -1092,7 +1098,7 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
         width, height: 20, label,
       };
     });
-  }, [institutions, safeW, safeH]);
+  }, [institutions, safeW, safeH, innerRadius]);
 
   const nodeIndex = useMemo(() => {
     const m = {};
@@ -1100,6 +1106,21 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
     institutionNodes.forEach((n) => { if (n && n.id) m[n.id] = n; });
     return m;
   }, [personNodes, institutionNodes]);
+
+  // Fallback por NOME da organização. Necessário porque a migração 0030
+  // (consolidação network_institutions → market_organizations) zerou o
+  // institution_id da maioria das funções (só UTwente e Novel-T foram
+  // reapontados; o resto virou NULL preservando apenas institution_name).
+  // Assim, funções antigas com nome mas sem id ainda conseguem ligar ao nó da
+  // organização correspondente no Mercado quando o nome bate.
+  const instByName = useMemo(() => {
+    const m = {};
+    institutionNodes.forEach((n) => {
+      const k = normName(n.name);
+      if (k && !(k in m)) m[k] = n;
+    });
+    return m;
+  }, [institutionNodes]);
 
   // Group p2p connections by unordered pair for curve offsets when multiple
   // edges exist between the same two people.
@@ -1128,7 +1149,7 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
     if (!el) return undefined;
     const onWheel = (e) => {
       e.preventDefault();
-      setZoom((z) => Math.min(3, Math.max(0.5, z - e.deltaY * 0.001)));
+      setZoom((z) => Math.min(5, Math.max(0.5, z - e.deltaY * 0.001)));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -1141,7 +1162,7 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       switch (e.key) {
         case 'Escape': setSelectedNode(null); break;
-        case '+': case '=': e.preventDefault(); setZoom((z) => Math.min(3, z + 0.2)); break;
+        case '+': case '=': e.preventDefault(); setZoom((z) => Math.min(5, z + 0.2)); break;
         case '-': case '_': e.preventDefault(); setZoom((z) => Math.max(0.5, z - 0.2)); break;
         case 'ArrowUp': e.preventDefault(); setPan((p) => ({ ...p, y: p.y + PAN_STEP })); break;
         case 'ArrowDown': e.preventDefault(); setPan((p) => ({ ...p, y: p.y - PAN_STEP })); break;
@@ -1153,6 +1174,15 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // Debug (apenas em dev): confirma que os ids dos nós de organização batem com
+  // os institution_id das funções — diagnóstico do "links institucionais não
+  // aparecem". Ver comentário em instByName.
+  useEffect(() => {
+    if (!import.meta.env?.DEV) return;
+    console.log('Org node ids:', institutionNodes.filter((n) => n._kind === 'institution').map((n) => n.id).slice(0, 3));
+    console.log('Role institution_ids:', (Array.isArray(personRoles) ? personRoles : []).slice(0, 3).map((r) => r.institution_id));
+  }, [institutionNodes, personRoles]);
 
   const startPan = (e) => {
     draggedRef.current = false;
@@ -1173,9 +1203,36 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
     setSelectedNode(null);
   };
   const pickNode = (type, id) => { draggedRef.current = false; setSelectedNode({ id, type }); };
-  const zoomIn = () => setZoom((z) => Math.min(3, z + 0.2));
+  const zoomIn = () => setZoom((z) => Math.min(5, z + 0.2));
   const zoomOut = () => setZoom((z) => Math.max(0.5, z - 0.2));
   const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
+
+  // "Zoom to fit": calcula o zoom/pan que enquadra todos os nós (pessoas, orgs e
+  // o nó central do Lauro) dentro do viewport, com margem. Como viewBox == pixels
+  // do container, screen = pan + zoom·nó → resolvemos zoom pela bounding box.
+  const zoomToFit = () => {
+    if (personNodes.length === 0 && institutionNodes.length === 0) { resetView(); return; }
+    let minX = lauroPos.x - 30, minY = lauroPos.y - 30;
+    let maxX = lauroPos.x + 30, maxY = lauroPos.y + 30;
+    for (const n of personNodes) {
+      const rr = (n.radius || 10) + 14; // inclui o rótulo abaixo do nó
+      minX = Math.min(minX, n.x - rr); maxX = Math.max(maxX, n.x + rr);
+      minY = Math.min(minY, n.y - rr); maxY = Math.max(maxY, n.y + rr);
+    }
+    for (const n of institutionNodes) {
+      const hw = (n.width || 40) / 2, hh = (n.height || 20) / 2;
+      minX = Math.min(minX, n.x - hw); maxX = Math.max(maxX, n.x + hw);
+      minY = Math.min(minY, n.y - hh); maxY = Math.max(maxY, n.y + hh);
+    }
+    const bw = Math.max(1, maxX - minX);
+    const bh = Math.max(1, maxY - minY);
+    const margin = 48;
+    const z = Math.max(0.5, Math.min(5, Math.min((safeW - 2 * margin) / bw, (safeH - 2 * margin) / bh)));
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    setZoom(z);
+    setPan({ x: safeW / 2 - z * cx, y: safeH / 2 - z * cy });
+  };
 
   // Nó selecionado + suas coordenadas de tela (para posicionar o popup).
   const selNode = selId ? nodeIndex[selId] : null;
@@ -1198,14 +1255,16 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
         {/* Fundo capturador de cliques no vazio → deseleciona */}
         <rect x={0} y={0} width={safeW} height={safeH} fill="transparent" onClick={bgClick} />
         <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
-        {/* Person ↔ Institution dashed links (from person_roles) */}
-        {safeRoles.filter((r) => r && r.institution_id && r.person_id).map((r, i) => {
+        {/* Person ↔ Institution dashed links (from person_roles). Resolve o nó da
+            organização por id e, se ausente (institution_id NULL pós-migração
+            0030), por NOME. */}
+        {safeRoles.filter((r) => r && r.person_id && (r.institution_id || r.institution_name)).map((r, i) => {
           const a = nodeIndex[r.person_id];
-          const b = nodeIndex[r.institution_id];
+          const b = (r.institution_id && nodeIndex[r.institution_id]) || instByName[normName(r.institution_name)];
           if (!a || !b) return null;
           if (!Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(b.x) || !Number.isFinite(b.y)) return null;
-          const hi = isSelEdge(r.person_id, r.institution_id);
-          const dim = isDimmed(r.person_id) && isDimmed(r.institution_id);
+          const hi = isSelEdge(r.person_id, b.id);
+          const dim = isDimmed(r.person_id) && isDimmed(b.id);
           return (
             <line
               key={`pr-${i}`}
@@ -1322,27 +1381,77 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
         </g>
       </svg>
 
-      {/* Controles de zoom (canto superior direito) */}
-      <div className="absolute right-3 top-3 flex items-center gap-1 rounded-lg border border-line bg-white p-1 shadow-soft">
-        <button
-          type="button" onClick={zoomIn} title="Aproximar (+)"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
-        >
-          <Plus className="h-4 w-4" />
-        </button>
-        <button
-          type="button" onClick={zoomOut} title="Afastar (−)"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
-        >
-          <Minus className="h-4 w-4" />
-        </button>
-        <button
-          type="button" onClick={resetView} title="Centralizar (reset)"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
-        >
-          <Home className="h-4 w-4" />
-        </button>
-        <span className="px-1 text-[10px] tabular-nums text-muted">{Math.round(zoom * 100)}%</span>
+      {/* Controles de zoom + Ajustes (canto superior direito) */}
+      <div className="absolute right-3 top-3 flex flex-col items-end gap-2">
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-white p-1 shadow-soft">
+          <button
+            type="button" onClick={zoomIn} title="Aproximar (+)"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
+          >
+            <Plus className="h-4 w-4" />
+          </button>
+          <button
+            type="button" onClick={zoomOut} title="Afastar (−)"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
+          >
+            <Minus className="h-4 w-4" />
+          </button>
+          <button
+            type="button" onClick={zoomToFit} title="Enquadrar tudo (zoom to fit)"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
+          >
+            <Maximize2 className="h-4 w-4" />
+          </button>
+          <button
+            type="button" onClick={resetView} title="Centralizar (reset)"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
+          >
+            <Home className="h-4 w-4" />
+          </button>
+          <span className="px-1 text-[10px] tabular-nums text-muted">{Math.round(zoom * 100)}%</span>
+          <button
+            type="button" onClick={() => setShowSettings((v) => !v)} title="Ajustes de layout"
+            aria-expanded={showSettings}
+            className={`flex h-7 items-center gap-1 rounded-md px-1.5 text-[11px] font-medium ${showSettings ? 'bg-indigo-50 text-indigo-700' : 'text-indigo-600 hover:bg-indigo-50'}`}
+          >
+            <Settings className="h-3.5 w-3.5" /> Ajustes
+          </button>
+        </div>
+
+        {showSettings && (
+          <div className="w-60 rounded-lg border border-line bg-white p-3 text-[11px] shadow-soft">
+            <p className="mb-2 text-[11px] font-semibold uppercase text-ink">Ajustes de layout</p>
+            <label className="block">
+              <span className="flex items-center justify-between text-ink2">
+                <span>Raio do anel externo</span>
+                <span className="tabular-nums text-muted">{outerRadius.toFixed(2)}</span>
+              </span>
+              <input
+                type="range" min="0.3" max="0.8" step="0.01" value={outerRadius}
+                onChange={(e) => setOuterRadius(Number(e.target.value))}
+                className="mt-1 w-full accent-[#6366f1]"
+              />
+            </label>
+            <label className="mt-2 block">
+              <span className="flex items-center justify-between text-ink2">
+                <span>Raio do anel interno</span>
+                <span className="tabular-nums text-muted">{innerRadius.toFixed(2)}</span>
+              </span>
+              <input
+                type="range" min="0.1" max="0.5" step="0.01" value={innerRadius}
+                onChange={(e) => setInnerRadius(Number(e.target.value))}
+                className="mt-1 w-full accent-[#6366f1]"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => { setOuterRadius(0.43); setInnerRadius(0.25); }}
+              className="mt-2 text-[10px] text-accent hover:underline"
+            >
+              Restaurar padrão
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Popup de informação do nó selecionado */}
@@ -1442,6 +1551,12 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
 function truncate(str, n) {
   if (!str) return '';
   return str.length > n ? `${str.slice(0, n - 1)}…` : str;
+}
+
+// Normaliza um nome de organização para casar funções (por institution_name)
+// com nós de organização quando o institution_id está ausente.
+function normName(s) {
+  return String(s || '').trim().toLowerCase();
 }
 
 // Helper used by NetworkMap.isDimmed

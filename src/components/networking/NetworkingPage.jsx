@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Network, Plus, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
-  Building2, User, Link as LinkIcon, Map, List as ListIcon, Briefcase,
+  Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -334,7 +334,7 @@ export default function NetworkingPage() {
               <ListIcon className="h-3.5 w-3.5" /> Lista
             </button>
             <button onClick={() => setView('map')} className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium ${view === 'map' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'}`}>
-              <Map className="h-3.5 w-3.5" /> Mapa
+              <MapIcon className="h-3.5 w-3.5" /> Mapa
             </button>
           </div>
           <button

@@ -110,12 +110,18 @@ function personStrengthColor(s) {
   if (v <= 8) return '#4338CA';
   return '#1E1B4B';
 }
-function institutionStrengthColor(s) {
-  const v = Math.max(0, Math.min(10, Number(s) || 0));
-  if (v <= 2) return '#FEF3C7';
-  if (v <= 5) return '#FCD34D';
-  if (v <= 8) return '#F59E0B';
-  return '#B45309';
+// Cor do retângulo de organização por tipo (market_organizations.type). Fundo
+// claro + borda escura da mesma matiz; texto escuro garante legibilidade. Tipos
+// não mapeados (ex.: consortium) caem em "other" (cinza).
+const ORG_TYPE_COLORS = {
+  university:         { fill: '#E0E7FF', stroke: '#4338CA' }, // indigo
+  company:            { fill: '#FDE68A', stroke: '#B45309' }, // amber
+  research_institute: { fill: '#BBF7D0', stroke: '#15803D' }, // green
+  funder:             { fill: '#E9D5FF', stroke: '#7E22CE' }, // purple
+  other:              { fill: '#E5E7EB', stroke: '#6B7280' }, // gray
+};
+function orgTypeColor(type) {
+  return ORG_TYPE_COLORS[type] || ORG_TYPE_COLORS.other;
 }
 
 export default function NetworkingPage() {
@@ -518,7 +524,7 @@ export default function NetworkingPage() {
           >
             <NetworkMap
               people={Array.isArray(people) ? people : []}
-              institutions={[]}
+              institutions={Array.isArray(institutions) ? institutions : []}
               connections={Array.isArray(connections) ? connections : []}
               personRoles={Array.isArray(personRoles) ? personRoles : []}
               onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
@@ -1029,11 +1035,13 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
     const list = Array.isArray(people) ? people.filter((p) => p && p.id) : [];
     const cx = safeW / 2;
     const cy = safeH / 2;
-    const r = Math.min(safeW, safeH) * 0.4;
+    // Anel externo mais amplo para acomodar 56+ pessoas sem sobreposição.
+    const r = Math.min(safeW, safeH) * 0.43;
     const denom = Math.max(1, list.length);
     return list.map((p, i) => {
       const angle = (i / denom) * Math.PI * 2;
-      const radius = 14 + Math.min(15, (Number(p.connection_strength) || 0) * 1.5);
+      // Nós um pouco menores quando há muita gente no anel.
+      const radius = 9 + Math.min(11, (Number(p.connection_strength) || 0) * 1.1);
       return {
         ...p, _kind: 'person',
         x: cx + r * Math.cos(angle),
@@ -1047,17 +1055,19 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
     const list = Array.isArray(institutions) ? institutions.filter((i) => i && i.id) : [];
     const cx = safeW / 2;
     const cy = safeH / 2;
-    const r = Math.min(safeW, safeH) * 0.22;
+    const r = Math.min(safeW, safeH) * 0.25;
     const denom = Math.max(1, list.length);
     return list.map((it, i) => {
       const angle = (i / denom) * Math.PI * 2 + Math.PI / 4;
-      const strength = Number(it.connection_strength) || 5;
-      const width = 80 + Math.min(40, strength * 2);
+      // Retângulos menores (orgs não têm connection_strength) dimensionados ao
+      // rótulo truncado (15 chars) para reduzir sobreposição no anel interno.
+      const label = truncate(it.name, 15);
+      const width = Math.max(46, Math.min(104, label.length * 6.4));
       return {
         ...it, _kind: 'institution',
         x: cx + r * Math.cos(angle),
         y: cy + r * Math.sin(angle),
-        width, height: 28,
+        width, height: 20, label,
       };
     });
   }, [institutions, safeW, safeH]);
@@ -1157,19 +1167,22 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
           <text x={lauroPos.x} y={lauroPos.y + 5} textAnchor="middle" fill="#FFFFFF" fontSize="14" fontWeight="700">L</text>
         </g>
 
-        {/* Institution rectangles */}
+        {/* Organization rectangles — cor por tipo. Clique apenas foca/desfoca
+            (organizações moram no Mercado; não há detalhe de org no Networking). */}
         {institutionNodes.map((n) => {
-          const fill = institutionStrengthColor(5);
+          const { fill, stroke } = orgTypeColor(n.type);
           const dim = isDimmed(n.id);
           return (
-            <g key={`inst-${n.id}`} style={{ cursor: 'pointer' }} onClick={() => { setFocusId(focusId === n.id ? null : n.id); onSelect && onSelect('institution', n.id); }}>
+            <g key={`inst-${n.id}`} style={{ cursor: 'pointer' }} onClick={() => setFocusId(focusId === n.id ? null : n.id)}>
               <rect
                 x={n.x - n.width / 2} y={n.y - n.height / 2} width={n.width} height={n.height}
-                rx={6} fill={fill} stroke="#B45309" strokeWidth={2}
+                rx={5} fill={fill} stroke={stroke} strokeWidth={1.5}
                 opacity={dim ? 0.3 : 1}
-              />
-              <text x={n.x} y={n.y + 4} textAnchor="middle" fill="#1A1814" fontSize="11" fontWeight="600" opacity={dim ? 0.5 : 1}>
-                {truncate(n.name, Math.max(8, Math.floor(n.width / 7)))}
+              >
+                <title>{n.name}</title>
+              </rect>
+              <text x={n.x} y={n.y + 3.5} textAnchor="middle" fill="#1A1814" fontSize="9" fontWeight="600" opacity={dim ? 0.5 : 1} style={{ pointerEvents: 'none' }}>
+                {n.label}
               </text>
             </g>
           );
@@ -1182,8 +1195,8 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
           const labelOpacity = dim ? 0.25 : Math.max(0.5, Math.min(1, (n.connection_strength || 0) / 10 + 0.3));
           return (
             <g key={`p-${n.id}`} style={{ cursor: 'pointer' }} onClick={() => { setFocusId(focusId === n.id ? null : n.id); onSelect && onSelect('person', n.id); }}>
-              <circle cx={n.x} cy={n.y} r={n.radius} fill="#6366f1" stroke={stroke} strokeWidth="3" opacity={dim ? 0.3 : 1} />
-              <text x={n.x} y={n.y + n.radius + 12} textAnchor="middle" fill="#1A1814" fontSize="11" opacity={labelOpacity}>
+              <circle cx={n.x} cy={n.y} r={n.radius} fill="#6366f1" stroke={stroke} strokeWidth="2.5" opacity={dim ? 0.3 : 1} />
+              <text x={n.x} y={n.y + n.radius + 10} textAnchor="middle" fill="#1A1814" fontSize="9" opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
                 {(n.name || '').split(' ')[0]}
               </text>
             </g>
@@ -1199,18 +1212,29 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
 
       {/* Legend */}
       <div className="absolute bottom-3 left-3 max-w-xs rounded-lg border border-line bg-surface/95 p-3 text-[10px] text-ink2 shadow-soft backdrop-blur">
-        <p className="mb-1.5 text-[11px] font-semibold uppercase text-ink">Força (0–10)</p>
+        <p className="mb-1.5 text-[11px] font-semibold uppercase text-ink">Força da conexão (0–10)</p>
         <div className="mb-2 flex items-center gap-1">
           {[1, 3, 5, 7, 9].map((n) => (
             <span key={n} className="h-2.5 w-6 rounded" style={{ background: personStrengthColor(n) }} title={`${n}`} />
           ))}
         </div>
         <div className="grid grid-cols-1 gap-1">
-          <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-[#6366f1] border-2 border-[#1E1B4B]" /> Pessoa</div>
-          <div className="flex items-center gap-2"><span className="h-3 w-4 rounded bg-[#FCD34D] border border-[#B45309]" /> Instituição</div>
-          <div className="flex items-center gap-2"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#6366F1" strokeWidth="2" /></svg> Conexão pessoa</div>
+          <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-[#6366f1] border-2 border-[#1E1B4B]" /> Person</div>
+          <div className="flex items-center gap-2"><span className="h-3 w-4 rounded-sm bg-[#E0E7FF] border border-[#4338CA]" /> Organização (cor por tipo)</div>
+          <div className="flex items-center gap-2"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#6366F1" strokeWidth="2" /></svg> Conexão direta</div>
           <div className="flex items-center gap-2"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#9CA3AF" strokeWidth="1.5" strokeDasharray="3 3" /></svg> Vínculo institucional</div>
         </div>
+        {/* Tipos de organização (cor do retângulo) */}
+        <div className="mt-2 flex flex-wrap gap-x-2 gap-y-0.5">
+          {[['Univ.', '#E0E7FF', '#4338CA'], ['Empresa', '#FDE68A', '#B45309'], ['Instituto', '#BBF7D0', '#15803D'], ['Financiador', '#E9D5FF', '#7E22CE'], ['Outro', '#E5E7EB', '#6B7280']].map(([lbl, fill, stroke]) => (
+            <span key={lbl} className="flex items-center gap-1">
+              <span className="h-2.5 w-3 rounded-sm" style={{ background: fill, border: `1px solid ${stroke}` }} />{lbl}
+            </span>
+          ))}
+        </div>
+        {/* Projetos (market_projects) não aparecem no mapa: ligam-se só a orgs
+            via organization_id, sem relação direta com pessoas. Enhancement
+            futuro exigiria novas tabelas de relacionamento. */}
         {focusId && (
           <button onClick={() => setFocusId(null)} className="mt-2 text-[10px] text-accent hover:underline">
             Limpar foco

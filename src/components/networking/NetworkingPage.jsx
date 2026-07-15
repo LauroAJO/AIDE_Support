@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Network, Plus, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
+  Network, Plus, Minus, Home, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
   Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase,
 } from 'lucide-react';
 import { useStore } from '../../store';
@@ -123,6 +123,14 @@ const ORG_TYPE_COLORS = {
 function orgTypeColor(type) {
   return ORG_TYPE_COLORS[type] || ORG_TYPE_COLORS.other;
 }
+// Rótulos PT-BR dos tipos de organização (market_organizations.type) para o popup do mapa.
+const ORG_TYPE_LABELS = {
+  university: 'Universidade',
+  company: 'Empresa',
+  research_institute: 'Instituto de pesquisa',
+  funder: 'Financiador',
+  other: 'Outro',
+};
 
 export default function NetworkingPage() {
   const people = useStore((s) => s.networkPeople);
@@ -527,7 +535,9 @@ export default function NetworkingPage() {
               institutions={Array.isArray(institutions) ? institutions : []}
               connections={Array.isArray(connections) ? connections : []}
               personRoles={Array.isArray(personRoles) ? personRoles : []}
+              proStatus={proStatus}
               onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
+              onViewOrg={(id) => navigate(`/market/org/${id}`)}
             />
           </ErrorBoundary>
         </div>
@@ -991,13 +1001,25 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
   );
 }
 
-// SVG map with strength-coded edges, institution rectangles, and click-to-
-// highlight. Layout is a fixed circle around Lauro; no physics so the picture
-// stays stable across re-renders.
-function NetworkMap({ people, institutions, connections, personRoles, onSelect }) {
+// SVG map with strength-coded edges, institution rectangles, zoom/pan, and
+// click-to-select (destaca o nó + popup; a navegação fica nos botões do popup).
+// Layout is a fixed circle around Lauro; no physics so the picture stays stable
+// across re-renders. Zoom/pan são aplicados via transform num <g> interno — o
+// viewBox permanece fixo, então as coordenadas de tela do popup = pan + zoom·nó.
+const PAN_STEP = 40; // deslocamento por tecla de seta
+function NetworkMap({ people, institutions, connections, personRoles, proStatus = {}, onSelect, onViewOrg }) {
   const containerRef = useRef(null);
+  const svgRef = useRef(null);
   const [size, setSize] = useState({ w: 900, h: 600 });
-  const [focusId, setFocusId] = useState(null);
+  // Seleção (destaque + popup) — substitui o antigo "focusId".
+  const [selectedNode, setSelectedNode] = useState(null); // { id, type } | null
+  // Zoom & pan.
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  // Distingue um "arrastar" (pan) de um clique no vazio (deselecionar).
+  const draggedRef = useRef(false);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -1093,24 +1115,103 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
   }, [connections]);
 
   const safeRoles = Array.isArray(personRoles) ? personRoles : [];
-  const isDimmed = (id) => focusId && focusId !== id && !connectsTo(focusId, id, Array.isArray(connections) ? connections : [], safeRoles);
+  const conns = Array.isArray(connections) ? connections : [];
+  const selId = selectedNode?.id || null;
+  // Nó dimmed quando há seleção e ele não é o selecionado nem está conectado a ele.
+  const isDimmed = (id) => selId && selId !== id && !connectsTo(selId, id, conns, safeRoles);
+  // Aresta destacada quando toca o nó selecionado.
+  const isSelEdge = (aId, bId) => selId && (aId === selId || bId === selId);
+
+  // Zoom com a roda do mouse — listener nativo não-passivo p/ permitir preventDefault.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return undefined;
+    const onWheel = (e) => {
+      e.preventDefault();
+      setZoom((z) => Math.min(3, Math.max(0.5, z - e.deltaY * 0.001)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Atalhos de teclado: Esc (deselecionar), +/- (zoom), setas (pan).
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      switch (e.key) {
+        case 'Escape': setSelectedNode(null); break;
+        case '+': case '=': e.preventDefault(); setZoom((z) => Math.min(3, z + 0.2)); break;
+        case '-': case '_': e.preventDefault(); setZoom((z) => Math.max(0.5, z - 0.2)); break;
+        case 'ArrowUp': e.preventDefault(); setPan((p) => ({ ...p, y: p.y + PAN_STEP })); break;
+        case 'ArrowDown': e.preventDefault(); setPan((p) => ({ ...p, y: p.y - PAN_STEP })); break;
+        case 'ArrowLeft': e.preventDefault(); setPan((p) => ({ ...p, x: p.x + PAN_STEP })); break;
+        case 'ArrowRight': e.preventDefault(); setPan((p) => ({ ...p, x: p.x - PAN_STEP })); break;
+        default: break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const startPan = (e) => {
+    draggedRef.current = false;
+    setIsPanning(true);
+    setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+  };
+  const movePan = (e) => {
+    if (!isPanning) return;
+    const nx = e.clientX - panStart.x;
+    const ny = e.clientY - panStart.y;
+    if (Math.abs(nx - pan.x) > 2 || Math.abs(ny - pan.y) > 2) draggedRef.current = true;
+    setPan({ x: nx, y: ny });
+  };
+  const endPan = () => setIsPanning(false);
+  // Clique no fundo vazio: deseleciona — a menos que tenha acabado de arrastar.
+  const bgClick = () => {
+    if (draggedRef.current) { draggedRef.current = false; return; }
+    setSelectedNode(null);
+  };
+  const pickNode = (type, id) => { draggedRef.current = false; setSelectedNode({ id, type }); };
+  const zoomIn = () => setZoom((z) => Math.min(3, z + 0.2));
+  const zoomOut = () => setZoom((z) => Math.max(0.5, z - 0.2));
+  const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
+
+  // Nó selecionado + suas coordenadas de tela (para posicionar o popup).
+  const selNode = selId ? nodeIndex[selId] : null;
+  const popupX = selNode ? pan.x + zoom * selNode.x : 0;
+  const popupY = selNode ? pan.y + zoom * selNode.y : 0;
 
   return (
-    <div ref={containerRef} className="relative h-full min-h-[600px] w-full rounded-xl border border-line bg-surface">
-      <svg width="100%" height="100%" viewBox={`0 0 ${safeW} ${safeH}`} style={{ display: 'block' }}>
+    <div ref={containerRef} className="relative h-full min-h-[600px] w-full overflow-hidden rounded-xl border border-line bg-surface">
+      <svg
+        ref={svgRef}
+        width="100%" height="100%"
+        viewBox={`0 0 ${safeW} ${safeH}`}
+        className={isPanning ? 'cursor-grabbing' : 'cursor-grab'}
+        style={{ display: 'block' }}
+        onMouseDown={startPan}
+        onMouseMove={movePan}
+        onMouseUp={endPan}
+        onMouseLeave={endPan}
+      >
+        {/* Fundo capturador de cliques no vazio → deseleciona */}
+        <rect x={0} y={0} width={safeW} height={safeH} fill="transparent" onClick={bgClick} />
+        <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
         {/* Person ↔ Institution dashed links (from person_roles) */}
         {safeRoles.filter((r) => r && r.institution_id && r.person_id).map((r, i) => {
           const a = nodeIndex[r.person_id];
           const b = nodeIndex[r.institution_id];
           if (!a || !b) return null;
           if (!Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(b.x) || !Number.isFinite(b.y)) return null;
+          const hi = isSelEdge(r.person_id, r.institution_id);
           const dim = isDimmed(r.person_id) && isDimmed(r.institution_id);
           return (
             <line
               key={`pr-${i}`}
               x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-              stroke="#9CA3AF" strokeWidth="1.2" strokeDasharray="4 4"
-              opacity={dim ? 0.15 : 0.7}
+              stroke={hi ? '#6366F1' : '#9CA3AF'} strokeWidth={hi ? 2.2 : 1.2} strokeDasharray="4 4"
+              opacity={dim ? 0.15 : (hi ? 1 : 0.7)}
             >
               <title>{r.role}</title>
             </line>
@@ -1124,12 +1225,13 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
           if (!a || !b) return null;
           if (!Number.isFinite(a.x) || !Number.isFinite(b.x)) return null;
           const strength = c.strength != null ? c.strength : 5;
-          const stroke = personStrengthColor(strength);
-          const width = 1 + (strength / 10) * 3;
+          const hi = isSelEdge(c.person_a_id, c.person_b_id);
+          const stroke = hi ? '#6366F1' : personStrengthColor(strength);
+          const width = (1 + (strength / 10) * 3) + (hi ? 1.5 : 0);
           const dim = isDimmed(c.person_a_id) && isDimmed(c.person_b_id);
           if (c._curveIndex === 0) {
             return (
-              <line key={c.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={stroke} strokeWidth={width} opacity={dim ? 0.15 : 0.85}>
+              <line key={c.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={stroke} strokeWidth={width} opacity={dim ? 0.15 : (hi ? 1 : 0.85)}>
                 <title>{c.connection_type || 'conexão'}</title>
               </line>
             );
@@ -1146,7 +1248,7 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
           const cy = my + (dx / len) * offset;
           if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
           return (
-            <path key={c.id} d={`M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`} fill="none" stroke={stroke} strokeWidth={width} opacity={dim ? 0.15 : 0.85}>
+            <path key={c.id} d={`M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`} fill="none" stroke={stroke} strokeWidth={width} opacity={dim ? 0.15 : (hi ? 1 : 0.85)}>
               <title>{c.connection_type || 'conexão'}</title>
             </path>
           );
@@ -1172,12 +1274,15 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
         {institutionNodes.map((n) => {
           const { fill, stroke } = orgTypeColor(n.type);
           const dim = isDimmed(n.id);
+          const sel = selId === n.id;
           return (
-            <g key={`inst-${n.id}`} style={{ cursor: 'pointer' }} onClick={() => setFocusId(focusId === n.id ? null : n.id)}>
+            <g key={`inst-${n.id}`} style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); pickNode('institution', n.id); }}>
               <rect
                 x={n.x - n.width / 2} y={n.y - n.height / 2} width={n.width} height={n.height}
-                rx={5} fill={fill} stroke={stroke} strokeWidth={1.5}
+                rx={5} fill={fill}
+                stroke={sel ? '#6366f1' : stroke} strokeWidth={sel ? 3 : 1.5}
                 opacity={dim ? 0.3 : 1}
+                style={sel ? { filter: 'drop-shadow(0 0 6px #6366f1)' } : undefined}
               >
                 <title>{n.name}</title>
               </rect>
@@ -1192,10 +1297,16 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
         {personNodes.map((n) => {
           const stroke = personStrengthColor(n.connection_strength || 0);
           const dim = isDimmed(n.id);
+          const sel = selId === n.id;
           const labelOpacity = dim ? 0.25 : Math.max(0.5, Math.min(1, (n.connection_strength || 0) / 10 + 0.3));
           return (
-            <g key={`p-${n.id}`} style={{ cursor: 'pointer' }} onClick={() => { setFocusId(focusId === n.id ? null : n.id); onSelect && onSelect('person', n.id); }}>
-              <circle cx={n.x} cy={n.y} r={n.radius} fill="#6366f1" stroke={stroke} strokeWidth="2.5" opacity={dim ? 0.3 : 1} />
+            <g key={`p-${n.id}`} style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); pickNode('person', n.id); }}>
+              <circle
+                cx={n.x} cy={n.y} r={n.radius} fill="#6366f1"
+                stroke={sel ? '#6366f1' : stroke} strokeWidth={sel ? 3 : 2.5}
+                opacity={dim ? 0.3 : 1}
+                style={sel ? { filter: 'drop-shadow(0 0 6px #6366f1)' } : undefined}
+              />
               <text x={n.x} y={n.y + n.radius + 10} textAnchor="middle" fill="#1A1814" fontSize="9" opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
                 {(n.name || '').split(' ')[0]}
               </text>
@@ -1203,12 +1314,95 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
           );
         })}
 
-        {personNodes.length === 0 && institutionNodes.length === 0 && (
-          <text x={safeW / 2} y={safeH / 2 + 60} textAnchor="middle" fill="#9E9890" fontSize="12">
-            Adicione pessoas e instituições para visualizar o mapa.
-          </text>
-        )}
+          {personNodes.length === 0 && institutionNodes.length === 0 && (
+            <text x={safeW / 2} y={safeH / 2 + 60} textAnchor="middle" fill="#9E9890" fontSize="12">
+              Adicione pessoas e instituições para visualizar o mapa.
+            </text>
+          )}
+        </g>
       </svg>
+
+      {/* Controles de zoom (canto superior direito) */}
+      <div className="absolute right-3 top-3 flex items-center gap-1 rounded-lg border border-line bg-white p-1 shadow-soft">
+        <button
+          type="button" onClick={zoomIn} title="Aproximar (+)"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        <button
+          type="button" onClick={zoomOut} title="Afastar (−)"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
+        >
+          <Minus className="h-4 w-4" />
+        </button>
+        <button
+          type="button" onClick={resetView} title="Centralizar (reset)"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-indigo-600 hover:bg-indigo-50"
+        >
+          <Home className="h-4 w-4" />
+        </button>
+        <span className="px-1 text-[10px] tabular-nums text-muted">{Math.round(zoom * 100)}%</span>
+      </div>
+
+      {/* Popup de informação do nó selecionado */}
+      {selNode && (
+        <div
+          className="absolute z-10 w-[200px] max-w-[200px] rounded-lg border border-line bg-white p-3 text-left shadow-lg"
+          style={{ left: popupX, top: popupY, transform: 'translate(-50%, calc(-100% - 12px))' }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button" onClick={() => setSelectedNode(null)} title="Fechar (Esc)"
+            className="absolute right-1.5 top-1.5 rounded p-0.5 text-muted hover:text-ink"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+          {selectedNode.type === 'person' ? (
+            <>
+              <p className="pr-4 text-sm font-semibold text-ink">{selNode.name}</p>
+              <p className="mt-0.5 text-[11px] text-ink2">{subtitleForPerson(selNode)}</p>
+              {proStatus[selNode.id] && OUTREACH_META[proStatus[selNode.id]] && (
+                <p className="mt-1 flex items-center gap-1 text-[10px] text-ink2">
+                  <span className="h-2 w-2 rounded-full" style={{ background: OUTREACH_META[proStatus[selNode.id]].dot }} />
+                  {OUTREACH_META[proStatus[selNode.id]].label}
+                </p>
+              )}
+              <div className="mt-2 flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onSelect && onSelect('person', selNode.id)}
+                  className="flex-1 rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-white hover:bg-accent-hover"
+                >
+                  Ver perfil
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedNode(null)}
+                  className="rounded-md border border-line px-2 py-1 text-[11px] text-ink2 hover:bg-surface2"
+                >
+                  Fechar
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="pr-4 text-sm font-semibold text-ink">{selNode.name}</p>
+              <p className="mt-0.5 text-[11px] text-ink2">{ORG_TYPE_LABELS[selNode.type] || 'Organização'}</p>
+              {selNode.city && <p className="text-[11px] text-muted">{selNode.city}</p>}
+              <div className="mt-2">
+                <button
+                  type="button"
+                  onClick={() => onViewOrg && onViewOrg(selNode.id)}
+                  className="w-full rounded-md bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-indigo-700"
+                >
+                  Ver no Mercado →
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Legend */}
       <div className="absolute bottom-3 left-3 max-w-xs rounded-lg border border-line bg-surface/95 p-3 text-[10px] text-ink2 shadow-soft backdrop-blur">
@@ -1235,9 +1429,9 @@ function NetworkMap({ people, institutions, connections, personRoles, onSelect }
         {/* Projetos (market_projects) não aparecem no mapa: ligam-se só a orgs
             via organization_id, sem relação direta com pessoas. Enhancement
             futuro exigiria novas tabelas de relacionamento. */}
-        {focusId && (
-          <button onClick={() => setFocusId(null)} className="mt-2 text-[10px] text-accent hover:underline">
-            Limpar foco
+        {selectedNode && (
+          <button onClick={() => setSelectedNode(null)} className="mt-2 text-[10px] text-accent hover:underline">
+            Limpar seleção
           </button>
         )}
       </div>

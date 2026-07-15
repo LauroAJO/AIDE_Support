@@ -159,6 +159,7 @@ export default function NetworkingPage() {
   const [editor, setEditor] = useState(null);
   const [seeding, setSeeding] = useState(false);
   const [personRoles, setPersonRoles] = useState([]); // flattened roles for the graph
+  const [contactOrgLinks, setContactOrgLinks] = useState([]); // vínculos pessoa↔org do Mercado (contact_org_links)
   // Etapa 6 — IDs de pessoas que possuem perfil profissional (contact_professional).
   const [proIds, setProIds] = useState(() => new Set());
   // Mapa person_id → outreach_status (do Mercado) p/ exibir no card e no detalhe.
@@ -186,6 +187,7 @@ export default function NetworkingPage() {
       setInstitutions(mo || []);
       setConnections(routes.connections || []);
       setPersonRoles(routes.person_roles || []);
+      setContactOrgLinks(routes.contactOrgLinks || []);
       setProIds(new Set((mc || []).map((c) => c.person_id)));
       const statusMap = {};
       const profMap = {};
@@ -535,6 +537,7 @@ export default function NetworkingPage() {
               institutions={Array.isArray(institutions) ? institutions : []}
               connections={Array.isArray(connections) ? connections : []}
               personRoles={Array.isArray(personRoles) ? personRoles : []}
+              contactOrgLinks={Array.isArray(contactOrgLinks) ? contactOrgLinks : []}
               proStatus={proStatus}
               onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
               onViewOrg={(id) => navigate(`/market/org/${id}`)}
@@ -1006,8 +1009,10 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
 // Layout is a fixed circle around Lauro; no physics so the picture stays stable
 // across re-renders. Zoom/pan são aplicados via transform num <g> interno — o
 // viewBox permanece fixo, então as coordenadas de tela do popup = pan + zoom·nó.
-const PAN_STEP = 40; // deslocamento por tecla de seta
-function NetworkMap({ people, institutions, connections, personRoles, proStatus = {}, onSelect, onViewOrg }) {
+const PAN_STEP = 40; // deslocamento por tecla de seta (unidades de viewBox)
+// Converte os raios normalizados dos sliders (0..2) em unidades de viewBox.
+const RBASE = 460;
+function NetworkMap({ people, institutions, connections, personRoles, contactOrgLinks = [], proStatus = {}, onSelect, onViewOrg }) {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
   const [size, setSize] = useState({ w: 900, h: 600 });
@@ -1022,8 +1027,8 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
   const draggedRef = useRef(false);
   // Ajustes de layout (painel "⚙ Ajustes"): raios dos anéis ajustáveis ao vivo.
   const [showSettings, setShowSettings] = useState(false);
-  const [outerRadius, setOuterRadius] = useState(0.43); // anel externo (pessoas)
-  const [innerRadius, setInnerRadius] = useState(0.25);  // anel interno (organizações)
+  const [outerRadius, setOuterRadius] = useState(0.55); // anel externo (pessoas)
+  const [innerRadius, setInnerRadius] = useState(0.30);  // anel interno (organizações)
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -1053,17 +1058,25 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
   // Guarantee positive viewBox even before measurement settles.
   const safeW = Math.max(100, Number(size.w) || 900);
   const safeH = Math.max(100, Number(size.h) || 600);
-  const lauroPos = { x: safeW / 2, y: safeH / 2 };
+
+  // Sistema de coordenadas centrado na origem (0,0), com Lauro no centro. O
+  // viewBox cresce com o raio externo para nunca cortar os nós quando o usuário
+  // espalha o grafo (Problema 3).
+  const lauroPos = { x: 0, y: 0 };
+  const vbSize = Math.max(600, outerRadius * 1400);
+  const vbMin = -vbSize / 2;
+  // Fator viewBox→pixels (preserveAspectRatio "xMidYMid meet" ⇒ escala uniforme
+  // + letterbox). Usado para posicionar o popup e p/ o pan seguir o cursor 1:1.
+  const vScale = Math.min(safeW, safeH) / vbSize;
+  const vbTx = (safeW - vbSize * vScale) / 2;
+  const vbTy = (safeH - vbSize * vScale) / 2;
 
   // Stable circular layout: people on the outer ring, institutions on a
   // smaller inner ring. Order is the array order (already sorted by name).
   const personNodes = useMemo(() => {
     const list = Array.isArray(people) ? people.filter((p) => p && p.id) : [];
-    const cx = safeW / 2;
-    const cy = safeH / 2;
-    // Anel externo ajustável (slider "Raio do anel externo") para acomodar
-    // muitas pessoas sem sobreposição.
-    const r = Math.min(safeW, safeH) * outerRadius;
+    // Anel externo ajustável (slider "Raio do anel externo"), em torno da origem.
+    const r = outerRadius * RBASE;
     const denom = Math.max(1, list.length);
     return list.map((p, i) => {
       const angle = (i / denom) * Math.PI * 2;
@@ -1071,34 +1084,35 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
       const radius = 9 + Math.min(11, (Number(p.connection_strength) || 0) * 1.1);
       return {
         ...p, _kind: 'person',
-        x: cx + r * Math.cos(angle),
-        y: cy + r * Math.sin(angle),
+        x: r * Math.cos(angle),
+        y: r * Math.sin(angle),
         radius,
       };
     });
-  }, [people, safeW, safeH, outerRadius]);
+  }, [people, outerRadius]);
 
   const institutionNodes = useMemo(() => {
     const list = Array.isArray(institutions) ? institutions.filter((i) => i && i.id) : [];
-    const cx = safeW / 2;
-    const cy = safeH / 2;
-    // Anel interno ajustável (slider "Raio do anel interno").
-    const r = Math.min(safeW, safeH) * innerRadius;
+    // Anel interno ajustável (slider "Raio do anel interno"), em torno da origem.
+    const r = innerRadius * RBASE;
     const denom = Math.max(1, list.length);
     return list.map((it, i) => {
       const angle = (i / denom) * Math.PI * 2 + Math.PI / 4;
-      // Retângulos menores (orgs não têm connection_strength) dimensionados ao
-      // rótulo truncado (15 chars) para reduzir sobreposição no anel interno.
-      const label = truncate(it.name, 15);
-      const width = Math.max(46, Math.min(104, label.length * 6.4));
+      // Nome completo da organização em 2 linhas dentro do retângulo (v2.5.5).
+      const words = String(it.name || '').split(' ').filter(Boolean);
+      const half = Math.ceil(words.length / 2);
+      const line1 = words.slice(0, half).join(' ');
+      const line2 = words.slice(half).join(' ');
+      const longest = Math.max(line1.length, line2.length, 1);
+      const width = Math.max(54, Math.min(160, longest * 6.4 + 12));
       return {
         ...it, _kind: 'institution',
-        x: cx + r * Math.cos(angle),
-        y: cy + r * Math.sin(angle),
-        width, height: 20, label,
+        x: r * Math.cos(angle),
+        y: r * Math.sin(angle),
+        width, height: 32, line1, line2,
       };
     });
-  }, [institutions, safeW, safeH, innerRadius]);
+  }, [institutions, innerRadius]);
 
   const nodeIndex = useMemo(() => {
     const m = {};
@@ -1187,14 +1201,16 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
   const startPan = (e) => {
     draggedRef.current = false;
     setIsPanning(true);
-    setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    // Guarda o ponto inicial em pixels + o pan atual (unidades de viewBox).
+    setPanStart({ px: e.clientX, py: e.clientY, panX: pan.x, panY: pan.y });
   };
   const movePan = (e) => {
     if (!isPanning) return;
-    const nx = e.clientX - panStart.x;
-    const ny = e.clientY - panStart.y;
-    if (Math.abs(nx - pan.x) > 2 || Math.abs(ny - pan.y) > 2) draggedRef.current = true;
-    setPan({ x: nx, y: ny });
+    const dxPix = e.clientX - panStart.px;
+    const dyPix = e.clientY - panStart.py;
+    if (Math.abs(dxPix) > 2 || Math.abs(dyPix) > 2) draggedRef.current = true;
+    // Converte o delta de pixels para unidades de viewBox p/ acompanhar o cursor.
+    setPan({ x: panStart.panX + dxPix / vScale, y: panStart.panY + dyPix / vScale });
   };
   const endPan = () => setIsPanning(false);
   // Clique no fundo vazio: deseleciona — a menos que tenha acabado de arrastar.
@@ -1207,44 +1223,46 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
   const zoomOut = () => setZoom((z) => Math.max(0.5, z - 0.2));
   const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
 
-  // "Zoom to fit": calcula o zoom/pan que enquadra todos os nós (pessoas, orgs e
-  // o nó central do Lauro) dentro do viewport, com margem. Como viewBox == pixels
-  // do container, screen = pan + zoom·nó → resolvemos zoom pela bounding box.
+  // "Zoom to fit": enquadra todos os nós (pessoas, orgs e o Lauro na origem)
+  // dentro do viewBox, com margem. Tudo em unidades de viewBox; o <g> aplica
+  // pan+zoom, então pan = -zoom·centro do bbox leva o centro à origem.
   const zoomToFit = () => {
     if (personNodes.length === 0 && institutionNodes.length === 0) { resetView(); return; }
-    let minX = lauroPos.x - 30, minY = lauroPos.y - 30;
-    let maxX = lauroPos.x + 30, maxY = lauroPos.y + 30;
+    let minX = -30, minY = -30, maxX = 30, maxY = 30; // Lauro (r=30) na origem
     for (const n of personNodes) {
-      const rr = (n.radius || 10) + 14; // inclui o rótulo abaixo do nó
+      const rr = (n.radius || 10) + 26; // inclui o rótulo (2 linhas) abaixo do nó
       minX = Math.min(minX, n.x - rr); maxX = Math.max(maxX, n.x + rr);
       minY = Math.min(minY, n.y - rr); maxY = Math.max(maxY, n.y + rr);
     }
     for (const n of institutionNodes) {
-      const hw = (n.width || 40) / 2, hh = (n.height || 20) / 2;
+      const hw = (n.width || 40) / 2, hh = (n.height || 32) / 2;
       minX = Math.min(minX, n.x - hw); maxX = Math.max(maxX, n.x + hw);
       minY = Math.min(minY, n.y - hh); maxY = Math.max(maxY, n.y + hh);
     }
     const bw = Math.max(1, maxX - minX);
     const bh = Math.max(1, maxY - minY);
-    const margin = 48;
-    const z = Math.max(0.5, Math.min(5, Math.min((safeW - 2 * margin) / bw, (safeH - 2 * margin) / bh)));
+    const margin = 60;
+    const z = Math.max(0.5, Math.min(5, Math.min((vbSize - 2 * margin) / bw, (vbSize - 2 * margin) / bh)));
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;
     setZoom(z);
-    setPan({ x: safeW / 2 - z * cx, y: safeH / 2 - z * cy });
+    setPan({ x: -z * cx, y: -z * cy });
   };
 
-  // Nó selecionado + suas coordenadas de tela (para posicionar o popup).
+  // Nó selecionado + suas coordenadas de TELA (para posicionar o popup):
+  // viewBox coord após o <g> = pan + zoom·nó; depois mapeia viewBox→pixels.
   const selNode = selId ? nodeIndex[selId] : null;
-  const popupX = selNode ? pan.x + zoom * selNode.x : 0;
-  const popupY = selNode ? pan.y + zoom * selNode.y : 0;
+  const gx = selNode ? pan.x + zoom * selNode.x : 0;
+  const gy = selNode ? pan.y + zoom * selNode.y : 0;
+  const popupX = selNode ? vbTx + (gx - vbMin) * vScale : 0;
+  const popupY = selNode ? vbTy + (gy - vbMin) * vScale : 0;
 
   return (
     <div ref={containerRef} className="relative h-full min-h-[600px] w-full overflow-hidden rounded-xl border border-line bg-surface">
       <svg
         ref={svgRef}
         width="100%" height="100%"
-        viewBox={`0 0 ${safeW} ${safeH}`}
+        viewBox={`${vbMin} ${vbMin} ${vbSize} ${vbSize}`}
         className={isPanning ? 'cursor-grabbing' : 'cursor-grab'}
         style={{ display: 'block' }}
         onMouseDown={startPan}
@@ -1253,29 +1271,50 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
         onMouseLeave={endPan}
       >
         {/* Fundo capturador de cliques no vazio → deseleciona */}
-        <rect x={0} y={0} width={safeW} height={safeH} fill="transparent" onClick={bgClick} />
+        <rect x={vbMin} y={vbMin} width={vbSize} height={vbSize} fill="transparent" onClick={bgClick} />
         <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
-        {/* Person ↔ Institution dashed links (from person_roles). Resolve o nó da
-            organização por id e, se ausente (institution_id NULL pós-migração
-            0030), por NOME. */}
-        {safeRoles.filter((r) => r && r.person_id && (r.institution_id || r.institution_name)).map((r, i) => {
-          const a = nodeIndex[r.person_id];
-          const b = (r.institution_id && nodeIndex[r.institution_id]) || instByName[normName(r.institution_name)];
-          if (!a || !b) return null;
-          if (!Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(b.x) || !Number.isFinite(b.y)) return null;
-          const hi = isSelEdge(r.person_id, b.id);
-          const dim = isDimmed(r.person_id) && isDimmed(b.id);
-          return (
-            <line
-              key={`pr-${i}`}
-              x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-              stroke={hi ? '#6366F1' : '#9CA3AF'} strokeWidth={hi ? 2.2 : 1.2} strokeDasharray="4 4"
-              opacity={dim ? 0.15 : (hi ? 1 : 0.7)}
-            >
-              <title>{r.role}</title>
-            </line>
-          );
-        })}
+        {/* Person ↔ Institution dashed links — DUAS fontes, deduplicadas (v2.5.5):
+            1) person_roles (Networking) — org por id ou, se NULL pós-migração
+               0030, resolvida por NOME (instByName);
+            2) contact_org_links (Mercado) — vínculo direto pessoa↔organização. */}
+        {(() => {
+          const drawn = new Set();
+          const out = [];
+          const drawOrgLink = (fromId, toId, label) => {
+            if (!fromId || !toId) return;
+            const key = `${fromId}-${toId}`;
+            if (drawn.has(key)) return;
+            drawn.add(key);
+            const a = nodeIndex[fromId];
+            const b = nodeIndex[toId];
+            if (!a || !b) return;
+            if (!Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(b.x) || !Number.isFinite(b.y)) return;
+            const hi = isSelEdge(fromId, toId);
+            const dim = isDimmed(fromId) && isDimmed(toId);
+            out.push(
+              <line
+                key={`orglink-${key}`}
+                x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                stroke={hi ? '#6366F1' : '#9CA3AF'} strokeWidth={hi ? 2.2 : 1.2} strokeDasharray="4 4"
+                opacity={dim ? 0.15 : (hi ? 1 : 0.7)}
+              >
+                <title>{label}</title>
+              </line>
+            );
+          };
+          // Fonte 1 — person_roles (Networking)
+          safeRoles.forEach((r) => {
+            if (!r || !r.person_id) return;
+            const toId = r.institution_id || instByName[normName(r.institution_name)]?.id;
+            if (toId) drawOrgLink(r.person_id, toId, r.role || 'vínculo');
+          });
+          // Fonte 2 — contact_org_links (Mercado)
+          (Array.isArray(contactOrgLinks) ? contactOrgLinks : []).forEach((r) => {
+            if (!r || !r.person_id || !r.organization_id) return;
+            drawOrgLink(r.person_id, r.organization_id, r.role_at_org || 'vínculo (Mercado)');
+          });
+          return out;
+        })()}
 
         {/* P2P connections — strength-coded color and width, curved if pair has >1 */}
         {connWithCurve.map((c) => {
@@ -1345,19 +1384,25 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
               >
                 <title>{n.name}</title>
               </rect>
-              <text x={n.x} y={n.y + 3.5} textAnchor="middle" fill="#1A1814" fontSize="9" fontWeight="600" opacity={dim ? 0.5 : 1} style={{ pointerEvents: 'none' }}>
-                {n.label}
+              <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize="9" fontWeight="600" opacity={dim ? 0.5 : 1} style={{ pointerEvents: 'none' }}>
+                <tspan x={n.x} dy={n.line2 ? -2 : 3}>{n.line1}</tspan>
+                {n.line2 && <tspan x={n.x} dy={12}>{n.line2}</tspan>}
+                <title>{n.name}</title>
               </text>
             </g>
           );
         })}
 
-        {/* Person circles */}
+        {/* Person circles — nome COMPLETO em 2 linhas abaixo do nó (v2.5.5) */}
         {personNodes.map((n) => {
           const stroke = personStrengthColor(n.connection_strength || 0);
           const dim = isDimmed(n.id);
           const sel = selId === n.id;
           const labelOpacity = dim ? 0.25 : Math.max(0.5, Math.min(1, (n.connection_strength || 0) / 10 + 0.3));
+          const nameParts = String(n.name || '').split(' ').filter(Boolean);
+          const half = Math.ceil(nameParts.length / 2);
+          const line1 = nameParts.slice(0, half).join(' ');
+          const line2 = nameParts.slice(half).join(' ');
           return (
             <g key={`p-${n.id}`} style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); pickNode('person', n.id); }}>
               <circle
@@ -1366,15 +1411,16 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
                 opacity={dim ? 0.3 : 1}
                 style={sel ? { filter: 'drop-shadow(0 0 6px #6366f1)' } : undefined}
               />
-              <text x={n.x} y={n.y + n.radius + 10} textAnchor="middle" fill="#1A1814" fontSize="9" opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
-                {(n.name || '').split(' ')[0]}
+              <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize="9" opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
+                <tspan x={n.x} dy={n.radius + 12}>{line1}</tspan>
+                {line2 && <tspan x={n.x} dy={13}>{line2}</tspan>}
               </text>
             </g>
           );
         })}
 
           {personNodes.length === 0 && institutionNodes.length === 0 && (
-            <text x={safeW / 2} y={safeH / 2 + 60} textAnchor="middle" fill="#9E9890" fontSize="12">
+            <text x={0} y={80} textAnchor="middle" fill="#9E9890" fontSize="12">
               Adicione pessoas e instituições para visualizar o mapa.
             </text>
           )}
@@ -1427,7 +1473,7 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
                 <span className="tabular-nums text-muted">{outerRadius.toFixed(2)}</span>
               </span>
               <input
-                type="range" min="0.3" max="0.8" step="0.01" value={outerRadius}
+                type="range" min="0.3" max="2.0" step="0.05" value={outerRadius}
                 onChange={(e) => setOuterRadius(Number(e.target.value))}
                 className="mt-1 w-full accent-[#6366f1]"
               />
@@ -1438,14 +1484,14 @@ function NetworkMap({ people, institutions, connections, personRoles, proStatus 
                 <span className="tabular-nums text-muted">{innerRadius.toFixed(2)}</span>
               </span>
               <input
-                type="range" min="0.1" max="0.5" step="0.01" value={innerRadius}
+                type="range" min="0.1" max="1.5" step="0.05" value={innerRadius}
                 onChange={(e) => setInnerRadius(Number(e.target.value))}
                 className="mt-1 w-full accent-[#6366f1]"
               />
             </label>
             <button
               type="button"
-              onClick={() => { setOuterRadius(0.43); setInnerRadius(0.25); }}
+              onClick={() => { setOuterRadius(0.55); setInnerRadius(0.30); }}
               className="mt-2 text-[10px] text-accent hover:underline"
             >
               Restaurar padrão

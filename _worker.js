@@ -8459,7 +8459,21 @@ async function handleNetworkRoutes(request, env, user) {
       });
     }
   }
-  return json({ people, institutions, connections, person_roles });
+  // v2.5.5 — vínculos pessoa↔organização vindos do Mercado (contact_org_links).
+  // Segunda fonte de links institucionais no mapa, além de person_roles. Já vem
+  // com nomes resolvidos por JOIN para o mapa e para depuração.
+  let contactOrgLinks = [];
+  try {
+    const r = await env.DB.prepare(
+      `SELECT col.person_id, col.organization_id, col.role_at_org,
+              np.name AS person_name, mo.name AS org_name
+         FROM contact_org_links col
+         JOIN network_people np ON np.id = col.person_id
+         JOIN market_organizations mo ON mo.id = col.organization_id`
+    ).all();
+    contactOrgLinks = r.results || [];
+  } catch { /* tabela ausente — segue sem essa fonte */ }
+  return json({ people, institutions, connections, person_roles, contactOrgLinks });
 }
 
 // ---------------------------------------------------------------------------

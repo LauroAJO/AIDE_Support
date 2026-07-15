@@ -1635,29 +1635,42 @@ function shapeEntry(row) {
   };
 }
 
-// Stops the user's active (un-ended) entry if any; returns its id or null.
+// Stops ALL of the user's active (un-ended) entries; returns the id of the
+// most recently started one, or null if there were none.
+//
+// Historically this closed only `.first()` un-ended row. If a user ever ended
+// up with more than one open entry (double-start race, meeting + timer, a stop
+// that failed halfway), a single stop left the extras running — they kept
+// accumulating duration and the UI never showed them, which is exactly how a
+// timer "kept running without stopping" for over an hour. Closing every open
+// row per call makes stop idempotent and self-healing.
 async function stopActiveEntry(env, userId, now) {
-  const active = await env.DB.prepare(
-    'SELECT * FROM time_entries WHERE user_id = ? AND ended_at IS NULL'
-  ).bind(userId).first();
-  if (!active) return null;
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM time_entries WHERE user_id = ? AND ended_at IS NULL ORDER BY started_at DESC'
+  ).bind(userId).all();
+  const active = results || [];
+  if (active.length === 0) return null;
 
-  // Garante que a entrada saia com uma taxa: se já tinha (>0), preserva;
-  // senão, copia a taxa padrão atual de availability.hourly_rate_brl (BRL).
-  let rate = active.hourly_rate || 0;
-  if (!rate) {
-    try {
-      const av = await env.DB.prepare(
-        'SELECT hourly_rate_brl, hourly_rate FROM availability WHERE user_id = ?'
-      ).bind(userId).first();
-      rate = (av && (av.hourly_rate_brl || av.hourly_rate)) || 0;
-    } catch { /* tabela ausente — mantém 0 */ }
+  // Taxa padrão atual (BRL), usada quando a entrada aberta ainda não tem taxa.
+  let defaultRate = 0;
+  try {
+    const av = await env.DB.prepare(
+      'SELECT hourly_rate_brl, hourly_rate FROM availability WHERE user_id = ?'
+    ).bind(userId).first();
+    defaultRate = (av && (av.hourly_rate_brl || av.hourly_rate)) || 0;
+  } catch { /* tabela ausente — mantém 0 */ }
+
+  for (const entry of active) {
+    // Garante que a entrada saia com uma taxa: se já tinha (>0), preserva;
+    // senão, copia a taxa padrão atual.
+    const rate = entry.hourly_rate || defaultRate;
+    await env.DB.prepare(
+      'UPDATE time_entries SET ended_at = ?, duration_seconds = ?, hourly_rate = ? WHERE id = ?'
+    ).bind(now, now - entry.started_at, rate, entry.id).run();
   }
 
-  await env.DB.prepare(
-    'UPDATE time_entries SET ended_at = ?, duration_seconds = ?, hourly_rate = ? WHERE id = ?'
-  ).bind(now, now - active.started_at, rate, active.id).run();
-  return active.id;
+  // results já vem ordenado por started_at DESC — devolve o timer mais recente.
+  return active[0].id;
 }
 
 async function handleTimerStart(request, env, user) {

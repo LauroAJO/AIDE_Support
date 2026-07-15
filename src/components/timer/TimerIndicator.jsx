@@ -90,43 +90,73 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
     }
   };
 
-  const stop = async () => {
+  // force=true é usado pelo botão "Forçar parada": envia o stop mesmo quando o
+  // estado local acha que não há timer, e alinha o estado local ao servidor.
+  const doStop = async (force = false) => {
     setBusy(true);
     setErr('');
     try {
       await apiFetch('/api/timer/stop', { method: 'POST' });
       setActiveEntry(null);
     } catch (e) {
-      setErr(String((e && e.message) || 'Falha ao parar o timer').slice(0, 120));
+      const msg = String((e && e.message) || '');
+      // 404 "Nenhum timer ativo": o servidor já não tem timer aberto, então o
+      // estado local é que estava travado — limpamos e tratamos como sucesso.
+      if (/nenhum timer ativo/i.test(msg)) {
+        setActiveEntry(null);
+      } else {
+        setErr(
+          force
+            ? 'Não foi possível forçar a parada — tente novamente'
+            : 'Erro ao parar timer — tente novamente'
+        );
+      }
     } finally {
       setBusy(false);
     }
   };
 
+  const stop = () => doStop(false);
+  const forceStop = () => doStop(true);
+
   if (activeEntry) {
     const title = activeEntry.task_title || 'Sem tarefa';
     const short = title.length > 20 ? `${title.slice(0, 20)}…` : title;
     return (
-      <div
-        className={`flex items-center gap-2 rounded-lg px-3 py-1.5 ${isHeader ? '' : 'mb-2'}`}
-        style={{ background: 'rgba(99,102,241,0.10)' }}
-      >
-        <button
-          onClick={stop}
-          disabled={busy}
-          className="text-accent"
-          title={err || 'Parar timer'}
+      <div className={isHeader ? '' : 'mb-2'}>
+        <div
+          className="flex items-center gap-2 rounded-lg px-3 py-1.5"
+          style={{ background: 'rgba(99,102,241,0.10)' }}
         >
-          {busy ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Square className="h-4 w-4" fill="currentColor" />
-          )}
-        </button>
-        <div className="min-w-0 flex-1">
-          <div className="font-mono text-sm font-medium text-accent">{formatHMS(elapsedSeconds)}</div>
-          <div className="truncate text-[10px] text-ink2">{short}</div>
+          <button
+            onClick={stop}
+            disabled={busy}
+            className="text-accent"
+            title={err || 'Parar timer'}
+          >
+            {busy ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Square className="h-4 w-4" fill="currentColor" />
+            )}
+          </button>
+          <div className="min-w-0 flex-1">
+            <div className="font-mono text-sm font-medium text-accent">{formatHMS(elapsedSeconds)}</div>
+            <div className="truncate text-[10px] text-ink2">{short}</div>
+          </div>
         </div>
+        {err && (
+          <div className="mt-1 px-1">
+            <p className="text-[10px] text-danger">{err}</p>
+            <button
+              onClick={forceStop}
+              disabled={busy}
+              className="mt-0.5 text-[10px] font-medium text-danger underline hover:no-underline disabled:opacity-60"
+            >
+              Forçar parada
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -173,6 +203,15 @@ export default function TimerIndicator({ variant = 'sidebar' }) {
               </button>
             ))
           )}
+          {/* Timer travado no servidor sem reflexo local: força o encerramento
+              de qualquer entrada aberta e realinha o estado. */}
+          <button
+            onClick={forceStop}
+            disabled={busy}
+            className="block w-full border-t border-line px-3 py-2 text-left text-[10px] text-muted hover:bg-surface2 hover:text-danger disabled:opacity-60"
+          >
+            Forçar parada de timer travado
+          </button>
         </div>
       )}
       {err && <p className="mt-1 text-[10px] text-danger">{err}</p>}

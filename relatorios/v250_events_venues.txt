@@ -1,0 +1,112 @@
+================================
+AIDE — RELATÓRIO v2.5.0
+Eventos & Venues de Publicação
+Data: 2026-07-15
+================================
+
+RESUMO
+------
+Nova área "Eventos & Venues" na seção Rede Profissional (sidebar, entre
+Carreira e LCEStech Email). Banco dedicado para conferências acadêmicas,
+eventos de networking e venues de publicação (journals/proceedings), com
+importação em massa, vínculos evento↔venue, timeline de prazos, integração
+com o Google Calendar e notificações de prazo no cron diário.
+
+Também corrigido o bug do calendário: Alice (não-owner) não conseguia criar
+eventos no Google Calendar.
+
+MIGRAÇÃO 0037:
+Local: APLICADA (npm run db:migrate / wrangler d1 execute --local) — OK
+Remota: PENDENTE (rodar comando pós-deploy abaixo)
+
+Tabelas criadas:
+- career_events (conferências/workshops/networking)
+- publication_venues (journals/proceedings/livros)
+- event_venue_links (vínculos evento↔venue)
+- events_import_log (log de importação)
+Índices: idx_events_type, idx_events_area, idx_events_status,
+  idx_events_date_start, idx_events_deadline_abstract, idx_venues_type,
+  idx_venues_area
+
+ARQUIVOS CRIADOS:
+- migrations/0037_events_venues.sql
+- src/components/events/EventsPage.jsx
+- src/components/events/eventsShared.jsx
+- relatorios/events_venues_import.json
+- relatorios/v250_events_venues.txt (este arquivo)
+
+ARQUIVOS MODIFICADOS:
+- _worker.js        (rotas + import + cron + fix calendário)
+- src/App.jsx       (rota /events em FixedRoute + import EventsPage)
+- src/components/Layout.jsx  (item "Eventos & Venues" na sidebar, grupo rede)
+- src/store.js      (careerEvents, publicationVenues, eventsFilter + setters)
+- src/version.js    (2.4.10 -> 2.5.0)
+
+ROTAS ADICIONADAS (todas exigem sessão; owner + assistente fixo):
+- GET    /api/events               (filtros: type, area, status, phase,
+                                     peer_review, search, upcoming, deadline_soon)
+- POST   /api/events
+- GET    /api/events/:id           (+ venues vinculados + oportunidade)
+- PUT    /api/events/:id
+- DELETE /api/events/:id
+- GET    /api/venues               (filtros: area, type, search, quartile)
+- POST   /api/venues
+- GET    /api/venues/:id           (+ eventos vinculados)
+- PUT    /api/venues/:id
+- DELETE /api/venues/:id
+- POST   /api/events/:id/venues            (criar vínculo)
+- DELETE /api/events/:id/venues/:linkId    (remover vínculo)
+- POST   /api/events/import        (dedup eventos por name+date_start,
+                                     venues por name, links por acrônimo)
+
+CRON (runDailyNotifications):
+- runEventDeadlineNotifications: abstract em até 30 dias OU data do evento em
+  até 14 dias -> notificação type 'event_deadline' para o owner.
+  Dedup key: event:deadline:{event.id}:{hoje}
+
+FIX CALENDÁRIO (POST /api/calendar/events):
+- Passa a resolver o token Google do PRÓPRIO usuário atual (tokenUserId =
+  shareMap.get(cal) || user.id) e, se o usuário ainda não autorizou o Google,
+  devolve 403 "Autorize o acesso ao Google Calendar primeiro" em vez de erro
+  opaco. Assim Alice cria eventos com o token dela (não o do owner).
+  Obs.: neste código-base refreshExternalToken() é para contas Gmail externas
+  (tabela external_accounts), não para o usuário; o token do usuário vem de
+  refreshGoogleToken(user.id). Mantida a semântica pedida (token do usuário
+  atual + 403 amigável).
+
+EVENTOS NO JSON: 31
+VENUES NO JSON: 11
+VÍNCULOS NO JSON: 13 (todos resolvíveis por acrônimo)
+
+NOTA SOBRE OS DADOS:
+Os dois "documentos de pesquisa" originais não estavam presentes no repositório
+(pasta relatorios/ não continha o arquivo-fonte de eventos). O JSON foi montado
+a partir da lista de 31 eventos + 11 venues fornecida no prompt, enriquecida com
+valores de domínio padrão (datas aproximadas por mês quando só o mês era
+conhecido, indexação/rota de publicação, deadlines, relevâncias, fase
+estratégica, tags). Recomenda-se revisar datas/deadlines exatos contra as fontes
+antes de tratar como definitivos.
+
+VERIFICAÇÃO:
+npm run db:migrate (local): OK
+node --check _worker.js: OK
+npm run build: OK (0 erros; aviso de chunk >500kB é pré-existente)
+Teste de INSERT/SELECT nas 4 tabelas locais: OK (colunas conferem)
+Validação do JSON (contagens + resolução de vínculos): OK
+
+Deploy: v2.5.0
+URL: https://63db24f9.aide-support.pages.dev (produção: aide-support.pages.dev)
+Commit: 642825e
+
+INSTRUÇÃO PÓS-DEPLOY:
+1. npx wrangler d1 execute aide-db --remote
+   --file=migrations/0037_events_venues.sql
+   (ou: npm run db:migrate:remote — aplica todas as migrations em ordem)
+2. Acessar /events no AIDE
+3. Clicar "Importar"
+4. Colar conteúdo de relatorios/events_venues_import.json
+5. Validar -> Importar
+
+================================
+FIM DO RELATÓRIO
+================================

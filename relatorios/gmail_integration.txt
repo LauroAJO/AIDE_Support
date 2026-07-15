@@ -1,0 +1,70 @@
+================================
+AIDE — RELATÓRIO Gmail Integration
+Data: 2026-07-08
+================================
+
+MIGRAÇÃO 0035 (0035_gmail_integration.sql):
+Local:  APLICADA — tabelas external_accounts + gmail_emails criadas e
+        confirmadas via SELECT em sqlite_master (D1 local).
+Remota: PENDENTE (rodar manualmente — ver comando no fim).
+
+MUDANÇAS:
+- migrations/0035_gmail_integration.sql        (NOVO, 51 linhas)
+    external_accounts, gmail_emails + 4 índices.
+- _worker.js
+    · Rotas públicas: /api/gmail/auth, /api/gmail/callback (após vapid-key).
+    · Rotas protegidas: /api/gmail/sync, /api/gmail/mark-read,
+      /api/gmail/emails, /api/gmail/emails/:id, /api/gmail/emails/:id/star
+      (antes do 404).
+    · Seção "Gmail — conta externa" (~380 linhas) após handleLogout:
+      GMAIL_SCOPES, getGmailRedirectUri, getUserByToken, handleGmailAuth,
+      handleGmailCallback, refreshExternalToken, decodeGmailB64,
+      extractGmailBodies, parseGmailAddress, handleGmailSync,
+      handleGmailEmails, handleGmailEmailItem, handleGmailEmailStar,
+      handleGmailMarkRead, shapeGmailEmail.
+    · runDailyNotifications: bloco gmail_unread (notifica usuários ativos
+      uma vez/dia; dedup 24h; try/catch tolerante a migração ausente).
+- src/App.jsx                                   import GmailPage + rota /gmail
+                                                (todos os usuários autenticados).
+- src/components/Layout.jsx                     import Mail + item de nav
+                                                "LCEStech Email" no grupo Rede.
+- src/components/gmail/GmailPage.jsx            (NOVO, ~600 linhas)
+    Painel esquerdo (35%): sync, badge não-lidos, abas Todos/Não lidos/
+    Com estrela, busca, lista. Painel direito (65%): leitor com corpo HTML
+    em iframe sandboxed (sem scripts) ou texto pre-wrap, labels, "Abrir no
+    Gmail", modal "Adicionar ao Pipeline". Banner de conexão (owner conecta,
+    demais aguardam). Auto-sync a cada 5 min com aba visível.
+- src/version.js                                2.4.9 -> 2.4.10
+
+VERIFICAÇÃO:
+npm run build:  OK — 1582 módulos, zero erros.
+node --check _worker.js:  OK (WORKER OK).
+db:migrate (local):  0035 aplicada, tabelas confirmadas.
+
+Deploy: v2.4.10
+  https://dd28f2e6.aide-support.pages.dev (produção: aide-support.pages.dev)
+Commit: 1b13a66  (push para origin/main concluído)
+
+NOTA DE VERSÃO:
+O pedido dizia "bump para v2.4.8", mas o app já estava em v2.4.9. Para não
+regredir a versão, subi para v2.4.10 (commit e badge refletem 2.4.10).
+
+CONFIGURAÇÃO NECESSÁRIA (Google Cloud Console):
+Registrar o redirect URI de produção nas credenciais OAuth do projeto:
+  https://aide-support.pages.dev/api/gmail/callback
+Adicionar o escopo gmail.readonly à tela de consentimento (pode exigir
+verificação do app pelo Google). Reusa GOOGLE_CLIENT_ID/SECRET já existentes.
+
+MIGRAÇÃO REMOTA (rodar antes de usar em produção):
+  npm run db:migrate:remote
+  (ou, para aplicar só esta:
+   npx wrangler d1 execute aide-db --remote --file=migrations/0035_gmail_integration.sql -y)
+
+INSTRUÇÃO PARA CONECTAR O GMAIL:
+Após deploy + migração remota: acessar /gmail (como owner) → clicar
+"Conectar lcestech.consulting@gmail.com" → fazer login com a conta lcestech
+→ autorizar acesso de leitura. Depois, qualquer usuário pode sincronizar/ler.
+
+================================
+FIM DO RELATÓRIO
+================================

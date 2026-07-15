@@ -2642,20 +2642,55 @@ async function handleCalendarEvents(request, env, user) {
     const body = (await readJson(request)) || {};
     const cal = body.calendar_id || 'primary';
     const shareMap = await calendarGrantorMap(env, user);
-    // v2.5.0 fix: usa o token Google do PRÓPRIO usuário atual (não o do owner).
-    // Para calendários próprios, tokenUserId = user.id — assim Alice cria eventos
-    // com o token dela. Só um calendário compartilhado usa o token do concedente.
-    const tokenUserId = shareMap.get(cal) || user.id;
-    // Se o usuário atual ainda não autorizou o Google Calendar, devolve um 403
-    // amigável em vez de deixar a chamada ao Google falhar de forma opaca.
-    const hasToken = await refreshGoogleToken(tokenUserId, env);
-    if (!hasToken) {
+
+    // Modelo de agenda compartilhada (v2.5.1): a equipe trabalha sobre o
+    // calendário do OWNER. Não-owners criam eventos com o token do OWNER (assim
+    // 'primary' resolve para a agenda do owner e o evento aparece para todos),
+    // atribuindo a autoria ao usuário atual. O owner usa o próprio token. Um
+    // calendário explicitamente compartilhado (shareMap) usa o token do
+    // concedente, preservando o comportamento anterior de compartilhamento.
+    let tokenUserId = shareMap.get(cal);
+    if (!tokenUserId) {
+      if (user.role === 'owner') {
+        tokenUserId = user.id;
+      } else {
+        const owner = await env.DB.prepare("SELECT id FROM users WHERE role = 'owner' LIMIT 1").first();
+        // 1º tenta o token do owner (agenda compartilhada); se o owner não tiver
+        // token, cai para o token do próprio usuário como último recurso.
+        tokenUserId = owner && owner.id ? owner.id : user.id;
+      }
+    }
+
+    // Se nem o alvo resolvido nem o próprio usuário têm token Google válido,
+    // devolve um 403 amigável em vez de deixar a chamada ao Google falhar.
+    let accessToken = await refreshGoogleToken(tokenUserId, env);
+    if (!accessToken && tokenUserId !== user.id) {
+      // Fallback final: token do próprio usuário (owner sem token / cenário raro).
+      tokenUserId = user.id;
+      accessToken = await refreshGoogleToken(tokenUserId, env);
+    }
+    if (!accessToken) {
       return json({ error: 'Autorize o acesso ao Google Calendar primeiro' }, 403);
     }
+
+    // Atribuição: quando o criador não é o dono do token usado, marca a autoria
+    // na descrição e em extendedProperties (o Google atribui o "creator" à conta
+    // autenticada, então registramos o autor real explicitamente).
+    const eventBody = buildGoogleEventBody(body);
+    if (tokenUserId !== user.id) {
+      const who = user.name || user.email || 'Aide';
+      eventBody.description = eventBody.description
+        ? `${eventBody.description}\n\n— Criado por ${who} (Aide)`
+        : `Criado por ${who} (Aide)`;
+      eventBody.extendedProperties = {
+        private: { aideCreatedBy: String(user.id), aideCreatedByName: who },
+      };
+    }
+
     const resp = await googleFetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events`,
       tokenUserId, env,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildGoogleEventBody(body)) }
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(eventBody) }
     );
     const guard = googleGuard(resp);
     if (guard) return guard;

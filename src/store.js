@@ -77,6 +77,14 @@ export const useStore = create((set) => ({
   careerDocuments: [],
   careerGoals: [],
 
+  // Eventos & Venues (v2.5.0) — conferências, networking e venues de publicação
+  careerEvents: [],
+  publicationVenues: [],
+  eventsFilter: {
+    type: 'all', area: 'all', phase: 'all',
+    peerReview: false, upcoming: false, search: '',
+  },
+
   // v1.8 — Tasks tree view (Lista | Kanban | Árvore)
   taskView: 'list', // 'list' | 'kanban' | 'tree'
   treeCollapse: {},
@@ -154,6 +162,11 @@ export const useStore = create((set) => ({
   setCareerOpportunities: (careerOpportunities) => set({ careerOpportunities: careerOpportunities || [] }),
   setCareerDocuments: (careerDocuments) => set({ careerDocuments: careerDocuments || [] }),
   setCareerGoals: (careerGoals) => set({ careerGoals: careerGoals || [] }),
+
+  setCareerEvents: (careerEvents) => set({ careerEvents: careerEvents || [] }),
+  setPublicationVenues: (publicationVenues) => set({ publicationVenues: publicationVenues || [] }),
+  setEventsFilter: (patch) =>
+    set((state) => ({ eventsFilter: { ...state.eventsFilter, ...patch } })),
 
   setTaskView: (taskView) => set({ taskView }),
   setTreeCollapse: (treeCollapse) => set({ treeCollapse }),

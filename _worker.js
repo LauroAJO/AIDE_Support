@@ -289,6 +289,22 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/career/goals') return handleCareerGoals(request, env, user);
   if (path.startsWith('/api/career/goals/')) return handleCareerGoalItem(request, env, user, path.split('/')[4]);
 
+  // Eventos & Venues de Publicação (v2.5.0). A ordem importa: rotas específicas
+  // (import, sub-recursos de venues por evento) antes das genéricas de item.
+  if (path === '/api/events/import') return handleEventsImport(request, env, user);
+  if (path === '/api/events') return handleEvents(request, env, user);
+  // /api/events/:id/venues e /api/events/:id/venues/:linkId — antes do item genérico.
+  if (path.match(/^\/api\/events\/[^/]+\/venues\/[^/]+$/)) {
+    const parts = path.split('/');
+    return handleEventVenueLinkItem(request, env, user, parts[3], parts[5]);
+  }
+  if (path.match(/^\/api\/events\/[^/]+\/venues$/)) {
+    return handleEventVenues(request, env, user, path.split('/')[3]);
+  }
+  if (path.startsWith('/api/events/')) return handleEventItem(request, env, user, path.split('/')[3]);
+  if (path === '/api/venues') return handleVenues(request, env, user);
+  if (path.startsWith('/api/venues/')) return handleVenueItem(request, env, user, path.split('/')[3]);
+
   // Hub — leitura protegida por sessão (owner / assistente fixo).
   // (POST /api/hub/items é tratado acima, antes do gate de sessão.)
   if (path === '/api/hub/items') return handleHubItems(request, env, user);
@@ -2626,7 +2642,16 @@ async function handleCalendarEvents(request, env, user) {
     const body = (await readJson(request)) || {};
     const cal = body.calendar_id || 'primary';
     const shareMap = await calendarGrantorMap(env, user);
+    // v2.5.0 fix: usa o token Google do PRÓPRIO usuário atual (não o do owner).
+    // Para calendários próprios, tokenUserId = user.id — assim Alice cria eventos
+    // com o token dela. Só um calendário compartilhado usa o token do concedente.
     const tokenUserId = shareMap.get(cal) || user.id;
+    // Se o usuário atual ainda não autorizou o Google Calendar, devolve um 403
+    // amigável em vez de deixar a chamada ao Google falhar de forma opaca.
+    const hasToken = await refreshGoogleToken(tokenUserId, env);
+    if (!hasToken) {
+      return json({ error: 'Autorize o acesso ao Google Calendar primeiro' }, 403);
+    }
     const resp = await googleFetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(cal)}/events`,
       tokenUserId, env,
@@ -4796,6 +4821,16 @@ async function runDailyNotifications(env) {
     }
   } catch { /* migration 0035 não aplicada — ignora */ }
 
+  // --- Prazos de eventos se aproximando (v2.5.0) --------------------------
+  // Abstract deadline nos próximos 30 dias OU data do evento nos próximos 14
+  // dias. Notifica o owner. Envolvido em try/catch: se a migration 0037 não
+  // existir, o cron principal segue normalmente.
+  let eventDeadlines = 0;
+  try {
+    eventDeadlines = await runEventDeadlineNotifications(env, today);
+    sent += eventDeadlines;
+  } catch { /* migration 0037 não aplicada — ignora */ }
+
   await evaluateAlertRules(env);
 
   return {
@@ -4805,7 +4840,53 @@ async function runDailyNotifications(env) {
     career,
     bridgePending,
     gmailUnread,
+    eventDeadlines,
   };
+}
+
+// Prazos de eventos (v2.5.0): abstract deadline em até 30 dias, OU data do
+// evento em até 14 dias. Ignora eventos já encerrados/descartados/rejeitados.
+// Destinatário: o owner. Dedup por evento + dia.
+async function runEventDeadlineNotifications(env, today) {
+  const owner = await env.DB.prepare("SELECT id FROM users WHERE role = 'owner' LIMIT 1").first();
+  const ownerId = owner ? owner.id : null;
+  if (!ownerId) return 0;
+  let n = 0;
+
+  const upcomingDeadlines = await env.DB.prepare(`
+    SELECT id, name, acronym, deadline_abstract, deadline_paper,
+      date_start, status
+    FROM career_events
+    WHERE status NOT IN ('attended','discarded','rejected')
+    AND (
+      (deadline_abstract != '' AND
+       deadline_abstract BETWEEN date('now')
+       AND date('now', '+30 days'))
+      OR
+      (date_start != '' AND
+       date_start BETWEEN date('now')
+       AND date('now', '+14 days'))
+    )
+  `).all();
+
+  for (const ev of upcomingDeadlines.results || []) {
+    // Decide qual prazo é o mais relevante (abstract vs data do evento).
+    const abstractSoon = ev.deadline_abstract && ev.deadline_abstract >= today;
+    const kind = abstractSoon ? 'abstract' : 'data do evento';
+    const when = abstractSoon ? ev.deadline_abstract : ev.date_start;
+    const label = ev.acronym || ev.name;
+    const key = `event:deadline:${ev.id}:${today}`;
+    if (await dedupCheck(key, env)) continue;
+    await createNotification(env, null, {
+      to_user_id: ownerId,
+      type: 'event_deadline',
+      title: 'Prazo de evento se aproximando',
+      body: `${label} — ${kind} em ${when}`,
+    });
+    await dedupSet(key, 86400, env);
+    n += 1;
+  }
+  return n;
 }
 
 // Notificações da área Carreira/Mercado (Etapa 6):
@@ -7402,6 +7483,521 @@ async function handleCareerGoalItem(request, env, user, id) {
     }
   }
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// ===========================================================================
+// Eventos & Venues de Publicação (v2.5.0)
+// Banco dedicado para conferências, eventos de networking e venues de
+// publicação (journals/proceedings). Só owner e assistentes fixos (mesma regra
+// de Mercado/Carreira). Reaproveita shapeEvent/shapeVenue para normalizar tags.
+// ===========================================================================
+
+// Mesma regra de acesso de Mercado/Carreira/Hub: só owner e assistentes fixos.
+function isFixedUser(user) {
+  return !!user && (user.role === 'owner' || user.role === 'assistant_fixed' || user.user_type === 'fixed');
+}
+
+function shapeEvent(r) {
+  if (!r) return r;
+  return {
+    ...r,
+    tags: parseJsonArray(r.tags),
+    peer_review: !!r.peer_review,
+    hybrid: !!r.hybrid,
+  };
+}
+
+function shapeVenue(r) {
+  if (!r) return r;
+  return {
+    ...r,
+    tags: parseJsonArray(r.tags),
+    open_access: !!r.open_access,
+  };
+}
+
+// ---- Eventos ----------------------------------------------------------------
+
+async function handleEvents(request, env, user) {
+  if (!isFixedUser(user)) return json({ error: 'Restrito ao owner e assistentes fixos' }, 403);
+
+  if (request.method === 'GET') {
+    try {
+      const url = new URL(request.url);
+      const type = url.searchParams.get('type');
+      const area = url.searchParams.get('area');
+      const status = url.searchParams.get('status');
+      const phase = url.searchParams.get('phase');
+      const peerReview = url.searchParams.get('peer_review');
+      const search = url.searchParams.get('search');
+      const upcoming = url.searchParams.get('upcoming');
+      const deadlineSoon = url.searchParams.get('deadline_soon');
+      const today = new Date().toISOString().split('T')[0];
+      const in60 = new Date(Date.now() + 60 * 86400000).toISOString().split('T')[0];
+      const wh = [];
+      const args = [];
+      if (type) { wh.push('type = ?'); args.push(type); }
+      if (area) { wh.push('area = ?'); args.push(area); }
+      if (status) { wh.push('status = ?'); args.push(status); }
+      if (phase) { wh.push('strategic_phase = ?'); args.push(String(phase)); }
+      if (peerReview === '1') { wh.push('peer_review = 1'); }
+      if (search) {
+        wh.push('(name LIKE ? OR acronym LIKE ? OR notes LIKE ? OR organizer LIKE ?)');
+        const q = `%${search}%`;
+        args.push(q, q, q, q);
+      }
+      if (upcoming === '1') {
+        wh.push("((date_start != '' AND date_start >= ?) OR (deadline_abstract != '' AND deadline_abstract >= ?))");
+        args.push(today, today);
+      }
+      if (deadlineSoon === '1') {
+        wh.push("(deadline_abstract != '' AND deadline_abstract >= ? AND deadline_abstract <= ?)");
+        args.push(today, in60);
+      }
+      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const sql =
+        `SELECT * FROM career_events ${where}
+          ORDER BY CASE WHEN date_start IS NULL OR date_start = '' THEN 1 ELSE 0 END,
+            date_start ASC, name ASC`;
+      const { results } = await env.DB.prepare(sql).bind(...args).all();
+      return json((results || []).map(shapeEvent));
+    } catch { return json([]); }
+  }
+
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name || !String(body.name).trim()) return json({ error: 'name é obrigatório' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO career_events
+          (id, name, acronym, type, area, date_start, date_end, location, city, country,
+           organizer, indexing, publication_route, relevance_phd, relevance_spinoff,
+           relevance_networking, cost_level, peer_review, hybrid, deadline_abstract,
+           deadline_paper, website, status, strategic_phase, notes, tags, opportunity_id,
+           created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.name, body.acronym || '', body.type || 'conference_academic',
+        body.area || 'energy_systems', body.date_start || '', body.date_end || '',
+        body.location || '', body.city || '', body.country || '', body.organizer || '',
+        body.indexing || '', body.publication_route || '', Number(body.relevance_phd) || 3,
+        Number(body.relevance_spinoff) || 3, Number(body.relevance_networking) || 3,
+        body.cost_level || 'medium', body.peer_review ? 1 : 0, body.hybrid ? 1 : 0,
+        body.deadline_abstract || '', body.deadline_paper || '', body.website || '',
+        body.status || 'identified', body.strategic_phase != null ? String(body.strategic_phase) : '',
+        body.notes || '', JSON.stringify(body.tags || []), body.opportunity_id || null,
+        user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar evento', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_events WHERE id = ?').bind(id).first();
+    return json(shapeEvent(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleEventItem(request, env, user, id) {
+  if (!isFixedUser(user)) return json({ error: 'Restrito ao owner e assistentes fixos' }, 403);
+  if (!id) return json({ error: 'ID ausente' }, 400);
+
+  if (request.method === 'GET') {
+    try {
+      const row = await env.DB.prepare('SELECT * FROM career_events WHERE id = ?').bind(id).first();
+      if (!row) return json({ error: 'Evento não encontrado' }, 404);
+      const shaped = shapeEvent(row);
+      // Venues vinculados (via event_venue_links).
+      let venues = [];
+      try {
+        const { results } = await env.DB.prepare(
+          `SELECT l.id AS link_id, l.link_type, l.notes AS link_notes, v.*
+             FROM event_venue_links l
+             JOIN publication_venues v ON v.id = l.venue_id
+            WHERE l.event_id = ?
+            ORDER BY v.name ASC`
+        ).bind(id).all();
+        venues = (results || []).map((r) => ({
+          link_id: r.link_id,
+          link_type: r.link_type,
+          link_notes: r.link_notes,
+          ...shapeVenue(r),
+        }));
+      } catch { /* tabela ausente */ }
+      // Oportunidade de carreira vinculada (se houver).
+      let opportunity = null;
+      if (shaped.opportunity_id) {
+        try {
+          opportunity = await env.DB.prepare(
+            'SELECT id, title, status, track FROM career_opportunities WHERE id = ?'
+          ).bind(shaped.opportunity_id).first();
+        } catch { /* ignore */ }
+      }
+      return json({ ...shaped, venues, opportunity });
+    } catch (e) {
+      return json({ error: 'Falha ao carregar evento', detail: String(e) }, 500);
+    }
+  }
+
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM career_events WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Evento não encontrado' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    const bool = (k, f) => (body[k] !== undefined ? (body[k] ? 1 : 0) : f);
+    try {
+      await env.DB.prepare(
+        `UPDATE career_events SET name=?, acronym=?, type=?, area=?, date_start=?, date_end=?,
+           location=?, city=?, country=?, organizer=?, indexing=?, publication_route=?,
+           relevance_phd=?, relevance_spinoff=?, relevance_networking=?, cost_level=?,
+           peer_review=?, hybrid=?, deadline_abstract=?, deadline_paper=?, website=?, status=?,
+           strategic_phase=?, notes=?, tags=?, opportunity_id=?, updated_at=?
+         WHERE id=?`
+      ).bind(
+        pick('name', existing.name), pick('acronym', existing.acronym), pick('type', existing.type),
+        pick('area', existing.area), pick('date_start', existing.date_start),
+        pick('date_end', existing.date_end), pick('location', existing.location),
+        pick('city', existing.city), pick('country', existing.country),
+        pick('organizer', existing.organizer), pick('indexing', existing.indexing),
+        pick('publication_route', existing.publication_route),
+        Number(pick('relevance_phd', existing.relevance_phd)) || 3,
+        Number(pick('relevance_spinoff', existing.relevance_spinoff)) || 3,
+        Number(pick('relevance_networking', existing.relevance_networking)) || 3,
+        pick('cost_level', existing.cost_level), bool('peer_review', existing.peer_review),
+        bool('hybrid', existing.hybrid), pick('deadline_abstract', existing.deadline_abstract),
+        pick('deadline_paper', existing.deadline_paper), pick('website', existing.website),
+        pick('status', existing.status),
+        body.strategic_phase !== undefined ? String(body.strategic_phase) : existing.strategic_phase,
+        pick('notes', existing.notes),
+        body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
+        body.opportunity_id !== undefined ? (body.opportunity_id || null) : existing.opportunity_id,
+        now, id
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar evento', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_events WHERE id = ?').bind(id).first();
+    return json(shapeEvent(row));
+  }
+
+  if (request.method === 'DELETE') {
+    const existing = await env.DB.prepare('SELECT id FROM career_events WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Evento não encontrado' }, 404);
+    try {
+      await env.DB.prepare('DELETE FROM career_events WHERE id = ?').bind(id).run();
+      return json({ ok: true });
+    } catch (e) {
+      return json({ error: 'Falha ao deletar evento', detail: String(e) }, 500);
+    }
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---- Venues de Publicação ---------------------------------------------------
+
+async function handleVenues(request, env, user) {
+  if (!isFixedUser(user)) return json({ error: 'Restrito ao owner e assistentes fixos' }, 403);
+
+  if (request.method === 'GET') {
+    try {
+      const url = new URL(request.url);
+      const area = url.searchParams.get('area');
+      const type = url.searchParams.get('type');
+      const quartile = url.searchParams.get('quartile');
+      const search = url.searchParams.get('search');
+      const wh = [];
+      const args = [];
+      if (area) { wh.push('area = ?'); args.push(area); }
+      if (type) { wh.push('type = ?'); args.push(type); }
+      if (quartile) { wh.push('quartile = ?'); args.push(quartile); }
+      if (search) {
+        wh.push('(name LIKE ? OR acronym LIKE ? OR publisher LIKE ? OR notes LIKE ?)');
+        const q = `%${search}%`;
+        args.push(q, q, q, q);
+      }
+      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const { results } = await env.DB.prepare(
+        `SELECT * FROM publication_venues ${where} ORDER BY relevance_phd DESC, name ASC`
+      ).bind(...args).all();
+      return json((results || []).map(shapeVenue));
+    } catch { return json([]); }
+  }
+
+  if (request.method === 'POST') {
+    const body = (await readJson(request)) || {};
+    if (!body.name || !String(body.name).trim()) return json({ error: 'name é obrigatório' }, 400);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      await env.DB.prepare(
+        `INSERT INTO publication_venues
+          (id, name, acronym, publisher, type, indexing, impact_factor, quartile, area,
+           relevance_phd, open_access, website, notes, tags, created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, body.name, body.acronym || '', body.publisher || '', body.type || 'journal',
+        body.indexing || '', body.impact_factor != null && body.impact_factor !== '' ? Number(body.impact_factor) : null,
+        body.quartile || '', body.area || 'energy_systems', Number(body.relevance_phd) || 3,
+        body.open_access ? 1 : 0, body.website || '', body.notes || '',
+        JSON.stringify(body.tags || []), user.id, now, now
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao criar venue', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM publication_venues WHERE id = ?').bind(id).first();
+    return json(shapeVenue(row), 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleVenueItem(request, env, user, id) {
+  if (!isFixedUser(user)) return json({ error: 'Restrito ao owner e assistentes fixos' }, 403);
+  if (!id) return json({ error: 'ID ausente' }, 400);
+
+  if (request.method === 'GET') {
+    try {
+      const row = await env.DB.prepare('SELECT * FROM publication_venues WHERE id = ?').bind(id).first();
+      if (!row) return json({ error: 'Venue não encontrado' }, 404);
+      // Eventos vinculados (via event_venue_links).
+      let events = [];
+      try {
+        const { results } = await env.DB.prepare(
+          `SELECT l.id AS link_id, l.link_type, e.id, e.name, e.acronym, e.date_start, e.status
+             FROM event_venue_links l
+             JOIN career_events e ON e.id = l.event_id
+            WHERE l.venue_id = ?
+            ORDER BY e.date_start ASC`
+        ).bind(id).all();
+        events = results || [];
+      } catch { /* tabela ausente */ }
+      return json({ ...shapeVenue(row), events });
+    } catch (e) {
+      return json({ error: 'Falha ao carregar venue', detail: String(e) }, 500);
+    }
+  }
+
+  if (request.method === 'PUT') {
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM publication_venues WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Venue não encontrado' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const pick = (k, f) => (body[k] !== undefined ? body[k] : f);
+    try {
+      await env.DB.prepare(
+        `UPDATE publication_venues SET name=?, acronym=?, publisher=?, type=?, indexing=?,
+           impact_factor=?, quartile=?, area=?, relevance_phd=?, open_access=?, website=?,
+           notes=?, tags=?, updated_at=? WHERE id=?`
+      ).bind(
+        pick('name', existing.name), pick('acronym', existing.acronym),
+        pick('publisher', existing.publisher), pick('type', existing.type),
+        pick('indexing', existing.indexing),
+        body.impact_factor !== undefined
+          ? (body.impact_factor === '' || body.impact_factor === null ? null : Number(body.impact_factor))
+          : existing.impact_factor,
+        pick('quartile', existing.quartile), pick('area', existing.area),
+        Number(pick('relevance_phd', existing.relevance_phd)) || 3,
+        body.open_access !== undefined ? (body.open_access ? 1 : 0) : existing.open_access,
+        pick('website', existing.website), pick('notes', existing.notes),
+        body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
+        now, id
+      ).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar venue', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM publication_venues WHERE id = ?').bind(id).first();
+    return json(shapeVenue(row));
+  }
+
+  if (request.method === 'DELETE') {
+    const existing = await env.DB.prepare('SELECT id FROM publication_venues WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Venue não encontrado' }, 404);
+    try {
+      await env.DB.prepare('DELETE FROM publication_venues WHERE id = ?').bind(id).run();
+      return json({ ok: true });
+    } catch (e) {
+      return json({ error: 'Falha ao deletar venue', detail: String(e) }, 500);
+    }
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---- Vínculos evento ↔ venue ------------------------------------------------
+
+async function handleEventVenues(request, env, user, eventId) {
+  if (!isFixedUser(user)) return json({ error: 'Restrito ao owner e assistentes fixos' }, 403);
+  if (!eventId) return json({ error: 'ID do evento ausente' }, 400);
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+
+  const body = (await readJson(request)) || {};
+  if (!body.venue_id) return json({ error: 'venue_id é obrigatório' }, 400);
+  // Valida existência do evento e do venue.
+  const ev = await env.DB.prepare('SELECT id FROM career_events WHERE id = ?').bind(eventId).first();
+  if (!ev) return json({ error: 'Evento não encontrado' }, 404);
+  const vn = await env.DB.prepare('SELECT id FROM publication_venues WHERE id = ?').bind(body.venue_id).first();
+  if (!vn) return json({ error: 'Venue não encontrado' }, 404);
+  const id = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `INSERT INTO event_venue_links (id, event_id, venue_id, link_type, notes, created_at)
+       VALUES (?,?,?,?,?,?)`
+    ).bind(id, eventId, body.venue_id, body.link_type || 'proceedings', body.notes || '', now).run();
+  } catch (e) {
+    return json({ error: 'Falha ao vincular venue', detail: String(e) }, 500);
+  }
+  const row = await env.DB.prepare('SELECT * FROM event_venue_links WHERE id = ?').bind(id).first();
+  return json(row, 201);
+}
+
+async function handleEventVenueLinkItem(request, env, user, eventId, linkId) {
+  if (!isFixedUser(user)) return json({ error: 'Restrito ao owner e assistentes fixos' }, 403);
+  if (!linkId) return json({ error: 'ID do vínculo ausente' }, 400);
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  try {
+    await env.DB.prepare('DELETE FROM event_venue_links WHERE id = ? AND event_id = ?').bind(linkId, eventId).run();
+    return json({ ok: true });
+  } catch (e) {
+    return json({ error: 'Falha ao remover vínculo', detail: String(e) }, 500);
+  }
+}
+
+// ---- Importação em massa de eventos + venues --------------------------------
+// Dedup: eventos por (name + date_start); venues por name. Resolve venue_links
+// por acronym. Registra em events_import_log.
+
+async function handleEventsImport(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!isFixedUser(user)) return json({ error: 'Sem permissão para importação em massa' }, 403);
+
+  const body = (await readJson(request)) || {};
+  const now = Math.floor(Date.now() / 1000);
+  let eventsImported = 0;
+  let venuesImported = 0;
+  const errors = [];
+
+  // Mapas acronym(lowercase) → id para resolver os vínculos ao final. Começa com
+  // o que já existe no banco (permite reimportação incremental de vínculos).
+  const eventByAcronym = new Map();
+  const venueByAcronym = new Map();
+  try {
+    const { results } = await env.DB.prepare('SELECT id, acronym FROM career_events').all();
+    for (const e of (results || [])) {
+      if (e.acronym) eventByAcronym.set(e.acronym.trim().toLowerCase(), e.id);
+    }
+  } catch { /* tabela ausente */ }
+  try {
+    const { results } = await env.DB.prepare('SELECT id, acronym FROM publication_venues').all();
+    for (const v of (results || [])) {
+      if (v.acronym) venueByAcronym.set(v.acronym.trim().toLowerCase(), v.id);
+    }
+  } catch { /* tabela ausente */ }
+
+  // --- Venues (dedup por name) ---
+  for (const v of (body.publication_venues || [])) {
+    try {
+      const name = (v.name || '').trim();
+      if (!name) { errors.push({ kind: 'venue', item: '(sem nome)', error: 'name vazio' }); continue; }
+      const existing = await env.DB.prepare('SELECT id FROM publication_venues WHERE name = ? LIMIT 1').bind(name).first();
+      let vid = existing ? existing.id : null;
+      if (!vid) {
+        vid = v.id || crypto.randomUUID();
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO publication_venues
+            (id, name, acronym, publisher, type, indexing, impact_factor, quartile, area,
+             relevance_phd, open_access, website, notes, tags, created_by, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(
+          vid, name, v.acronym || '', v.publisher || '', v.type || 'journal',
+          v.indexing || '', v.impact_factor != null && v.impact_factor !== '' ? Number(v.impact_factor) : null,
+          v.quartile || '', v.area || 'energy_systems', Number(v.relevance_phd) || 3,
+          v.open_access ? 1 : 0, v.website || '', v.notes || '',
+          JSON.stringify(v.tags || []), user.id, now, now
+        ).run();
+        venuesImported += 1;
+      }
+      if (v.acronym) venueByAcronym.set(v.acronym.trim().toLowerCase(), vid);
+    } catch (e) {
+      errors.push({ kind: 'venue', item: v && v.name, error: String(e) });
+    }
+  }
+
+  // --- Eventos (dedup por name + date_start) ---
+  for (const ev of (body.events || [])) {
+    try {
+      const name = (ev.name || '').trim();
+      if (!name) { errors.push({ kind: 'event', item: '(sem nome)', error: 'name vazio' }); continue; }
+      const ds = ev.date_start || '';
+      const existing = await env.DB.prepare(
+        'SELECT id FROM career_events WHERE name = ? AND date_start = ? LIMIT 1'
+      ).bind(name, ds).first();
+      let eid = existing ? existing.id : null;
+      if (!eid) {
+        eid = ev.id || crypto.randomUUID();
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO career_events
+            (id, name, acronym, type, area, date_start, date_end, location, city, country,
+             organizer, indexing, publication_route, relevance_phd, relevance_spinoff,
+             relevance_networking, cost_level, peer_review, hybrid, deadline_abstract,
+             deadline_paper, website, status, strategic_phase, notes, tags, opportunity_id,
+             created_by, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(
+          eid, name, ev.acronym || '', ev.type || 'conference_academic',
+          ev.area || 'energy_systems', ds, ev.date_end || '', ev.location || '',
+          ev.city || '', ev.country || '', ev.organizer || '', ev.indexing || '',
+          ev.publication_route || '', Number(ev.relevance_phd) || 3,
+          Number(ev.relevance_spinoff) || 3, Number(ev.relevance_networking) || 3,
+          ev.cost_level || 'medium', ev.peer_review ? 1 : 0, ev.hybrid ? 1 : 0,
+          ev.deadline_abstract || '', ev.deadline_paper || '', ev.website || '',
+          ev.status || 'identified', ev.strategic_phase != null ? String(ev.strategic_phase) : '',
+          ev.notes || '', JSON.stringify(ev.tags || []), ev.opportunity_id || null,
+          user.id, now, now
+        ).run();
+        eventsImported += 1;
+      }
+      if (ev.acronym) eventByAcronym.set(ev.acronym.trim().toLowerCase(), eid);
+    } catch (e) {
+      errors.push({ kind: 'event', item: ev && ev.name, error: String(e) });
+    }
+  }
+
+  // --- Vínculos evento ↔ venue (resolvidos por acronym) ---
+  for (const link of (body.venue_links || [])) {
+    try {
+      const ek = (link.event_acronym || '').trim().toLowerCase();
+      const vk = (link.venue_acronym || '').trim().toLowerCase();
+      const eid = eventByAcronym.get(ek);
+      const vid = venueByAcronym.get(vk);
+      if (!eid || !vid) {
+        errors.push({ kind: 'link', item: `${link.event_acronym} → ${link.venue_acronym}`, error: 'acronym não resolvido' });
+        continue;
+      }
+      // Evita vínculo duplicado.
+      const dup = await env.DB.prepare(
+        'SELECT id FROM event_venue_links WHERE event_id = ? AND venue_id = ? LIMIT 1'
+      ).bind(eid, vid).first();
+      if (dup) continue;
+      await env.DB.prepare(
+        `INSERT INTO event_venue_links (id, event_id, venue_id, link_type, notes, created_at)
+         VALUES (?,?,?,?,?,?)`
+      ).bind(crypto.randomUUID(), eid, vid, link.link_type || 'proceedings', link.notes || '', now).run();
+    } catch (e) {
+      errors.push({ kind: 'link', item: `${link.event_acronym} → ${link.venue_acronym}`, error: String(e) });
+    }
+  }
+
+  // Log da importação.
+  try {
+    await env.DB.prepare(
+      `INSERT INTO events_import_log
+        (id, source_description, events_imported, venues_imported, imported_by, imported_at)
+       VALUES (?,?,?,?,?,?)`
+    ).bind(crypto.randomUUID(), body.source_description || '', eventsImported, venuesImported, user.id, now).run();
+  } catch { /* best-effort */ }
+
+  return json({ events_imported: eventsImported, venues_imported: venuesImported, errors });
 }
 
 // ---------------------------------------------------------------------------

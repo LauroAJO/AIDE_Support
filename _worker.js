@@ -9015,7 +9015,9 @@ function isHubReader(user) {
 }
 
 // POST /api/hub/items — ingestão em lote. Idempotente via UNIQUE(external_id,
-// project_id) + INSERT OR IGNORE: itens repetidos contam como duplicates.
+// project_id) + ON CONFLICT DO NOTHING: itens repetidos contam como duplicates.
+// Itens já existentes (incluindo soft-deletados, deleted_at NOT NULL) entram em
+// conflito na UNIQUE e são ignorados — nunca reativados nem sobrescritos.
 // Erros individuais de item são silenciosamente ignorados (status sempre 200).
 async function handleHubIngest(request, env) {
   if (!validateHubApiKey(request, env)) return json({ error: 'Não autorizado' }, 401);
@@ -9032,10 +9034,11 @@ async function handleHubIngest(request, env) {
     const topicos = Array.isArray(item.topicos) ? JSON.stringify(item.topicos) : (item.topicos || null);
     try {
       const res = await env.DB.prepare(
-        `INSERT OR IGNORE INTO hub_items
+        `INSERT INTO hub_items
           (external_id, project_id, title, url, source_name, published_at,
-           relevancia, prioridade, tipo, resumo, topicos, justificativa, collected_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           relevancia, prioridade, tipo, resumo, topicos, justificativa, collected_at, country)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(external_id, project_id) DO NOTHING`
       ).bind(
         String(item.external_id),
         String(item.project_id),
@@ -9049,7 +9052,8 @@ async function handleHubIngest(request, env) {
         item.resumo || null,
         topicos,
         item.justificativa || null,
-        item.collected_at || null
+        item.collected_at || null,
+        item.country || null
       ).run();
       if (res.meta && res.meta.changes > 0) accepted += 1;
       else duplicates += 1;

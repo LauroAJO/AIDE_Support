@@ -308,7 +308,7 @@ async function handleAPI(request, env, ctx) {
   // Hub — leitura protegida por sessão (owner / assistente fixo).
   // (POST /api/hub/items é tratado acima, antes do gate de sessão.)
   if (path === '/api/hub/items') return handleHubItems(request, env, user);
-  if (path.startsWith('/api/hub/items/')) return handleHubItemDelete(request, env, user, path.split('/')[4]);
+  if (path.startsWith('/api/hub/items/')) return handleHubItemById(request, env, user, path.split('/')[4]);
   if (path === '/api/hub/stats') return handleHubStats(request, env, user);
 
   // Gmail (conta externa lcestech) — sincronização e leitura. Todos os usuários
@@ -9094,9 +9094,15 @@ async function handleHubItems(request, env, user) {
   }
 }
 
+// /api/hub/items/:id — DELETE (remove) ou PATCH (edita campos manuais).
+async function handleHubItemById(request, env, user, id) {
+  if (request.method === 'DELETE') return handleHubItemDelete(request, env, user, id);
+  if (request.method === 'PATCH') return handleHubItemPatch(request, env, user, id);
+  return json({ error: 'Método não permitido' }, 405);
+}
+
 // DELETE /api/hub/items/:id — remove um item. Sessão obrigatória; apenas owner.
 async function handleHubItemDelete(request, env, user, id) {
-  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
   if (!id) return json({ error: 'ID ausente' }, 400);
   if (user.role !== 'owner') return json({ error: 'Apenas o owner pode remover itens' }, 403);
   try {
@@ -9105,6 +9111,37 @@ async function handleHubItemDelete(request, env, user, id) {
     return json({ error: 'Falha ao remover item', detail: String(e) }, 500);
   }
   return json({ deleted: true });
+}
+
+// PATCH /api/hub/items/:id — edita campos manuais (country, area, user_notes,
+// title_override, resumo_override). Sessão obrigatória; qualquer role.
+async function handleHubItemPatch(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  const body = (await readJson(request)) || {};
+  try {
+    await env.DB.prepare(
+      `UPDATE hub_items SET
+         country = COALESCE(?, country),
+         area = COALESCE(?, area),
+         user_notes = COALESCE(?, user_notes),
+         title_override = COALESCE(?, title_override),
+         resumo_override = COALESCE(?, resumo_override),
+         edited_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).bind(
+      body.country ?? null,
+      body.area ?? null,
+      body.user_notes ?? null,
+      body.title_override ?? null,
+      body.resumo_override ?? null,
+      id
+    ).run();
+  } catch (e) {
+    return json({ error: 'Falha ao editar item', detail: String(e) }, 500);
+  }
+  const row = await env.DB.prepare('SELECT * FROM hub_items WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: 'Item não encontrado' }, 404);
+  return json(shapeHubItem(row));
 }
 
 // GET /api/hub/stats — agregados por projeto. Sessão obrigatória.
@@ -9148,7 +9185,7 @@ function corsResponse() {
   return new Response(null, {
     headers: {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Authorization, Content-Type'
     }
   });

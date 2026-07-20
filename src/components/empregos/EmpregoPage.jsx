@@ -1,12 +1,28 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Briefcase, RefreshCw, Search, ExternalLink, X, Tag, FileText,
-  Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2,
+  Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2, Pencil,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
+import EditItemModal from '../shared/EditItemModal';
+
+// País editado manualmente (via EditItemModal) — mesmos códigos/cores usados
+// em VagasPhDPage, para consistência visual entre as duas subabas do Hub.
+// EmpregoPage não faz inferência automática de país (só cidade); o badge só
+// aparece quando o campo `country` foi preenchido manualmente.
+const COUNTRY_META = {
+  NL: { label: 'Países Baixos', color: 'bg-orange-100 text-orange-700' },
+  DE: { label: 'Alemanha', color: 'bg-neutral-200 text-neutral-800' },
+  BE: { label: 'Bélgica', color: 'bg-yellow-100 text-yellow-800' },
+  DK: { label: 'Dinamarca', color: 'bg-red-100 text-red-700' },
+  SE: { label: 'Suécia', color: 'bg-sky-100 text-sky-700' },
+  CH: { label: 'Suíça', color: 'bg-rose-100 text-rose-700' },
+  UK: { label: 'Reino Unido', color: 'bg-indigo-100 text-indigo-700' },
+  Outro: { label: 'Outro', color: 'bg-surface2 text-ink2' },
+};
 
 // project_id no hub_items que agrupa as vagas de emprego curadas.
 const HUB_PROJECT = 'emprego_vagas';
@@ -59,6 +75,34 @@ function detectArea(item) {
 }
 const AREA_LABELS = { ...Object.fromEntries(AREAS.map((a) => [a.key, a.label])), outros: 'Outros' };
 
+// Rótulos das áreas manuais (EditItemModal), independentes das chaves da
+// detecção automática acima. Se `item.area` estiver preenchido, ele tem
+// prioridade sobre a área auto-detectada.
+const AREA_OVERRIDE_LABELS = {
+  h2_energia: 'H₂/Energia',
+  simulacao: 'Simulação/Modelagem',
+  processos: 'Eng. de Processos',
+  ia_digital_twin: 'IA/Digital Twin',
+  consultoria: 'Consultoria',
+  pesquisa: 'Pesquisa/R&D',
+  outro: 'Outro',
+};
+
+function areaLabel(item) {
+  if (item.area && AREA_OVERRIDE_LABELS[item.area]) return AREA_OVERRIDE_LABELS[item.area];
+  return AREA_LABELS[item._area];
+}
+
+// title_override / resumo_override (editados manualmente) têm prioridade
+// sobre o título/resumo original coletado pelo Intelligence Hub.
+function effectiveTitle(item) {
+  return item.title_override || item.title;
+}
+
+function effectiveResumo(item) {
+  return item.resumo_override || item.resumo;
+}
+
 // Datas chegam como string ISO/SQLite. Mostra só YYYY-MM-DD.
 function fmtDate(s) {
   if (!s) return '—';
@@ -87,6 +131,17 @@ function CityBadge({ code }) {
   );
 }
 
+function CountryBadge({ code }) {
+  const c = COUNTRY_META[code] || COUNTRY_META.Outro;
+  return <Badge className={c.color}>{code}</Badge>;
+}
+
+// Pré-calcula cidade e área (auto-detecção) uma vez por item. Reaproveitado
+// ao carregar a lista e após salvar edições.
+function enrich(it) {
+  return { ...it, _city: detectCity(it).code, _area: detectArea(it) };
+}
+
 export default function EmpregoPage() {
   const user = useStore((s) => s.user);
   const isOwner = user?.role === 'owner';
@@ -107,6 +162,7 @@ export default function EmpregoPage() {
   const [added, setAdded] = useState({}); // { [itemId]: 'saving' | 'done' }
   const [deleting, setDeleting] = useState(null);
   const [confirmItem, setConfirmItem] = useState(null);
+  const [editingItem, setEditingItem] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -117,13 +173,7 @@ export default function EmpregoPage() {
       params.set('order_by', 'received_at');
       params.set('limit', '200');
       const res = await apiFetch(`/api/hub/items?${params.toString()}`);
-      // Pré-calcula cidade e área uma vez por item.
-      const enriched = (res.items || []).map((it) => ({
-        ...it,
-        _city: detectCity(it).code,
-        _area: detectArea(it),
-      }));
-      setItems(enriched);
+      setItems((res.items || []).map(enrich));
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -218,6 +268,15 @@ export default function EmpregoPage() {
     const item = confirmItem;
     setConfirmItem(null);
     if (item) deleteItem(item);
+  };
+
+  // ── Editar vaga ───────────────────────────────────────────────────────────
+  const handleSaved = (updated) => {
+    const merged = enrich(updated);
+    setItems((prev) => prev.map((it) => (it.id === updated.id ? merged : it)));
+    if (selected && selected.id === updated.id) setSelected(merged);
+    setEditingItem(null);
+    showToast('Alterações salvas');
   };
 
   return (
@@ -315,6 +374,7 @@ export default function EmpregoPage() {
                 onAdd={() => addToCareer(it)}
                 state={added[it.id]}
                 onDelete={isOwner ? () => setConfirmItem(it) : null}
+                onEdit={() => setEditingItem(it)}
                 deleting={deleting === it.id}
               />
             ))}
@@ -329,9 +389,16 @@ export default function EmpregoPage() {
           onAdd={() => addToCareer(selected)}
           state={added[selected.id]}
           onDelete={isOwner ? () => setConfirmItem(selected) : null}
+          onEdit={() => setEditingItem(selected)}
           deleting={deleting === selected.id}
         />
       )}
+
+      <EditItemModal
+        item={editingItem}
+        onClose={() => setEditingItem(null)}
+        onSaved={handleSaved}
+      />
 
       <ConfirmModal
         open={!!confirmItem}
@@ -386,18 +453,34 @@ function AddButton({ state, onAdd, full = false }) {
   );
 }
 
-function EmpregoCard({ item, onOpen, onAdd, state, onDelete, deleting }) {
-  const resumo = (item.resumo || '').slice(0, 150);
-  const truncated = (item.resumo || '').length > 150;
+function EmpregoCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting }) {
+  const title = effectiveTitle(item);
+  const resumoFull = effectiveResumo(item);
+  const resumo = (resumoFull || '').slice(0, 150);
+  const truncated = (resumoFull || '').length > 150;
   return (
     <div
       onClick={onOpen}
       className="flex cursor-pointer flex-col gap-3 rounded-xl border border-line bg-surface p-4 transition hover:border-accent/50 hover:shadow-soft"
     >
       <div className="flex items-start justify-between gap-2">
-        <h3 className="font-semibold leading-snug text-ink">{item.title}</h3>
+        <h3 className="flex items-center gap-1.5 font-semibold leading-snug text-ink">
+          {title}
+          {item.edited_at && <Pencil className="h-3 w-3 shrink-0 text-muted" title="Editado manualmente" />}
+        </h3>
         <div className="flex shrink-0 items-center gap-1.5">
+          {item.country && <CountryBadge code={item.country} />}
           <CityBadge code={item._city} />
+          {onEdit && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onEdit(); }}
+              className="rounded-md p-1 text-ink2 transition hover:bg-surface2 hover:text-accent"
+              title="Editar vaga"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          )}
           {onDelete && (
             <button
               type="button"
@@ -417,7 +500,7 @@ function EmpregoCard({ item, onOpen, onAdd, state, onDelete, deleting }) {
           <span className="inline-flex items-center gap-1"><Building2 className="h-3.5 w-3.5" />{item.source_name}</span>
         )}
         <span className="inline-flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5" />{fmtDate(item.collected_at || item.received_at)}</span>
-        <Badge className="bg-accent/10 text-accent">{AREA_LABELS[item._area]}</Badge>
+        <Badge className="bg-accent/10 text-accent">{areaLabel(item)}</Badge>
       </div>
 
       {resumo && (
@@ -454,14 +537,29 @@ function Row({ label, children }) {
   );
 }
 
-function DetailModal({ item, onClose, onAdd, state, onDelete, deleting }) {
+function DetailModal({ item, onClose, onAdd, state, onDelete, onEdit, deleting }) {
   const topicos = Array.isArray(item.topicos) ? item.topicos : [];
+  const title = effectiveTitle(item);
+  const resumo = effectiveResumo(item);
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
       <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
-          <h2 className="text-base font-bold text-ink">{item.title}</h2>
+          <h2 className="flex items-center gap-1.5 text-base font-bold text-ink">
+            {title}
+            {item.edited_at && <Pencil className="h-3.5 w-3.5 shrink-0 text-muted" title="Editado manualmente" />}
+          </h2>
           <div className="flex shrink-0 items-center gap-1">
+            {onEdit && (
+              <button
+                type="button"
+                onClick={onEdit}
+                className="rounded-md p-1.5 text-ink2 transition hover:bg-surface2 hover:text-accent"
+                title="Editar vaga"
+              >
+                <Pencil className="h-4 w-4" />
+              </button>
+            )}
             {onDelete && (
               <button
                 type="button"
@@ -490,8 +588,9 @@ function DetailModal({ item, onClose, onAdd, state, onDelete, deleting }) {
           )}
 
           <div className="flex flex-wrap items-center gap-2">
+            {item.country && <CountryBadge code={item.country} />}
             <CityBadge code={item._city} />
-            <Badge className="bg-accent/10 text-accent">{AREA_LABELS[item._area]}</Badge>
+            <Badge className="bg-accent/10 text-accent">{areaLabel(item)}</Badge>
             {item.relevancia != null && (
               <Badge className="bg-surface2 text-ink2">Relev.: {Number(item.relevancia).toFixed(1)}</Badge>
             )}
@@ -504,9 +603,15 @@ function DetailModal({ item, onClose, onAdd, state, onDelete, deleting }) {
             </Row>
           )}
 
-          {item.resumo && (
+          {resumo && (
             <Row label="Resumo do LLM">
-              <p className="whitespace-pre-wrap leading-relaxed text-ink2">{item.resumo}</p>
+              <p className="whitespace-pre-wrap leading-relaxed text-ink2">{resumo}</p>
+            </Row>
+          )}
+
+          {item.user_notes && (
+            <Row label="Notas pessoais">
+              <p className="whitespace-pre-wrap leading-relaxed text-ink2">{item.user_notes}</p>
             </Row>
           )}
 

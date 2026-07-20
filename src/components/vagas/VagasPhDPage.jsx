@@ -1,43 +1,66 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   GraduationCap, RefreshCw, Search, ExternalLink, X, Tag, FileText,
-  Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2,
+  Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2, Pencil,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
+import EditItemModal from '../shared/EditItemModal';
 
 // project_id no hub_items que agrupa as vagas de doutorado curadas.
 const HUB_PROJECT = 'phd_vagas';
 
 // ── Detecção de país ────────────────────────────────────────────────────────
-// As vagas chegam sem campo estruturado de país; inferimos a partir do texto
-// (título + resumo + fonte). Ordem importa: o primeiro match vence. 'Outros' é
-// o fallback. Cada país tem um conjunto de termos (PT/EN/nativo + sigla).
+// Prioridade: 1) campo `country` gravado manualmente no banco (via
+// EditItemModal); 2) inferência por texto (título + resumo + tópicos).
+// 'Outro' é o fallback quando nenhuma pista é encontrada. Cada país tem um
+// conjunto de termos (PT/EN/nativo + cidades/universidades-alvo).
 const COUNTRIES = [
   { code: 'NL', label: 'Países Baixos', color: 'bg-orange-100 text-orange-700',
-    terms: ['netherlands', 'holanda', 'países baixos', 'paises baixos', 'dutch', 'nederland', 'delft', 'eindhoven', 'twente', 'groningen', 'utrecht', 'wageningen', 'amsterdam', 'rotterdam'] },
+    terms: ['netherlands', 'holland', 'holanda', 'países baixos', 'paises baixos', 'dutch', 'nederland', 'delft', 'amsterdam', 'rotterdam', 'eindhoven', 'utrecht', 'groningen', 'twente', 'wageningen'] },
   { code: 'DE', label: 'Alemanha', color: 'bg-neutral-200 text-neutral-800',
-    terms: ['germany', 'alemanha', 'deutschland', 'german', 'münchen', 'munich', 'munique', 'aachen', 'berlin', 'karlsruhe', 'stuttgart', 'dresden', 'fraunhofer', 'jülich', 'juelich'] },
+    terms: ['germany', 'alemanha', 'deutschland', 'german', 'berlin', 'munich', 'münchen', 'munique', 'hamburg', 'heidelberg', 'karlsruhe', 'aachen', 'stuttgart', 'dresden', 'fraunhofer', 'jülich', 'juelich'] },
   { code: 'BE', label: 'Bélgica', color: 'bg-yellow-100 text-yellow-800',
-    terms: ['belgium', 'bélgica', 'belgica', 'belgian', 'leuven', 'ghent', 'gent', 'brussels', 'bruxelas', 'vito', 'imec'] },
+    terms: ['belgium', 'belgië', 'belgique', 'bélgica', 'belgica', 'belgian', 'leuven', 'ghent', 'gent', 'brussels', 'bruxelles', 'bruxelas', 'antwerp', 'vito', 'imec'] },
   { code: 'DK', label: 'Dinamarca', color: 'bg-red-100 text-red-700',
-    terms: ['denmark', 'dinamarca', 'danish', 'danmark', 'copenhagen', 'copenhague', 'aarhus', 'dtu', 'lyngby'] },
+    terms: ['denmark', 'danmark', 'dinamarca', 'danish', 'copenhagen', 'københavn', 'copenhague', 'aarhus', 'dtu', 'lyngby'] },
   { code: 'SE', label: 'Suécia', color: 'bg-sky-100 text-sky-700',
-    terms: ['sweden', 'suécia', 'suecia', 'swedish', 'sverige', 'stockholm', 'estocolmo', 'gothenburg', 'göteborg', 'lund', 'chalmers', 'kth'] },
+    terms: ['sweden', 'sverige', 'suécia', 'suecia', 'swedish', 'stockholm', 'estocolmo', 'gothenburg', 'göteborg', 'lund', 'chalmers', 'kth'] },
   { code: 'CH', label: 'Suíça', color: 'bg-rose-100 text-rose-700',
-    terms: ['switzerland', 'suíça', 'suica', 'swiss', 'schweiz', 'zürich', 'zurich', 'lausanne', 'geneva', 'genebra', 'epfl', 'eth', 'paul scherrer', 'empa'] },
+    terms: ['switzerland', 'schweiz', 'suisse', 'suíça', 'suica', 'swiss', 'zurich', 'zürich', 'geneva', 'genebra', 'lausanne', 'basel', 'eth', 'epfl', 'paul scherrer', 'empa'] },
   { code: 'UK', label: 'Reino Unido', color: 'bg-indigo-100 text-indigo-700',
-    terms: ['united kingdom', 'reino unido', 'england', 'inglaterra', 'britain', 'british', 'scotland', 'escócia', 'london', 'londres', 'cambridge', 'oxford', 'manchester', 'imperial college', 'edinburgh'] },
+    terms: ['united kingdom', 'reino unido', 'england', 'inglaterra', 'britain', 'british', 'scotland', 'escócia', 'london', 'londres', 'edinburgh', 'manchester', 'cambridge', 'oxford', 'bristol', 'imperial college'] },
 ];
-const OTHER_COUNTRY = { code: 'Outros', label: 'Outros', color: 'bg-surface2 text-ink2' };
+const OTHER_COUNTRY = { code: 'Outro', label: 'Outro', color: 'bg-surface2 text-ink2' };
+
+// Fontes agregadoras que listam vagas de múltiplos países — o nome da fonte
+// nunca deve, sozinho, indicar o país da vaga (ex.: jobs.ac.uk hospeda vagas
+// fora do Reino Unido também).
+const GLOBAL_SOURCES = ['jobs.ac.uk'];
 
 function detectCountry(item) {
-  const hay = `${item.title || ''} ${item.resumo || ''} ${item.source_name || ''} ${(Array.isArray(item.topicos) ? item.topicos.join(' ') : '')}`.toLowerCase();
+  // 1) País definido manualmente (prioridade máxima).
+  if (item.country) return countryMeta(item.country);
+
+  // 2) Inferência por conteúdo (título + resumo + tópicos) — nunca pelo nome
+  //    da fonte quando ela é um agregador global (jobs.ac.uk etc.).
+  const content = `${item.title || ''} ${item.resumo || ''} ${(Array.isArray(item.topicos) ? item.topicos.join(' ') : '')}`.toLowerCase();
   for (const c of COUNTRIES) {
-    if (c.terms.some((t) => hay.includes(t))) return c;
+    if (c.terms.some((t) => content.includes(t))) return c;
   }
+
+  // 3) Sem pista no conteúdo: como último recurso, tenta o nome da fonte —
+  //    exceto para agregadores globais.
+  const sourceName = (item.source_name || '').toLowerCase();
+  const isGlobalSource = GLOBAL_SOURCES.some((s) => sourceName.includes(s));
+  if (sourceName && !isGlobalSource) {
+    for (const c of COUNTRIES) {
+      if (c.terms.some((t) => sourceName.includes(t))) return c;
+    }
+  }
+
   return OTHER_COUNTRY;
 }
 
@@ -66,6 +89,34 @@ function detectArea(item) {
 }
 const AREA_LABELS = { ...Object.fromEntries(AREAS.map((a) => [a.key, a.label])), outros: 'Outros' };
 
+// Rótulos das áreas manuais (EditItemModal), independentes das chaves da
+// detecção automática acima. Se `item.area` estiver preenchido, ele tem
+// prioridade sobre a área auto-detectada (mesma regra do país).
+const AREA_OVERRIDE_LABELS = {
+  h2_energia: 'H₂/Energia',
+  simulacao: 'Simulação/Modelagem',
+  processos: 'Eng. de Processos',
+  ia_digital_twin: 'IA/Digital Twin',
+  consultoria: 'Consultoria',
+  pesquisa: 'Pesquisa/R&D',
+  outro: 'Outro',
+};
+
+function areaLabel(item) {
+  if (item.area && AREA_OVERRIDE_LABELS[item.area]) return AREA_OVERRIDE_LABELS[item.area];
+  return AREA_LABELS[item._area];
+}
+
+// title_override / resumo_override (editados manualmente) têm prioridade
+// sobre o título/resumo original coletado pelo Intelligence Hub.
+function effectiveTitle(item) {
+  return item.title_override || item.title;
+}
+
+function effectiveResumo(item) {
+  return item.resumo_override || item.resumo;
+}
+
 // Datas chegam como string ISO/SQLite. Mostra só YYYY-MM-DD.
 function fmtDate(s) {
   if (!s) return '—';
@@ -90,6 +141,12 @@ function CountryBadge({ code }) {
   return <Badge className={c.color}>{c.code}</Badge>;
 }
 
+// Pré-calcula país e área (auto-detecção, já considerando overrides manuais)
+// uma vez por item. Reaproveitado ao carregar a lista e após salvar edições.
+function enrich(it) {
+  return { ...it, _country: detectCountry(it).code, _area: detectArea(it) };
+}
+
 export default function VagasPhDPage() {
   const user = useStore((s) => s.user);
   const isOwner = user?.role === 'owner';
@@ -110,6 +167,7 @@ export default function VagasPhDPage() {
   const [added, setAdded] = useState({}); // { [itemId]: 'saving' | 'done' }
   const [deleting, setDeleting] = useState(null);
   const [confirmItem, setConfirmItem] = useState(null);
+  const [editingItem, setEditingItem] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -120,13 +178,7 @@ export default function VagasPhDPage() {
       params.set('order_by', 'received_at');
       params.set('limit', '100');
       const res = await apiFetch(`/api/hub/items?${params.toString()}`);
-      // Pré-calcula país e área uma vez por item.
-      const enriched = (res.items || []).map((it) => ({
-        ...it,
-        _country: detectCountry(it).code,
-        _area: detectArea(it),
-      }));
-      setItems(enriched);
+      setItems((res.items || []).map(enrich));
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -223,6 +275,15 @@ export default function VagasPhDPage() {
     if (item) deleteItem(item);
   };
 
+  // ── Editar vaga ───────────────────────────────────────────────────────────
+  const handleSaved = (updated) => {
+    const merged = enrich(updated);
+    setItems((prev) => prev.map((it) => (it.id === updated.id ? merged : it)));
+    if (selected && selected.id === updated.id) setSelected(merged);
+    setEditingItem(null);
+    showToast('Alterações salvas');
+  };
+
   return (
     <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
       {/* Cabeçalho */}
@@ -268,7 +329,7 @@ export default function VagasPhDPage() {
           >
             <option value="todos">Todos</option>
             {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.code} — {c.label}</option>)}
-            <option value="Outros">Outros</option>
+            <option value="Outro">Outro</option>
           </select>
         </label>
         <label className="flex items-center gap-1.5 text-xs text-ink2">
@@ -318,6 +379,7 @@ export default function VagasPhDPage() {
                 onAdd={() => addToCareer(it)}
                 state={added[it.id]}
                 onDelete={isOwner ? () => setConfirmItem(it) : null}
+                onEdit={() => setEditingItem(it)}
                 deleting={deleting === it.id}
               />
             ))}
@@ -331,8 +393,15 @@ export default function VagasPhDPage() {
           onClose={() => setSelected(null)}
           onAdd={() => addToCareer(selected)}
           state={added[selected.id]}
+          onEdit={() => setEditingItem(selected)}
         />
       )}
+
+      <EditItemModal
+        item={editingItem}
+        onClose={() => setEditingItem(null)}
+        onSaved={handleSaved}
+      />
 
       <ConfirmModal
         open={!!confirmItem}
@@ -387,18 +456,33 @@ function AddButton({ state, onAdd, full = false }) {
   );
 }
 
-function VagaCard({ item, onOpen, onAdd, state, onDelete, deleting }) {
-  const resumo = (item.resumo || '').slice(0, 150);
-  const truncated = (item.resumo || '').length > 150;
+function VagaCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting }) {
+  const title = effectiveTitle(item);
+  const resumoFull = effectiveResumo(item);
+  const resumo = (resumoFull || '').slice(0, 150);
+  const truncated = (resumoFull || '').length > 150;
   return (
     <div
       onClick={onOpen}
       className="flex cursor-pointer flex-col gap-3 rounded-xl border border-line bg-surface p-4 transition hover:border-accent/50 hover:shadow-soft"
     >
       <div className="flex items-start justify-between gap-2">
-        <h3 className="font-semibold leading-snug text-ink">{item.title}</h3>
+        <h3 className="flex items-center gap-1.5 font-semibold leading-snug text-ink">
+          {title}
+          {item.edited_at && <Pencil className="h-3 w-3 shrink-0 text-muted" title="Editado manualmente" />}
+        </h3>
         <div className="flex shrink-0 items-center gap-1.5">
           <CountryBadge code={item._country} />
+          {onEdit && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onEdit(); }}
+              className="rounded-md p-1 text-ink2 transition hover:bg-surface2 hover:text-accent"
+              title="Editar vaga"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          )}
           {onDelete && (
             <button
               type="button"
@@ -418,7 +502,7 @@ function VagaCard({ item, onOpen, onAdd, state, onDelete, deleting }) {
           <span className="inline-flex items-center gap-1"><Building2 className="h-3.5 w-3.5" />{item.source_name}</span>
         )}
         <span className="inline-flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5" />{fmtDate(item.collected_at || item.received_at)}</span>
-        <Badge className="bg-accent/10 text-accent">{AREA_LABELS[item._area]}</Badge>
+        <Badge className="bg-accent/10 text-accent">{areaLabel(item)}</Badge>
       </div>
 
       {resumo && (
@@ -455,14 +539,31 @@ function Row({ label, children }) {
   );
 }
 
-function DetailModal({ item, onClose, onAdd, state }) {
+function DetailModal({ item, onClose, onAdd, state, onEdit }) {
   const topicos = Array.isArray(item.topicos) ? item.topicos : [];
+  const title = effectiveTitle(item);
+  const resumo = effectiveResumo(item);
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
       <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
-          <h2 className="text-base font-bold text-ink">{item.title}</h2>
-          <button onClick={onClose} className="shrink-0 rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <h2 className="flex items-center gap-1.5 text-base font-bold text-ink">
+            {title}
+            {item.edited_at && <Pencil className="h-3.5 w-3.5 shrink-0 text-muted" title="Editado manualmente" />}
+          </h2>
+          <div className="flex shrink-0 items-center gap-1">
+            {onEdit && (
+              <button
+                type="button"
+                onClick={onEdit}
+                className="rounded-md p-1.5 text-ink2 transition hover:bg-surface2 hover:text-accent"
+                title="Editar vaga"
+              >
+                <Pencil className="h-4 w-4" />
+              </button>
+            )}
+            <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          </div>
         </div>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
@@ -479,7 +580,7 @@ function DetailModal({ item, onClose, onAdd, state }) {
 
           <div className="flex flex-wrap items-center gap-2">
             <CountryBadge code={item._country} />
-            <Badge className="bg-accent/10 text-accent">{AREA_LABELS[item._area]}</Badge>
+            <Badge className="bg-accent/10 text-accent">{areaLabel(item)}</Badge>
             {item.relevancia != null && (
               <Badge className="bg-surface2 text-ink2">Relev.: {Number(item.relevancia).toFixed(1)}</Badge>
             )}
@@ -492,9 +593,15 @@ function DetailModal({ item, onClose, onAdd, state }) {
             </Row>
           )}
 
-          {item.resumo && (
+          {resumo && (
             <Row label="Resumo do LLM">
-              <p className="whitespace-pre-wrap leading-relaxed text-ink2">{item.resumo}</p>
+              <p className="whitespace-pre-wrap leading-relaxed text-ink2">{resumo}</p>
+            </Row>
+          )}
+
+          {item.user_notes && (
+            <Row label="Notas pessoais">
+              <p className="whitespace-pre-wrap leading-relaxed text-ink2">{item.user_notes}</p>
             </Row>
           )}
 

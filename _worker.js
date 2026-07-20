@@ -308,6 +308,7 @@ async function handleAPI(request, env, ctx) {
   // Hub — leitura protegida por sessão (owner / assistente fixo).
   // (POST /api/hub/items é tratado acima, antes do gate de sessão.)
   if (path === '/api/hub/items') return handleHubItems(request, env, user);
+  if (path.startsWith('/api/hub/items/')) return handleHubItemDelete(request, env, user, path.split('/')[4]);
   if (path === '/api/hub/stats') return handleHubStats(request, env, user);
 
   // Gmail (conta externa lcestech) — sincronização e leitura. Todos os usuários
@@ -9091,6 +9092,19 @@ async function handleHubItems(request, env, user) {
   } catch {
     return json({ items: [], total: 0 });
   }
+}
+
+// DELETE /api/hub/items/:id — remove um item. Sessão obrigatória; apenas owner.
+async function handleHubItemDelete(request, env, user, id) {
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  if (user.role !== 'owner') return json({ error: 'Apenas o owner pode remover itens' }, 403);
+  try {
+    await env.DB.prepare('DELETE FROM hub_items WHERE id = ?').bind(id).run();
+  } catch (e) {
+    return json({ error: 'Falha ao remover item', detail: String(e) }, 500);
+  }
+  return json({ deleted: true });
 }
 
 // GET /api/hub/stats — agregados por projeto. Sessão obrigatória.

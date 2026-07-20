@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Radar, RefreshCw, Search, ExternalLink, X, Tag, FileText, Loader2,
+  Radar, RefreshCw, Search, ExternalLink, X, Tag, FileText, Loader2, Trash2,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import { useStore } from '../../store';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ConfirmModal from '../shared/ConfirmModal';
 
 // Projetos monitorados pelo Hub. "todos" só existe como filtro.
 const PROJECTS = [
@@ -65,6 +67,9 @@ function fmtDate(s) {
 }
 
 export default function HubPage() {
+  const user = useStore((s) => s.user);
+  const isOwner = user?.role === 'owner';
+
   const [items, setItems] = useState([]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -76,6 +81,14 @@ export default function HubPage() {
   const [search, setSearch] = useState('');
 
   const [selected, setSelected] = useState(null);
+  const [toast, setToast] = useState('');
+  const [deleting, setDeleting] = useState(null);
+  const [confirmItem, setConfirmItem] = useState(null);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 4000);
+  };
 
   const load = async () => {
     setLoading(true);
@@ -115,6 +128,26 @@ export default function HubPage() {
         (it.resumo || '').toLowerCase().includes(q),
     );
   }, [items, search]);
+
+  const deleteItem = async (item) => {
+    setDeleting(item.id);
+    try {
+      await apiFetch(`/api/hub/items/${item.id}`, { method: 'DELETE' });
+      setItems((prev) => prev.filter((it) => it.id !== item.id));
+      if (selected && selected.id === item.id) setSelected(null);
+      showToast('Item removido');
+    } catch (e) {
+      showToast(`Falha ao remover: ${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  const confirmDelete = () => {
+    const item = confirmItem;
+    setConfirmItem(null);
+    if (item) deleteItem(item);
+  };
 
   return (
     <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
@@ -188,6 +221,7 @@ export default function HubPage() {
                 <th className="px-3 py-2 font-medium">Fonte</th>
                 <th className="px-3 py-2 font-medium">Projeto</th>
                 <th className="px-3 py-2 font-medium">Coleta</th>
+                {isOwner && <th className="px-3 py-2 font-medium" />}
               </tr>
             </thead>
             <tbody>
@@ -208,6 +242,21 @@ export default function HubPage() {
                     <Badge className="bg-accent/10 text-accent">{projectLabel(it.project_id)}</Badge>
                   </td>
                   <td className="px-3 py-2 text-muted">{fmtDate(it.collected_at || it.received_at)}</td>
+                  {isOwner && (
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmItem(it)}
+                        disabled={deleting === it.id}
+                        className="rounded-md p-1.5 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+                        title="Remover item"
+                      >
+                        {deleting === it.id
+                          ? <Loader2 className="h-4 w-4 animate-spin" />
+                          : <Trash2 className="h-4 w-4" />}
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -216,6 +265,22 @@ export default function HubPage() {
       </div>
 
       {selected && <DetailModal item={selected} onClose={() => setSelected(null)} />}
+
+      <ConfirmModal
+        open={!!confirmItem}
+        title="Remover item?"
+        message="Esta ação não pode ser desfeita."
+        confirmLabel="Remover"
+        danger
+        onConfirm={confirmDelete}
+        onCancel={() => setConfirmItem(null)}
+      />
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 rounded-lg bg-ink px-4 py-2.5 text-sm font-medium text-white shadow-soft">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }

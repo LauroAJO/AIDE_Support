@@ -54,7 +54,7 @@ const NAV_ITEMS = [
   { to: '/career',     label: 'Carreira',     icon: Briefcase,     fixed: true,           group: 'rede' },
   { to: '/events',     label: 'Eventos & Venues', shortLabel: 'Eventos', icon: CalendarDays, fixed: true,   group: 'rede' },
   { to: '/gmail',      label: 'LCEStech Email', shortLabel: 'Email', icon: Mail,          group: 'rede' },
-  { to: '/hub',        label: 'Scraping Hub', icon: Radar,         fixed: true,           group: 'ferramentas' },
+  { to: '/hub',        label: 'Hub',          icon: Radar,         fixed: true,           group: 'ferramentas' },
   { to: '/chat',       label: 'Chat',         icon: MessageSquare, feature: 'chat', badge: 'chatUnread', group: 'chat' },
 ];
 

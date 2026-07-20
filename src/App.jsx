@@ -28,7 +28,7 @@ import OrgDetailPage from './components/market/OrgDetailPage';
 import CareerPage from './components/career/CareerPage';
 import EventsPage from './components/events/EventsPage';
 import GmailPage from './components/gmail/GmailPage';
-import HubPage from './components/hub/HubPage';
+import HubContainer from './components/hub/HubContainer';
 import AdminPage from './components/admin/AdminPage';
 import BridgeCurationPage from './components/bridge/BridgeCurationPage';
 import PendingApprovalPage from './components/PendingApprovalPage';
@@ -254,7 +254,7 @@ export default function App() {
           <Route path="/events" element={<FixedRoute><EventsPage /></FixedRoute>} />
           {/* Gmail LCEStech — acessível a todos os usuários autenticados. */}
           <Route path="/gmail" element={<GmailPage />} />
-          <Route path="/hub" element={<FixedRoute><HubPage /></FixedRoute>} />
+          <Route path="/hub" element={<FixedRoute><HubContainer /></FixedRoute>} />
           <Route path="/admin" element={<OwnerRoute><AdminPage /></OwnerRoute>} />
           <Route path="/bridge/staging" element={<OwnerRoute><BridgeCurationPage /></OwnerRoute>} />
           <Route path="/settings" element={<SettingsPage />} />

@@ -8,21 +8,7 @@ import { useStore } from '../../store';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
 import EditItemModal from '../shared/EditItemModal';
-
-// País editado manualmente (via EditItemModal) — mesmos códigos/cores usados
-// em VagasPhDPage, para consistência visual entre as duas subabas do Hub.
-// EmpregoPage não faz inferência automática de país (só cidade); o badge só
-// aparece quando o campo `country` foi preenchido manualmente.
-const COUNTRY_META = {
-  NL: { label: 'Países Baixos', color: 'bg-orange-100 text-orange-700' },
-  DE: { label: 'Alemanha', color: 'bg-neutral-200 text-neutral-800' },
-  BE: { label: 'Bélgica', color: 'bg-yellow-100 text-yellow-800' },
-  DK: { label: 'Dinamarca', color: 'bg-red-100 text-red-700' },
-  SE: { label: 'Suécia', color: 'bg-sky-100 text-sky-700' },
-  CH: { label: 'Suíça', color: 'bg-rose-100 text-rose-700' },
-  UK: { label: 'Reino Unido', color: 'bg-indigo-100 text-indigo-700' },
-  Outro: { label: 'Outro', color: 'bg-surface2 text-ink2' },
-};
+import { countryMeta, detectCountry } from '../../lib/countryDetection';
 
 // project_id no hub_items que agrupa as vagas de emprego curadas.
 const HUB_PROJECT = 'emprego_vagas';
@@ -132,14 +118,20 @@ function CityBadge({ code }) {
 }
 
 function CountryBadge({ code }) {
-  const c = COUNTRY_META[code] || COUNTRY_META.Outro;
-  return <Badge className={c.color}>{code}</Badge>;
+  const c = countryMeta(code);
+  return <Badge className={c.color}>{c.code}</Badge>;
 }
 
-// Pré-calcula cidade e área (auto-detecção) uma vez por item. Reaproveitado
-// ao carregar a lista e após salvar edições.
+// Pré-calcula cidade, país e área (auto-detecção, já considerando overrides
+// manuais) uma vez por item. Reaproveitado ao carregar a lista e após salvar
+// edições.
 function enrich(it) {
-  return { ...it, _city: detectCity(it).code, _area: detectArea(it) };
+  return {
+    ...it,
+    _city: detectCity(it).code,
+    _country: detectCountry(it).code,
+    _area: detectArea(it),
+  };
 }
 
 export default function EmpregoPage() {
@@ -469,7 +461,7 @@ function EmpregoCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting })
           {item.edited_at && <Pencil className="h-3 w-3 shrink-0 text-muted" title="Editado manualmente" />}
         </h3>
         <div className="flex shrink-0 items-center gap-1.5">
-          {item.country && <CountryBadge code={item.country} />}
+          <CountryBadge code={item._country} />
           <CityBadge code={item._city} />
           {onEdit && (
             <button
@@ -588,7 +580,7 @@ function DetailModal({ item, onClose, onAdd, state, onDelete, onEdit, deleting }
           )}
 
           <div className="flex flex-wrap items-center gap-2">
-            {item.country && <CountryBadge code={item.country} />}
+            <CountryBadge code={item._country} />
             <CityBadge code={item._city} />
             <Badge className="bg-accent/10 text-accent">{areaLabel(item)}</Badge>
             {item.relevancia != null && (

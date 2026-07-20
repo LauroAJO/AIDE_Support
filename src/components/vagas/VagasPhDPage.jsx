@@ -8,65 +8,10 @@ import { useStore } from '../../store';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
 import EditItemModal from '../shared/EditItemModal';
+import { COUNTRIES, countryMeta, detectCountry } from '../../lib/countryDetection';
 
 // project_id no hub_items que agrupa as vagas de doutorado curadas.
 const HUB_PROJECT = 'phd_vagas';
-
-// ── Detecção de país ────────────────────────────────────────────────────────
-// Prioridade: 1) campo `country` gravado manualmente no banco (via
-// EditItemModal); 2) inferência por texto (título + resumo + tópicos).
-// 'Outro' é o fallback quando nenhuma pista é encontrada. Cada país tem um
-// conjunto de termos (PT/EN/nativo + cidades/universidades-alvo).
-const COUNTRIES = [
-  { code: 'NL', label: 'Países Baixos', color: 'bg-orange-100 text-orange-700',
-    terms: ['netherlands', 'holland', 'holanda', 'países baixos', 'paises baixos', 'dutch', 'nederland', 'delft', 'amsterdam', 'rotterdam', 'eindhoven', 'utrecht', 'groningen', 'twente', 'wageningen'] },
-  { code: 'DE', label: 'Alemanha', color: 'bg-neutral-200 text-neutral-800',
-    terms: ['germany', 'alemanha', 'deutschland', 'german', 'berlin', 'munich', 'münchen', 'munique', 'hamburg', 'heidelberg', 'karlsruhe', 'aachen', 'stuttgart', 'dresden', 'fraunhofer', 'jülich', 'juelich'] },
-  { code: 'BE', label: 'Bélgica', color: 'bg-yellow-100 text-yellow-800',
-    terms: ['belgium', 'belgië', 'belgique', 'bélgica', 'belgica', 'belgian', 'leuven', 'ghent', 'gent', 'brussels', 'bruxelles', 'bruxelas', 'antwerp', 'vito', 'imec'] },
-  { code: 'DK', label: 'Dinamarca', color: 'bg-red-100 text-red-700',
-    terms: ['denmark', 'danmark', 'dinamarca', 'danish', 'copenhagen', 'københavn', 'copenhague', 'aarhus', 'dtu', 'lyngby'] },
-  { code: 'SE', label: 'Suécia', color: 'bg-sky-100 text-sky-700',
-    terms: ['sweden', 'sverige', 'suécia', 'suecia', 'swedish', 'stockholm', 'estocolmo', 'gothenburg', 'göteborg', 'lund', 'chalmers', 'kth'] },
-  { code: 'CH', label: 'Suíça', color: 'bg-rose-100 text-rose-700',
-    terms: ['switzerland', 'schweiz', 'suisse', 'suíça', 'suica', 'swiss', 'zurich', 'zürich', 'geneva', 'genebra', 'lausanne', 'basel', 'eth', 'epfl', 'paul scherrer', 'empa'] },
-  { code: 'UK', label: 'Reino Unido', color: 'bg-indigo-100 text-indigo-700',
-    terms: ['united kingdom', 'reino unido', 'england', 'inglaterra', 'britain', 'british', 'scotland', 'escócia', 'london', 'londres', 'edinburgh', 'manchester', 'cambridge', 'oxford', 'bristol', 'imperial college'] },
-];
-const OTHER_COUNTRY = { code: 'Outro', label: 'Outro', color: 'bg-surface2 text-ink2' };
-
-// Fontes agregadoras que listam vagas de múltiplos países — o nome da fonte
-// nunca deve, sozinho, indicar o país da vaga (ex.: jobs.ac.uk hospeda vagas
-// fora do Reino Unido também).
-const GLOBAL_SOURCES = ['jobs.ac.uk'];
-
-function detectCountry(item) {
-  // 1) País definido manualmente (prioridade máxima).
-  if (item.country) return countryMeta(item.country);
-
-  // 2) Inferência por conteúdo (título + resumo + tópicos) — nunca pelo nome
-  //    da fonte quando ela é um agregador global (jobs.ac.uk etc.).
-  const content = `${item.title || ''} ${item.resumo || ''} ${(Array.isArray(item.topicos) ? item.topicos.join(' ') : '')}`.toLowerCase();
-  for (const c of COUNTRIES) {
-    if (c.terms.some((t) => content.includes(t))) return c;
-  }
-
-  // 3) Sem pista no conteúdo: como último recurso, tenta o nome da fonte —
-  //    exceto para agregadores globais.
-  const sourceName = (item.source_name || '').toLowerCase();
-  const isGlobalSource = GLOBAL_SOURCES.some((s) => sourceName.includes(s));
-  if (sourceName && !isGlobalSource) {
-    for (const c of COUNTRIES) {
-      if (c.terms.some((t) => sourceName.includes(t))) return c;
-    }
-  }
-
-  return OTHER_COUNTRY;
-}
-
-function countryMeta(code) {
-  return COUNTRIES.find((c) => c.code === code) || OTHER_COUNTRY;
-}
 
 // ── Detecção de área temática ───────────────────────────────────────────────
 const AREAS = [

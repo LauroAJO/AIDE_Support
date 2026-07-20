@@ -308,6 +308,8 @@ async function handleAPI(request, env, ctx) {
   // Hub — leitura protegida por sessão (owner / assistente fixo).
   // (POST /api/hub/items é tratado acima, antes do gate de sessão.)
   if (path === '/api/hub/items') return handleHubItems(request, env, user);
+  // /bulk antes do genérico /:id — senão "bulk" seria lido como um id.
+  if (path === '/api/hub/items/bulk' && method === 'DELETE') return handleHubItemsBulkDelete(request, env, user);
   if (path.startsWith('/api/hub/items/')) return handleHubItemById(request, env, user, path.split('/')[4]);
   if (path === '/api/hub/stats') return handleHubStats(request, env, user);
 
@@ -9066,6 +9068,10 @@ function shapeHubItem(row) {
 // GET /api/hub/items — lista paginada/filtrada. Sessão obrigatória.
 // Query: project, min_relevancia, limit (50), offset (0),
 //        order_by (received_at | relevancia, default received_at).
+// Sem ?project= (ou "todos"): aba Notícias — só h2/energia/ia. As vagas
+// (phd_vagas, emprego_vagas) só aparecem quando pedidas explicitamente por
+// ?project=, para não se misturarem com notícias. Itens com deleted_at
+// preenchido nunca são retornados.
 async function handleHubItems(request, env, user) {
   if (!isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
@@ -9077,11 +9083,16 @@ async function handleHubItems(request, env, user) {
   const offset = Math.max(parseInt(url.searchParams.get('offset'), 10) || 0, 0);
   const orderBy = url.searchParams.get('order_by') === 'relevancia' ? 'relevancia' : 'received_at';
 
-  const wh = [];
+  const wh = ['deleted_at IS NULL'];
   const args = [];
-  if (project && project !== 'todos') { wh.push('project_id = ?'); args.push(project); }
+  if (project && project !== 'todos') {
+    wh.push('project_id = ?');
+    args.push(project);
+  } else {
+    wh.push("project_id IN ('h2', 'energia', 'ia')");
+  }
   if (minRel != null && minRel !== '') { wh.push('relevancia >= ?'); args.push(Number(minRel)); }
-  const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+  const where = `WHERE ${wh.join(' AND ')}`;
 
   try {
     const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS n FROM hub_items ${where}`).bind(...args).first();
@@ -9111,6 +9122,27 @@ async function handleHubItemDelete(request, env, user, id) {
     return json({ error: 'Falha ao remover item', detail: String(e) }, 500);
   }
   return json({ deleted: true });
+}
+
+// DELETE /api/hub/items/bulk — remove (soft-delete) vários itens de uma vez.
+// Sessão obrigatória; apenas owner. Body: { ids: [1, 2, 3, ...] }.
+// Usado futuramente pela interface de deleção em lote.
+async function handleHubItemsBulkDelete(request, env, user) {
+  if (user.role !== 'owner') return json({ error: 'Apenas o owner pode remover itens' }, 403);
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.ids)
+    ? body.ids.map((n) => Number(n)).filter((n) => Number.isInteger(n))
+    : [];
+  if (ids.length === 0) return json({ error: 'ids deve ser um array não vazio' }, 400);
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    const res = await env.DB.prepare(
+      `UPDATE hub_items SET deleted_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders}) AND deleted_at IS NULL`
+    ).bind(...ids).run();
+    return json({ deleted: (res.meta && res.meta.changes) || 0 });
+  } catch (e) {
+    return json({ error: 'Falha ao remover itens', detail: String(e) }, 500);
+  }
 }
 
 // PATCH /api/hub/items/:id — edita campos manuais (country, area, user_notes,
@@ -9154,6 +9186,7 @@ async function handleHubStats(request, env, user) {
               AVG(relevancia) AS avg_relevancia,
               MAX(received_at) AS last_received
          FROM hub_items
+        WHERE deleted_at IS NULL
         GROUP BY project_id
         ORDER BY count DESC`
     ).all();

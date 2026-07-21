@@ -9038,7 +9038,18 @@ async function handleHubIngest(request, env) {
           (external_id, project_id, title, url, source_name, published_at,
            relevancia, prioridade, tipo, resumo, topicos, justificativa, collected_at, country)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(external_id, project_id) DO NOTHING`
+         ON CONFLICT(external_id, project_id) DO UPDATE SET
+           relevancia = excluded.relevancia,
+           prioridade = excluded.prioridade,
+           tipo = excluded.tipo,
+           resumo = excluded.resumo,
+           topicos = excluded.topicos,
+           justificativa = excluded.justificativa,
+           country = CASE
+             WHEN hub_items.country IS NULL THEN excluded.country
+             ELSE hub_items.country
+           END
+         WHERE hub_items.deleted_at IS NULL`
       ).bind(
         String(item.external_id),
         String(item.project_id),

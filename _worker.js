@@ -9127,16 +9127,24 @@ async function handleHubItemById(request, env, user, id) {
   return json({ error: 'Método não permitido' }, 405);
 }
 
-// DELETE /api/hub/items/:id — remove um item. Sessão obrigatória; apenas owner.
+// DELETE /api/hub/items/:id — remove (soft-delete) um item. Sessão obrigatória;
+// apenas owner. deleted_at é preservado permanentemente para impedir que uma
+// futura ingestão com o mesmo external_id/project_id reative o item
+// (ver ON CONFLICT ... WHERE hub_items.deleted_at IS NULL em handleHubIngest).
 async function handleHubItemDelete(request, env, user, id) {
   if (!id) return json({ error: 'ID ausente' }, 400);
   if (user.role !== 'owner') return json({ error: 'Apenas o owner pode remover itens' }, 403);
   try {
-    await env.DB.prepare('DELETE FROM hub_items WHERE id = ?').bind(id).run();
+    await env.DB.prepare(
+      `UPDATE hub_items
+       SET deleted_at = CURRENT_TIMESTAMP
+       WHERE id = ?
+       AND deleted_at IS NULL`
+    ).bind(id).run();
   } catch (e) {
     return json({ error: 'Falha ao remover item', detail: String(e) }, 500);
   }
-  return json({ deleted: true });
+  return json({ deleted: true, soft: true });
 }
 
 // DELETE /api/hub/items/bulk — remove (soft-delete) vários itens de uma vez.

@@ -21,6 +21,43 @@ const TRACK_FILTERS = [
   { key: 'spinoff', label: 'Spin-off' },
 ];
 
+// Ordenação por coluna — aplicada localmente sobre os cards já carregados.
+const SORT_OPTIONS = [
+  { key: 'recent', label: 'Mais recente' },
+  { key: 'oldest', label: 'Mais antigo' },
+  { key: 'az', label: 'A-Z' },
+  { key: 'za', label: 'Z-A' },
+  { key: 'type', label: 'Tipo' },
+];
+
+function trackRank(track) {
+  if (track === 'phd') return 0;
+  if (track === 'job') return 1;
+  return 2;
+}
+
+function sortOpps(list, sortKey) {
+  const arr = [...list];
+  switch (sortKey) {
+    case 'oldest':
+      arr.sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
+      break;
+    case 'az':
+      arr.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'pt-BR'));
+      break;
+    case 'za':
+      arr.sort((a, b) => (b.title || '').localeCompare(a.title || '', 'pt-BR'));
+      break;
+    case 'type':
+      arr.sort((a, b) => trackRank(a.track) - trackRank(b.track));
+      break;
+    case 'recent':
+    default:
+      arr.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  }
+  return arr;
+}
+
 const EMPTY_OPP = {
   title: '', type: 'job', track: 'job', organization_id: '', contact_id: '', description: '',
   requirements: '', location: '', salary_range: '', deadline: '', status: 'to_organize',
@@ -39,7 +76,8 @@ export default function OpportunityPipeline() {
 
   const [loading, setLoading] = useState(true);
   const [trackFilter, setTrackFilter] = useState('all');
-  const [onlyExtract, setOnlyExtract] = useState(false);
+  const [ecExpanded, setEcExpanded] = useState({}); // colKey -> bool
+  const [sortBy, setSortBy] = useState({});          // colKey -> chave de SORT_OPTIONS
   const [orgs, setOrgs] = useState([]);
   const [people, setPeople] = useState([]);
   const [usersById, setUsersById] = useState({});
@@ -77,18 +115,24 @@ export default function OpportunityPipeline() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const filtered = useMemo(() => {
-    let list = trackFilter === 'all' ? opps : opps.filter((o) => o.track === trackFilter);
-    if (onlyExtract) list = list.filter((o) => !!o.extract_knowledge);
-    return list;
-  }, [opps, trackFilter, onlyExtract]);
+  const filtered = useMemo(
+    () => (trackFilter === 'all' ? opps : opps.filter((o) => o.track === trackFilter)),
+    [opps, trackFilter],
+  );
 
+  // Por coluna: cards visíveis (sem EC) + cards com Extrair Conhecimento
+  // ocultos por padrão — ambos os grupos ordenados pela mesma chave da coluna.
   const byColumn = useMemo(() => {
     const map = {};
-    PIPELINE_COLUMNS.forEach((c) => { map[c.key] = []; });
-    filtered.forEach((o) => { map[columnKeyForStatus(o.status)].push(o); });
+    PIPELINE_COLUMNS.forEach((c) => {
+      const items = filtered.filter((o) => columnKeyForStatus(o.status) === c.key);
+      const sortKey = sortBy[c.key] || 'recent';
+      const visible = sortOpps(items.filter((o) => !o.extract_knowledge), sortKey);
+      const ecHidden = sortOpps(items.filter((o) => !!o.extract_knowledge), sortKey);
+      map[c.key] = { visible, ecHidden, total: items.length };
+    });
     return map;
-  }, [filtered]);
+  }, [filtered, sortBy]);
 
   // Move um card para o status alvo da coluna (otimista + PUT).
   const moveTo = async (id, newStatus) => {
@@ -178,15 +222,6 @@ export default function OpportunityPipeline() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setOnlyExtract((v) => !v)}
-            className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
-              onlyExtract ? 'bg-violet-600 text-white' : 'border border-line bg-surface text-ink2 hover:bg-surface2'
-            }`}
-          >
-            📚 Mostrar apenas Extrair Conhecimento
-          </button>
-          <button
-            type="button"
             onClick={() => setEditor({ mode: 'create', form: { ...EMPTY_OPP, track: trackFilter === 'all' ? 'job' : trackFilter } })}
             className="flex items-center gap-1 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:opacity-90"
           >
@@ -199,8 +234,23 @@ export default function OpportunityPipeline() {
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto pb-2">
         {PIPELINE_COLUMNS.map((col) => {
           const header = trackColor(trackFilter);
-          const items = byColumn[col.key] || [];
+          const { visible, ecHidden, total } = byColumn[col.key] || { visible: [], ecHidden: [], total: 0 };
           const over = dragOverCol === col.key;
+          const expanded = !!ecExpanded[col.key];
+          const sortKey = sortBy[col.key] || 'recent';
+          const cardProps = (o) => ({
+            key: o.id,
+            opp: o,
+            assignee: usersById[o.assigned_to],
+            dragging: draggingId === o.id,
+            onDragStart: () => setDraggingId(o.id),
+            onDragEnd: () => setDraggingId(null),
+            onClick: () => setModalId(o.id),
+            onToggleExtract: () => toggleExtract(o.id),
+            onDelete: () => setConfirmItem(o),
+            onMove: (status) => moveTo(o.id, status),
+            deleting: deleting === o.id,
+          });
           return (
             <div
               key={col.key}
@@ -211,26 +261,45 @@ export default function OpportunityPipeline() {
                 over ? 'border-2 border-accent' : 'border-line'
               }`}
             >
-              <div className={`flex items-center justify-between rounded-t-xl px-3 py-2 text-sm font-semibold ${header.header}`}>
-                <span>{col.label}</span>
-                <span className="rounded-full bg-white/60 px-1.5 text-xs font-medium">{items.length}</span>
+              <div className={`flex items-center justify-between gap-1.5 rounded-t-xl px-3 py-2 text-sm font-semibold ${header.header}`}>
+                <span className="truncate">{col.label}</span>
+                <div className="flex shrink-0 items-center gap-1">
+                  <span className="rounded-full bg-white/60 px-1.5 text-xs font-medium">{total}</span>
+                  <select
+                    value={sortKey}
+                    onChange={(e) => setSortBy((s) => ({ ...s, [col.key]: e.target.value }))}
+                    title="Ordenar coluna"
+                    className="rounded border-none bg-white/60 px-1 py-0.5 text-[10px] font-normal text-ink2 focus:outline-none"
+                  >
+                    {SORT_OPTIONS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+                  </select>
+                </div>
               </div>
               <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
-                {items.length === 0 && <p className="px-1 py-4 text-center text-xs text-muted">Vazio</p>}
-                {items.map((o) => (
-                  <OpportunityCard
-                    key={o.id}
-                    opp={o}
-                    assignee={usersById[o.assigned_to]}
-                    dragging={draggingId === o.id}
-                    onDragStart={() => setDraggingId(o.id)}
-                    onDragEnd={() => setDraggingId(null)}
-                    onClick={() => setModalId(o.id)}
-                    onToggleExtract={() => toggleExtract(o.id)}
-                    onDelete={() => setConfirmItem(o)}
-                    deleting={deleting === o.id}
-                  />
-                ))}
+                {total === 0 && <p className="px-1 py-4 text-center text-xs text-muted">Vazio</p>}
+                {visible.map((o) => <OpportunityCard {...cardProps(o)} />)}
+
+                {ecHidden.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setEcExpanded((m) => ({ ...m, [col.key]: !m[col.key] }))}
+                      className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-line px-2 py-1.5 text-[11px] font-medium text-ink2 transition hover:bg-surface2"
+                    >
+                      📚 {ecHidden.length} em Extrair Conhecimento {expanded ? '▲' : '▼'}
+                    </button>
+                    {expanded && (
+                      <>
+                        <div className="flex items-center gap-2 py-0.5">
+                          <div className="h-px flex-1 bg-line" />
+                          <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Extrair Conhecimento</span>
+                          <div className="h-px flex-1 bg-line" />
+                        </div>
+                        {ecHidden.map((o) => <OpportunityCard {...cardProps(o)} />)}
+                      </>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           );
@@ -278,10 +347,11 @@ export default function OpportunityPipeline() {
   );
 }
 
-function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onDelete, deleting }) {
+function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onDelete, onMove, deleting }) {
   const c = trackColor(opp.track);
   const days = daysUntil(opp.deadline);
   const extracting = !!opp.extract_knowledge;
+  const currentCol = columnKeyForStatus(opp.status);
   return (
     <div
       draggable="true"
@@ -343,6 +413,18 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
       >
         📚 Extrair Conhecimento
       </button>
+      <select
+        value=""
+        onChange={(e) => { if (e.target.value) onMove(e.target.value); }}
+        onClick={(e) => e.stopPropagation()}
+        title="Mover para outra coluna"
+        className="mt-1.5 w-full rounded-md border border-line bg-surface px-2 py-1 text-[11px] text-ink2 transition hover:bg-surface2 focus:outline-none"
+      >
+        <option value="">Mover para →</option>
+        {PIPELINE_COLUMNS.filter((c2) => c2.key !== currentCol).map((c2) => (
+          <option key={c2.key} value={c2.dropStatus}>{c2.label}</option>
+        ))}
+      </select>
     </div>
   );
 }

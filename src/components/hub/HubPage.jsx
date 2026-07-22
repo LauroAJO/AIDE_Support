@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Radar, RefreshCw, Search, ExternalLink, X, Tag, FileText, Loader2, Trash2,
+  Radar, Search, ExternalLink, X, Tag, FileText, Loader2, Trash2,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
@@ -66,7 +66,13 @@ function fmtDate(s) {
   return Number.isNaN(t) ? '—' : new Date(t).toISOString().slice(0, 10);
 }
 
-export default function HubPage() {
+// project/onProjectChange são controlados pelo HubContainer (o dashboard
+// geral precisa poder pré-selecionar um projeto ao navegar de um card do
+// overview) — os defaults abaixo só existem para uso isolado/testes.
+// refreshToken: incrementado pelo botão "Atualizar" global no HubContainer.
+export default function HubPage({
+  project = 'todos', onProjectChange = () => {}, refreshToken = 0,
+}) {
   const user = useStore((s) => s.user);
   const isOwner = user?.role === 'owner';
 
@@ -76,7 +82,6 @@ export default function HubPage() {
   const [error, setError] = useState('');
 
   // Filtros
-  const [project, setProject] = useState('todos');
   const [minRel, setMinRel] = useState('');
   const [search, setSearch] = useState('');
 
@@ -99,9 +104,17 @@ export default function HubPage() {
       if (minRel) params.set('min_relevancia', minRel);
       params.set('order_by', 'received_at');
       params.set('limit', '200');
+
+      // Stats do card por projeto: com um projeto selecionado, pede só o dele;
+      // em "todos" restringe ao servidor a h2/energia/ia (?only=noticias) —
+      // nunca inclui phd_vagas/emprego_vagas aqui.
+      const statsParams = new URLSearchParams();
+      if (project && project !== 'todos') statsParams.set('project_id', project);
+      else statsParams.set('only', 'noticias');
+
       const [itemsRes, statsRes] = await Promise.all([
         apiFetch(`/api/hub/items?${params.toString()}`),
-        apiFetch('/api/hub/stats').catch(() => null),
+        apiFetch(`/api/hub/stats?${statsParams.toString()}`).catch(() => null),
       ]);
       setItems(itemsRes.items || []);
       setStats(statsRes);
@@ -112,11 +125,12 @@ export default function HubPage() {
     }
   };
 
-  // Recarrega ao mudar projeto ou relevância mínima (a busca por texto é local).
+  // Recarrega ao mudar projeto, relevância mínima ou pedido de atualização
+  // global (a busca por texto é local).
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, minRel]);
+  }, [project, minRel, refreshToken]);
 
   // Busca textual filtra título e resumo no cliente.
   const filtered = useMemo(() => {
@@ -157,16 +171,9 @@ export default function HubPage() {
           <Radar className="h-6 w-6 text-accent" />
           Scraping Hub
         </h1>
-        <button
-          type="button"
-          onClick={load}
-          className="flex items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
-        >
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Atualizar
-        </button>
       </div>
 
-      {/* Cards de estatísticas por projeto */}
+      {/* Cards de estatísticas por projeto (h2/energia/ia, ou só o selecionado) */}
       <StatsCards stats={stats} />
 
       {/* Barra de filtros */}
@@ -175,7 +182,7 @@ export default function HubPage() {
           Projeto
           <select
             value={project}
-            onChange={(e) => setProject(e.target.value)}
+            onChange={(e) => onProjectChange(e.target.value)}
             className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
           >
             {PROJECTS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}

@@ -9283,8 +9283,28 @@ async function handleHubItemPatch(request, env, user, id) {
 }
 
 // GET /api/hub/stats — agregados por projeto. Sessão obrigatória.
+// Query: project_id (opcional — filtra um único projeto),
+//        only=noticias (opcional — restringe a h2/energia/ia, mesma regra de
+//        handleHubItems sem ?project=). Ignorado se project_id for passado.
+// Sempre exclui deleted_at e archived_at (consistente com handleHubItems —
+// antes só filtrava deleted_at, então itens arquivados inflavam os totais).
 async function handleHubStats(request, env, user) {
   if (!isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
+
+  const url = new URL(request.url);
+  const projectId = url.searchParams.get('project_id');
+  const only = url.searchParams.get('only');
+
+  const wh = ['deleted_at IS NULL', 'archived_at IS NULL'];
+  const args = [];
+  if (projectId) {
+    wh.push('project_id = ?');
+    args.push(projectId);
+  } else if (only === 'noticias') {
+    wh.push("project_id IN ('h2', 'energia', 'ia')");
+  }
+  const where = `WHERE ${wh.join(' AND ')}`;
+
   try {
     const { results } = await env.DB.prepare(
       `SELECT project_id,
@@ -9292,10 +9312,10 @@ async function handleHubStats(request, env, user) {
               AVG(relevancia) AS avg_relevancia,
               MAX(received_at) AS last_received
          FROM hub_items
-        WHERE deleted_at IS NULL
+        ${where}
         GROUP BY project_id
         ORDER BY count DESC`
-    ).all();
+    ).bind(...args).all();
     const byProject = (results || []).map((r) => ({
       project_id: r.project_id,
       count: r.count || 0,

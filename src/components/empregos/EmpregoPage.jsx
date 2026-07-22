@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Briefcase, RefreshCw, Search, ExternalLink, X, Tag, FileText,
+  Briefcase, Search, ExternalLink, X, Tag, FileText,
   Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2, Pencil,
   ArrowRightLeft, Trash,
 } from 'lucide-react';
@@ -135,13 +135,18 @@ function enrich(it) {
   };
 }
 
-export default function EmpregoPage() {
+// refreshToken: incrementado pelo botão "Atualizar" global no HubContainer.
+export default function EmpregoPage({ refreshToken = 0 }) {
   const user = useStore((s) => s.user);
   const isOwner = user?.role === 'owner';
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Total real no banco (project_id = emprego_vagas), via /api/hub/stats —
+  // items é limitado pelo `limit` da query, então items.length NÃO é
+  // confiável como total.
+  const [dbTotal, setDbTotal] = useState(null);
 
   // Filtros (todos aplicados no cliente).
   const [search, setSearch] = useState('');
@@ -169,8 +174,14 @@ export default function EmpregoPage() {
       params.set('project', HUB_PROJECT);
       params.set('order_by', 'received_at');
       params.set('limit', '200');
-      const res = await apiFetch(`/api/hub/items?${params.toString()}`);
-      setItems((res.items || []).map(enrich));
+      const [itemsRes, statsRes] = await Promise.all([
+        apiFetch(`/api/hub/items?${params.toString()}`),
+        apiFetch(`/api/hub/stats?project_id=${HUB_PROJECT}`).catch(() => null),
+      ]);
+      setItems((itemsRes.items || []).map(enrich));
+      const projStats = statsRes && Array.isArray(statsRes.by_project)
+        ? statsRes.by_project[0] : null;
+      setDbTotal(projStats ? projStats.count : 0);
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -181,7 +192,7 @@ export default function EmpregoPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshToken]);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -189,13 +200,16 @@ export default function EmpregoPage() {
   };
 
   // ── Estatísticas ──────────────────────────────────────────────────────────
+  // "carregados"/"novasHoje"/"empresas" vêm dos items já buscados (limitados
+  // pelo `limit` da query); dbTotal (state, acima) é o total REAL do banco,
+  // via /api/hub/stats.
   const stats = useMemo(() => {
     const today = todayISO();
     const novasHoje = items.filter(
       (it) => fmtDate(it.collected_at || it.received_at) === today,
     ).length;
     const empresas = new Set(items.map((it) => it.source_name).filter(Boolean));
-    return { total: items.length, novasHoje, empresas: empresas.size };
+    return { carregados: items.length, novasHoje, empresas: empresas.size };
   }, [items]);
 
   // ── Lista filtrada + ordenada ─────────────────────────────────────────────
@@ -354,18 +368,12 @@ export default function EmpregoPage() {
           <Briefcase className="h-6 w-6 text-accent" />
           Empregos
         </h1>
-        <button
-          type="button"
-          onClick={load}
-          className="flex items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
-        >
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Atualizar
-        </button>
       </div>
 
       {/* Cards de estatísticas */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <StatCard label="Vagas recebidas" value={stats.total} />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <StatCard label="Total no banco" value={dbTotal != null ? dbTotal : '—'} />
+        <StatCard label="Carregados" value={stats.carregados} />
         <StatCard label="Novas hoje" value={stats.novasHoje} accent />
         <StatCard label="Empresas únicas" value={stats.empresas} />
       </div>

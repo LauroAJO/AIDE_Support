@@ -92,7 +92,7 @@ export default function DashboardPage() {
     .sort((a, b) => a.due_date.localeCompare(b.due_date));
 
   // --- Status da Busca (Etapa 6) ---
-  const activeOpps = careerOpps.filter((o) => !['rejected', 'closed'].includes(o.status));
+  const activeOpps = careerOpps.filter((o) => o.status !== 'dead');
   // Totais por trilha e por status.
   const trackCounts = { phd: 0, job: 0, spinoff: 0 };
   const statusCounts = {};
@@ -102,7 +102,7 @@ export default function DashboardPage() {
   });
   // 3 deadlines mais urgentes (inclui vencidas), ignorando encerradas.
   const nextDeadlines = careerOpps
-    .filter((o) => o.deadline && !['rejected', 'closed'].includes(o.status))
+    .filter((o) => o.deadline && o.status !== 'dead')
     .sort((a, b) => a.deadline.localeCompare(b.deadline))
     .slice(0, 3);
   // Contatos a fazer esta semana: next_action_date preenchido e <= +7 dias.

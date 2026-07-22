@@ -305,7 +305,7 @@ function OrgDetail({ org, onEdit, onAddContact }) {
   const tags = parseTags(org.tags);
   const projects = org.projects || [];
   const contacts = org.contacts || [];
-  const opportunities = (org.opportunities || []).filter((o) => o.status && !['closed', 'rejected'].includes(o.status));
+  const opportunities = (org.opportunities || []).filter((o) => o.status && o.status !== 'dead');
 
   return (
     <div className="space-y-5">

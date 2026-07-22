@@ -26,9 +26,8 @@ const OPP_TYPE_LABELS = {
   collaboration: 'Colaboração', spinoff_support: 'Spin-off', contract: 'Contrato',
 };
 const OPP_STATUS_LABELS = {
-  identified: 'Identificada', researching: 'Pesquisando', preparing: 'Preparando',
-  applied: 'Aplicada', interviewing: 'Entrevista', offer: 'Oferta',
-  rejected: 'Rejeitada', closed: 'Encerrada',
+  to_organize: 'Identificadas a Organizar', preparing: 'Preparando',
+  applied: 'Aplicada', in_process: 'Em Processo', dead: 'Vagas Mortas',
 };
 const TRACK_STYLE = {
   phd: 'bg-indigo-100 text-indigo-700',
@@ -912,7 +911,7 @@ function NoteEditor({ note, onSaved, onDeleted }) {
 // Aba: Oportunidades
 // ---------------------------------------------------------------------------
 function OpportunitiesTab({ org, navigate }) {
-  const opps = (org.opportunities || []).filter((o) => o.status && !['closed', 'rejected'].includes(o.status));
+  const opps = (org.opportunities || []).filter((o) => o.status && o.status !== 'dead');
 
   return (
     <div className="space-y-3">

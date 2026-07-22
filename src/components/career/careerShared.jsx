@@ -44,32 +44,26 @@ export function OppTypeBadge({ type }) {
   return <Badge className="bg-accent/10 text-accent">{OPP_TYPE_LABELS[type] || type || '—'}</Badge>;
 }
 
-// --- Pipeline: 6 colunas. Cada coluna agrupa um ou mais status do banco.
+// --- Pipeline: 5 colunas, uma por status do banco.
 // dropStatus = status gravado quando um card é solto na coluna.
 export const PIPELINE_COLUMNS = [
-  { key: 'identified',  label: 'Identificada',       statuses: ['identified'],             dropStatus: 'identified' },
-  { key: 'researching', label: 'Pesquisando',        statuses: ['researching'],            dropStatus: 'researching' },
-  { key: 'preparing',   label: 'Preparando',         statuses: ['preparing'],              dropStatus: 'preparing' },
-  { key: 'applied',     label: 'Aplicada',           statuses: ['applied'],                dropStatus: 'applied' },
-  { key: 'process',     label: 'Em Processo',        statuses: ['interviewing', 'offer'],  dropStatus: 'interviewing' },
-  { key: 'closed',      label: 'Fechada/Rejeitada',  statuses: ['rejected', 'closed'],     dropStatus: 'closed' },
+  { key: 'to_organize', label: 'Identificadas a Organizar', statuses: ['to_organize'], dropStatus: 'to_organize' },
+  { key: 'preparing',   label: 'Preparando',                statuses: ['preparing'],   dropStatus: 'preparing' },
+  { key: 'applied',     label: 'Aplicada',                  statuses: ['applied'],     dropStatus: 'applied' },
+  { key: 'in_process',  label: 'Em Processo',               statuses: ['in_process'],  dropStatus: 'in_process' },
+  { key: 'dead',        label: 'Vagas Mortas',              statuses: ['dead'],        dropStatus: 'dead' },
 ];
 
 // Todos os status do banco, para selects de status no modal/editor.
 export const OPP_STATUS_LABELS = {
-  identified: 'Identificada',
-  researching: 'Pesquisando',
+  to_organize: 'Identificadas a Organizar',
   preparing: 'Preparando',
   applied: 'Aplicada',
-  interviewing: 'Em entrevista',
-  offer: 'Proposta',
-  rejected: 'Rejeitada',
-  closed: 'Fechada',
+  in_process: 'Em Processo',
+  dead: 'Vagas Mortas',
 };
 
-export const OPP_STATUS_ORDER = [
-  'identified', 'researching', 'preparing', 'applied', 'interviewing', 'offer', 'rejected', 'closed',
-];
+export const OPP_STATUS_ORDER = ['to_organize', 'preparing', 'applied', 'in_process', 'dead'];
 
 // --- Documentos --------------------------------------------------------------
 export const DOC_TYPE_LABELS = {

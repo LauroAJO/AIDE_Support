@@ -22,14 +22,14 @@ const TRACK_FILTERS = [
 
 const EMPTY_OPP = {
   title: '', type: 'job', track: 'job', organization_id: '', contact_id: '', description: '',
-  requirements: '', location: '', salary_range: '', deadline: '', status: 'identified',
+  requirements: '', location: '', salary_range: '', deadline: '', status: 'to_organize',
   priority: 3, fit_score: 3, url: '', notes: '', tags: [], assigned_to: '',
 };
 
 // Em qual coluna do pipeline um status cai.
 function columnKeyForStatus(status) {
   const col = PIPELINE_COLUMNS.find((c) => c.statuses.includes(status));
-  return col ? col.key : 'identified';
+  return col ? col.key : 'to_organize';
 }
 
 export default function OpportunityPipeline() {
@@ -38,6 +38,7 @@ export default function OpportunityPipeline() {
 
   const [loading, setLoading] = useState(true);
   const [trackFilter, setTrackFilter] = useState('all');
+  const [onlyExtract, setOnlyExtract] = useState(false);
   const [orgs, setOrgs] = useState([]);
   const [people, setPeople] = useState([]);
   const [usersById, setUsersById] = useState({});
@@ -67,10 +68,11 @@ export default function OpportunityPipeline() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const filtered = useMemo(
-    () => (trackFilter === 'all' ? opps : opps.filter((o) => o.track === trackFilter)),
-    [opps, trackFilter],
-  );
+  const filtered = useMemo(() => {
+    let list = trackFilter === 'all' ? opps : opps.filter((o) => o.track === trackFilter);
+    if (onlyExtract) list = list.filter((o) => !!o.extract_knowledge);
+    return list;
+  }, [opps, trackFilter, onlyExtract]);
 
   const byColumn = useMemo(() => {
     const map = {};
@@ -86,6 +88,19 @@ export default function OpportunityPipeline() {
     setOpps(opps.map((o) => (o.id === id ? { ...o, status: newStatus } : o)));
     try {
       await apiFetch(`/api/career/opportunities/${id}`, { method: 'PUT', body: JSON.stringify({ status: newStatus }) });
+    } catch {
+      load(); // reverte recarregando se falhar
+    }
+  };
+
+  // Liga/desliga o toggle "Extrair Conhecimento" de um card (otimista + PATCH).
+  const toggleExtract = async (id) => {
+    const opp = opps.find((o) => o.id === id);
+    if (!opp) return;
+    const next = opp.extract_knowledge ? 0 : 1;
+    setOpps(opps.map((o) => (o.id === id ? { ...o, extract_knowledge: next } : o)));
+    try {
+      await apiFetch(`/api/career/opportunities/${id}`, { method: 'PATCH', body: JSON.stringify({ extract_knowledge: next }) });
     } catch {
       load(); // reverte recarregando se falhar
     }
@@ -131,13 +146,24 @@ export default function OpportunityPipeline() {
             );
           })}
         </div>
-        <button
-          type="button"
-          onClick={() => setEditor({ mode: 'create', form: { ...EMPTY_OPP, track: trackFilter === 'all' ? 'job' : trackFilter } })}
-          className="flex items-center gap-1 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:opacity-90"
-        >
-          <Plus className="h-4 w-4" /> Nova Oportunidade
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setOnlyExtract((v) => !v)}
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
+              onlyExtract ? 'bg-violet-600 text-white' : 'border border-line bg-surface text-ink2 hover:bg-surface2'
+            }`}
+          >
+            📚 Mostrar apenas Extrair Conhecimento
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditor({ mode: 'create', form: { ...EMPTY_OPP, track: trackFilter === 'all' ? 'job' : trackFilter } })}
+            className="flex items-center gap-1 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:opacity-90"
+          >
+            <Plus className="h-4 w-4" /> Nova Oportunidade
+          </button>
+        </div>
       </div>
 
       {/* Kanban */}
@@ -171,6 +197,7 @@ export default function OpportunityPipeline() {
                     onDragStart={() => setDraggingId(o.id)}
                     onDragEnd={() => setDraggingId(null)}
                     onClick={() => setModalId(o.id)}
+                    onToggleExtract={() => toggleExtract(o.id)}
                   />
                 ))}
               </div>
@@ -204,18 +231,29 @@ export default function OpportunityPipeline() {
   );
 }
 
-function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick }) {
+function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract }) {
   const c = trackColor(opp.track);
   const days = daysUntil(opp.deadline);
+  const extracting = !!opp.extract_knowledge;
   return (
     <div
       draggable="true"
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onClick}
-      style={{ borderLeft: `4px solid ${c.hex}`, opacity: dragging ? 0.5 : 1 }}
-      className="cursor-pointer rounded-lg border border-line bg-surface p-2.5 shadow-sm transition hover:border-accent"
+      style={{
+        borderLeft: `4px solid ${extracting ? '#8B5CF6' : c.hex}`,
+        opacity: dragging ? 0.5 : (extracting ? 0.6 : 1),
+      }}
+      className={`relative cursor-pointer rounded-lg border border-line p-2.5 shadow-sm transition hover:border-accent ${
+        extracting ? 'bg-surface2' : 'bg-surface'
+      }`}
     >
+      {extracting && (
+        <span className="absolute -right-1.5 -top-1.5 rounded-full bg-violet-600 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm">
+          📚 Extraindo
+        </span>
+      )}
       <div className="flex items-start justify-between gap-2">
         <span className="text-sm font-semibold text-ink">{opp.title}</span>
         <span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${priorityDot(opp.priority)}`} title={`Prioridade ${PRIORITY_LABELS[opp.priority] || opp.priority}`} />
@@ -238,6 +276,15 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
         <StarRating value={opp.fit_score} size={12} />
         {assignee && <Avatar user={{ name: assignee.name, avatar: assignee.avatar }} size={20} />}
       </div>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onToggleExtract(); }}
+        className={`mt-1.5 flex w-full items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
+          extracting ? 'bg-violet-600 text-white hover:opacity-90' : 'border border-line text-ink2 hover:bg-surface2'
+        }`}
+      >
+        📚 Extrair Conhecimento
+      </button>
     </div>
   );
 }

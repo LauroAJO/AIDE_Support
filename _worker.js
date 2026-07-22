@@ -308,10 +308,16 @@ async function handleAPI(request, env, ctx) {
   // Hub — leitura protegida por sessão (owner / assistente fixo).
   // (POST /api/hub/items é tratado acima, antes do gate de sessão.)
   if (path === '/api/hub/items') return handleHubItems(request, env, user);
-  // /bulk antes do genérico /:id — senão "bulk" seria lido como um id.
+  // /bulk e /bulk/project antes do genérico /:id — senão "bulk" seria lido como um id.
   if (path === '/api/hub/items/bulk' && method === 'DELETE') return handleHubItemsBulkDelete(request, env, user);
+  if (path === '/api/hub/items/bulk/project' && method === 'PATCH') return handleHubItemsBulkProject(request, env, user);
+  // /:id/archive antes do genérico /:id.
+  if (path.match(/^\/api\/hub\/items\/[^/]+\/archive$/) && method === 'PATCH') {
+    return handleHubItemArchive(request, env, user, path.split('/')[4]);
+  }
   if (path.startsWith('/api/hub/items/')) return handleHubItemById(request, env, user, path.split('/')[4]);
   if (path === '/api/hub/stats') return handleHubStats(request, env, user);
+  if (path === '/api/hub/excluded-ids') return handleHubExcludedIds(request, env, user);
 
   // Gmail (conta externa lcestech) — sincronização e leitura. Todos os usuários
   // autenticados podem sincronizar/ler; só o owner conecta a conta (rota pública
@@ -7274,9 +7280,8 @@ async function handleCareerOpportunities(request, env, user) {
            LEFT JOIN network_people c ON c.id = o.contact_id
            ${where}
           ORDER BY CASE o.status
-            WHEN 'identified' THEN 0 WHEN 'researching' THEN 1 WHEN 'preparing' THEN 2
-            WHEN 'applied' THEN 3 WHEN 'interviewing' THEN 4 WHEN 'offer' THEN 5
-            WHEN 'rejected' THEN 6 WHEN 'closed' THEN 7 ELSE 8 END,
+            WHEN 'to_organize' THEN 0 WHEN 'preparing' THEN 1
+            WHEN 'applied' THEN 2 WHEN 'in_process' THEN 3 WHEN 'dead' THEN 4 ELSE 5 END,
             CASE WHEN o.deadline IS NULL OR o.deadline = '' THEN 1 ELSE 0 END, o.deadline ASC`;
       const { results } = await env.DB.prepare(sql).bind(...args).all();
       return json((results || []).map(shapeOpportunity));
@@ -7299,7 +7304,7 @@ async function handleCareerOpportunities(request, env, user) {
       ).bind(
         id, body.title, body.type, body.track, body.organization_id || null, body.contact_id || null,
         body.project_id || null, body.description || '', body.requirements || '', body.location || '',
-        body.salary_range || '', body.deadline || '', body.status || 'identified',
+        body.salary_range || '', body.deadline || '', body.status || 'to_organize',
         Number(body.priority) || 3, Number(body.fit_score) || 3, body.url || '', body.notes || '',
         JSON.stringify(body.tags || []), body.assigned_to || null, user.id, now, now
       ).run();
@@ -7365,19 +7370,42 @@ async function handleCareerOpportunityItem(request, env, user, id) {
     const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
     return json(shapeOpportunity(row));
   }
+  if (request.method === 'PATCH') {
+    // Atualização parcial: usada pelo toggle "Extrair Conhecimento" e por
+    // mudanças pontuais de status/notas, sem exigir o payload completo do PUT.
+    const body = (await readJson(request)) || {};
+    const existing = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
+    if (!existing) return json({ error: 'Oportunidade não encontrada' }, 404);
+    const now = Math.floor(Date.now() / 1000);
+    const sets = [];
+    const args = [];
+    if (body.extract_knowledge !== undefined) { sets.push('extract_knowledge = ?'); args.push(body.extract_knowledge ? 1 : 0); }
+    if (body.status !== undefined) { sets.push('status = ?'); args.push(body.status); }
+    if (body.notes !== undefined) { sets.push('notes = ?'); args.push(body.notes); }
+    if (sets.length === 0) return json({ error: 'Nenhum campo para atualizar' }, 400);
+    sets.push('updated_at = ?');
+    args.push(now, id);
+    try {
+      await env.DB.prepare(`UPDATE career_opportunities SET ${sets.join(', ')} WHERE id = ?`).bind(...args).run();
+    } catch (e) {
+      return json({ error: 'Falha ao atualizar oportunidade', detail: String(e) }, 500);
+    }
+    const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
+    return json(shapeOpportunity(row));
+  }
   if (request.method === 'DELETE') {
-    // Soft delete: marca como 'closed' em vez de remover.
+    // Soft delete: marca como 'dead' em vez de remover.
     const existing = await env.DB.prepare('SELECT id FROM career_opportunities WHERE id = ?').bind(id).first();
     if (!existing) return json({ error: 'Oportunidade não encontrada' }, 404);
     const now = Math.floor(Date.now() / 1000);
     try {
       await env.DB.prepare(
-        "UPDATE career_opportunities SET status='closed', updated_at=? WHERE id=?"
+        "UPDATE career_opportunities SET status='dead', updated_at=? WHERE id=?"
       ).bind(now, id).run();
     } catch (e) {
       return json({ error: 'Falha ao encerrar oportunidade', detail: String(e) }, 500);
     }
-    return json({ ok: true, status: 'closed' });
+    return json({ ok: true, status: 'dead' });
   }
   return json({ error: 'Método não permitido' }, 405);
 }
@@ -9098,7 +9126,7 @@ async function handleHubItems(request, env, user) {
   const offset = Math.max(parseInt(url.searchParams.get('offset'), 10) || 0, 0);
   const orderBy = url.searchParams.get('order_by') === 'relevancia' ? 'relevancia' : 'received_at';
 
-  const wh = ['deleted_at IS NULL'];
+  const wh = ['deleted_at IS NULL', 'archived_at IS NULL'];
   const args = [];
   if (project && project !== 'todos') {
     wh.push('project_id = ?');
@@ -9165,6 +9193,60 @@ async function handleHubItemsBulkDelete(request, env, user) {
     return json({ deleted: (res.meta && res.meta.changes) || 0 });
   } catch (e) {
     return json({ error: 'Falha ao remover itens', detail: String(e) }, 500);
+  }
+}
+
+// PATCH /api/hub/items/bulk/project — move vários itens para outro projeto
+// (ex.: phd_vagas ↔ emprego_vagas). Sessão obrigatória. Body: { ids, project_id }.
+async function handleHubItemsBulkProject(request, env, user) {
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.ids)
+    ? body.ids.map((n) => Number(n)).filter((n) => Number.isInteger(n))
+    : [];
+  const projectId = body.project_id;
+  if (ids.length === 0) return json({ error: 'ids deve ser um array não vazio' }, 400);
+  if (!projectId) return json({ error: 'project_id é obrigatório' }, 400);
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    const res = await env.DB.prepare(
+      `UPDATE hub_items SET project_id = ? WHERE id IN (${placeholders}) AND deleted_at IS NULL`
+    ).bind(projectId, ...ids).run();
+    return json({ moved: (res.meta && res.meta.changes) || 0 });
+  } catch (e) {
+    return json({ error: 'Falha ao mover itens', detail: String(e) }, 500);
+  }
+}
+
+// PATCH /api/hub/items/:id/archive — arquiva um item (some da lista ativa do
+// Hub) quando ele é enviado para o Kanban de Carreira. Sessão obrigatória.
+async function handleHubItemArchive(request, env, user, id) {
+  if (!id) return json({ error: 'ID ausente' }, 400);
+  try {
+    await env.DB.prepare(
+      `UPDATE hub_items SET archived_at = CURRENT_TIMESTAMP WHERE id = ? AND archived_at IS NULL`
+    ).bind(id).run();
+  } catch (e) {
+    return json({ error: 'Falha ao arquivar item', detail: String(e) }, 500);
+  }
+  return json({ archived: true });
+}
+
+// GET /api/hub/excluded-ids?project_id=... — external_ids que estão
+// deletados ou arquivados, para o Hub local não os reativar numa próxima
+// ingestão. Sessão obrigatória.
+async function handleHubExcludedIds(request, env, user) {
+  if (!isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
+  const url = new URL(request.url);
+  const projectId = url.searchParams.get('project_id');
+  if (!projectId) return json({ error: 'project_id é obrigatório' }, 400);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT external_id FROM hub_items
+        WHERE project_id = ? AND (deleted_at IS NOT NULL OR archived_at IS NOT NULL)`
+    ).bind(projectId).all();
+    return json({ excluded_ids: (results || []).map((r) => r.external_id) });
+  } catch {
+    return json({ excluded_ids: [] });
   }
 }
 

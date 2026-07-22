@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   GraduationCap, RefreshCw, Search, ExternalLink, X, Tag, FileText,
   Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2, Pencil,
+  ArrowRightLeft, Trash,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
@@ -113,6 +114,10 @@ export default function VagasPhDPage() {
   const [deleting, setDeleting] = useState(null);
   const [confirmItem, setConfirmItem] = useState(null);
   const [editingItem, setEditingItem] = useState(null);
+  const [moving, setMoving] = useState(null); // id do item sendo movido individualmente
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -181,7 +186,7 @@ export default function VagasPhDPage() {
       title: item.title,
       type: 'phd',   // enum: job | phd | postdoc | grant | collaboration | ...
       track: 'phd',  // trilha do Kanban: phd | job | spinoff
-      status: 'identified', // primeiro status do Kanban de Carreira
+      status: 'to_organize', // primeiro status do Kanban de Carreira
       url: item.url || '',
       description: item.justificativa || '',
       notes: `${fonte}${item.resumo || ''}`.trim(),
@@ -191,11 +196,81 @@ export default function VagasPhDPage() {
         method: 'POST',
         body: JSON.stringify(payload),
       });
+      await apiFetch(`/api/hub/items/${item.id}/archive`, { method: 'PATCH' });
       setAdded((m) => ({ ...m, [item.id]: 'done' }));
-      showToast('Vaga adicionada ao Kanban de Carreira');
+      setItems((prev) => prev.filter((it) => it.id !== item.id));
+      if (selected && selected.id === item.id) setSelected(null);
+      showToast('Vaga adicionada à Carreira e arquivada no Hub');
     } catch (e) {
       setAdded((m) => { const n = { ...m }; delete n[item.id]; return n; });
       showToast(`Falha ao adicionar: ${String(e.message || e).slice(0, 80)}`);
+    }
+  };
+
+  // ── Mover para Empregos ───────────────────────────────────────────────────
+  const moveToEmprego = async (item) => {
+    setMoving(item.id);
+    try {
+      await apiFetch('/api/hub/items/bulk/project', {
+        method: 'PATCH',
+        body: JSON.stringify({ ids: [item.id], project_id: 'emprego_vagas' }),
+      });
+      setItems((prev) => prev.filter((it) => it.id !== item.id));
+      setSelectedIds((prev) => { const n = new Set(prev); n.delete(item.id); return n; });
+      if (selected && selected.id === item.id) setSelected(null);
+      showToast('Vaga movida para Empregos');
+    } catch (e) {
+      showToast(`Falha ao mover: ${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      setMoving(null);
+    }
+  };
+
+  // ── Seleção múltipla ──────────────────────────────────────────────────────
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+  const selectAll = () => setSelectedIds(new Set(filtered.map((it) => it.id)));
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const bulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      await apiFetch('/api/hub/items/bulk', { method: 'DELETE', body: JSON.stringify({ ids }) });
+      setItems((prev) => prev.filter((it) => !selectedIds.has(it.id)));
+      showToast(`${ids.length} vaga(s) deletada(s)`);
+      clearSelection();
+    } catch (e) {
+      showToast(`Falha ao deletar: ${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  const confirmBulkDeleteAction = () => {
+    setConfirmBulkDelete(false);
+    bulkDelete();
+  };
+
+  const bulkMoveToEmprego = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    try {
+      await apiFetch('/api/hub/items/bulk/project', {
+        method: 'PATCH',
+        body: JSON.stringify({ ids, project_id: 'emprego_vagas' }),
+      });
+      setItems((prev) => prev.filter((it) => !selectedIds.has(it.id)));
+      showToast(`${ids.length} vaga(s) movida(s) para Empregos`);
+      clearSelection();
+    } catch (e) {
+      showToast(`Falha ao mover: ${String(e.message || e).slice(0, 80)}`);
     }
   };
 
@@ -302,6 +377,37 @@ export default function VagasPhDPage() {
         </label>
       </div>
 
+      {/* Barra de ações em lote */}
+      {selectedIds.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-accent/30 bg-accent/5 px-3 py-2">
+          <span className="text-sm font-medium text-ink">{selectedIds.size} {selectedIds.size === 1 ? 'item selecionado' : 'itens selecionados'}</span>
+          <button type="button" onClick={selectAll} className="rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2">
+            Selecionar todos
+          </button>
+          <button type="button" onClick={clearSelection} className="rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2">
+            Limpar seleção
+          </button>
+          <div className="flex-1" />
+          <button
+            type="button"
+            onClick={bulkMoveToEmprego}
+            className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2"
+          >
+            <ArrowRightLeft className="h-3.5 w-3.5" /> Empregos
+          </button>
+          {isOwner && (
+            <button
+              type="button"
+              onClick={() => setConfirmBulkDelete(true)}
+              disabled={bulkDeleting}
+              className="flex items-center gap-1.5 rounded-lg bg-danger px-2.5 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-60"
+            >
+              {bulkDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash className="h-3.5 w-3.5" />} Deletar selecionados
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Lista de vagas (cards) */}
       <div className="min-h-0 flex-1 overflow-auto">
         {loading ? (
@@ -326,6 +432,10 @@ export default function VagasPhDPage() {
                 onDelete={isOwner ? () => setConfirmItem(it) : null}
                 onEdit={() => setEditingItem(it)}
                 deleting={deleting === it.id}
+                onMove={() => moveToEmprego(it)}
+                moving={moving === it.id}
+                selected={selectedIds.has(it.id)}
+                onToggleSelect={() => toggleSelect(it.id)}
               />
             ))}
           </div>
@@ -356,6 +466,16 @@ export default function VagasPhDPage() {
         danger
         onConfirm={confirmDelete}
         onCancel={() => setConfirmItem(null)}
+      />
+
+      <ConfirmModal
+        open={confirmBulkDelete}
+        title={`Deletar ${selectedIds.size} vaga(s)?`}
+        message="Irreversível."
+        confirmLabel="Deletar"
+        danger
+        onConfirm={confirmBulkDeleteAction}
+        onCancel={() => setConfirmBulkDelete(false)}
       />
 
       {/* Toast */}
@@ -401,7 +521,7 @@ function AddButton({ state, onAdd, full = false }) {
   );
 }
 
-function VagaCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting }) {
+function VagaCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting, onMove, moving, selected, onToggleSelect }) {
   const title = effectiveTitle(item);
   const resumoFull = effectiveResumo(item);
   const resumo = (resumoFull || '').slice(0, 150);
@@ -409,13 +529,24 @@ function VagaCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting }) {
   return (
     <div
       onClick={onOpen}
-      className="flex cursor-pointer flex-col gap-3 rounded-xl border border-line bg-surface p-4 transition hover:border-accent/50 hover:shadow-soft"
+      className={`flex cursor-pointer flex-col gap-3 rounded-xl border bg-surface p-4 transition hover:border-accent/50 hover:shadow-soft ${
+        selected ? 'border-accent' : 'border-line'
+      }`}
     >
       <div className="flex items-start justify-between gap-2">
-        <h3 className="flex items-center gap-1.5 font-semibold leading-snug text-ink">
-          {title}
-          {item.edited_at && <Pencil className="h-3 w-3 shrink-0 text-muted" title="Editado manualmente" />}
-        </h3>
+        <div className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onClick={(e) => e.stopPropagation()}
+            onChange={onToggleSelect}
+            className="mt-1 h-4 w-4 shrink-0 accent-accent"
+          />
+          <h3 className="flex items-center gap-1.5 font-semibold leading-snug text-ink">
+            {title}
+            {item.edited_at && <Pencil className="h-3 w-3 shrink-0 text-muted" title="Editado manualmente" />}
+          </h3>
+        </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <CountryBadge code={item._country} />
           {onEdit && (
@@ -469,6 +600,15 @@ function VagaCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting }) {
           </a>
         )}
         <div className="flex-1" />
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onMove(); }}
+          disabled={moving}
+          className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2 disabled:opacity-50"
+          title="Mover para Empregos"
+        >
+          {moving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRightLeft className="h-4 w-4" />} Empregos
+        </button>
         <AddButton state={state} onAdd={onAdd} />
       </div>
     </div>

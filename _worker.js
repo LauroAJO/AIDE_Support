@@ -7394,18 +7394,17 @@ async function handleCareerOpportunityItem(request, env, user, id) {
     return json(shapeOpportunity(row));
   }
   if (request.method === 'DELETE') {
-    // Soft delete: marca como 'dead' em vez de remover.
+    // Remoção definitiva (v2.17.0) — apenas owner. Distinta do soft-delete
+    // (marcar status='dead'), que continua acessível via PATCH/PUT de status.
+    if (user.role !== 'owner') return json({ error: 'Apenas o owner pode remover' }, 403);
     const existing = await env.DB.prepare('SELECT id FROM career_opportunities WHERE id = ?').bind(id).first();
     if (!existing) return json({ error: 'Oportunidade não encontrada' }, 404);
-    const now = Math.floor(Date.now() / 1000);
     try {
-      await env.DB.prepare(
-        "UPDATE career_opportunities SET status='dead', updated_at=? WHERE id=?"
-      ).bind(now, id).run();
+      await env.DB.prepare('DELETE FROM career_opportunities WHERE id = ?').bind(id).run();
     } catch (e) {
-      return json({ error: 'Falha ao encerrar oportunidade', detail: String(e) }, 500);
+      return json({ error: 'Falha ao remover oportunidade', detail: String(e) }, 500);
     }
-    return json({ ok: true, status: 'dead' });
+    return json({ deleted: true });
   }
   return json({ error: 'Método não permitido' }, 405);
 }

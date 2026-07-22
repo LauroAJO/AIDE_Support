@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Plus, X, ExternalLink, Loader2, Building2, User, CalendarClock, CheckSquare,
+  Plus, X, ExternalLink, Loader2, Building2, User, CalendarClock, CheckSquare, Trash2,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import Avatar from '../shared/Avatar';
+import ConfirmModal from '../shared/ConfirmModal';
 import {
   StarRating, TrackBadge, OppTypeBadge, parseTags,
   PIPELINE_COLUMNS, TRACK_LABELS, OPP_TYPE_LABELS, OPP_STATUS_LABELS, OPP_STATUS_ORDER,
@@ -46,6 +47,14 @@ export default function OpportunityPipeline() {
   const [dragOverCol, setDragOverCol] = useState(null);
   const [modalId, setModalId] = useState(null);
   const [editor, setEditor] = useState(null); // { mode, form }
+  const [deleting, setDeleting] = useState(null);
+  const [confirmItem, setConfirmItem] = useState(null);
+  const [toast, setToast] = useState('');
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 4000);
+  };
 
   const load = async () => {
     try {
@@ -104,6 +113,26 @@ export default function OpportunityPipeline() {
     } catch {
       load(); // reverte recarregando se falhar
     }
+  };
+
+  const deleteOpp = async (item) => {
+    setDeleting(item.id);
+    try {
+      await apiFetch(`/api/career/opportunities/${item.id}`, { method: 'DELETE' });
+      setOpps(opps.filter((o) => o.id !== item.id));
+      if (modalId === item.id) setModalId(null);
+      showToast('Oportunidade removida');
+    } catch (e) {
+      showToast(`Falha ao remover: ${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  const confirmDelete = () => {
+    const item = confirmItem;
+    setConfirmItem(null);
+    if (item) deleteOpp(item);
   };
 
   const handleDrop = (colKey) => {
@@ -198,6 +227,8 @@ export default function OpportunityPipeline() {
                     onDragEnd={() => setDraggingId(null)}
                     onClick={() => setModalId(o.id)}
                     onToggleExtract={() => toggleExtract(o.id)}
+                    onDelete={() => setConfirmItem(o)}
+                    deleting={deleting === o.id}
                   />
                 ))}
               </div>
@@ -227,11 +258,27 @@ export default function OpportunityPipeline() {
           onSaved={afterSave}
         />
       )}
+
+      <ConfirmModal
+        open={!!confirmItem}
+        title="Remover esta oportunidade?"
+        message="Esta ação não pode ser desfeita."
+        confirmLabel="Remover"
+        danger
+        onConfirm={confirmDelete}
+        onCancel={() => setConfirmItem(null)}
+      />
+
+      {toast && (
+        <div className="fixed bottom-4 right-4 z-[80] rounded-lg bg-ink px-4 py-2 text-sm text-white shadow-soft">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
 
-function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract }) {
+function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onDelete, deleting }) {
   const c = trackColor(opp.track);
   const days = daysUntil(opp.deadline);
   const extracting = !!opp.extract_knowledge;
@@ -256,7 +303,18 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
       )}
       <div className="flex items-start justify-between gap-2">
         <span className="text-sm font-semibold text-ink">{opp.title}</span>
-        <span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${priorityDot(opp.priority)}`} title={`Prioridade ${PRIORITY_LABELS[opp.priority] || opp.priority}`} />
+        <div className="flex shrink-0 items-center gap-1.5">
+          <span className={`mt-1 h-2.5 w-2.5 rounded-full ${priorityDot(opp.priority)}`} title={`Prioridade ${PRIORITY_LABELS[opp.priority] || opp.priority}`} />
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            disabled={deleting}
+            title="Remover oportunidade"
+            className="rounded p-0.5 text-muted transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
       <div className="mt-1 flex items-center gap-1.5">
         <OppTypeBadge type={opp.type} />

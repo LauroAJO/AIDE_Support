@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Radar, GraduationCap, Briefcase } from 'lucide-react';
+import { Radar, GraduationCap, Briefcase, BookOpen } from 'lucide-react';
 import HubPage from './HubPage';
 import VagasPhDPage from '../vagas/VagasPhDPage';
 import EmpregoPage from '../empregos/EmpregoPage';
@@ -8,10 +8,30 @@ const TABS = [
   { key: 'noticias', label: 'Notícias', icon: Radar },
   { key: 'vagas', label: 'Vagas PhD', icon: GraduationCap },
   { key: 'empregos', label: 'Empregos', icon: Briefcase },
+  { key: 'artigos', label: 'Artigos Científicos', icon: BookOpen, badge: 'Em breve' },
 ];
 
-// Página principal do Hub: agrupa Notícias, Vagas PhD e Empregos em subabas
-// controladas por estado local — a URL (/hub) não muda entre elas.
+// Placeholder da subaba "Artigos Científicos" — funcionalidade ainda não
+// implementada (monitoramento de periódicos académicos).
+function ArtigosCientificosPlaceholder() {
+  return (
+    <div className="flex h-full min-h-[24rem] items-center justify-center rounded-xl border border-dashed border-line">
+      <div className="flex max-w-md flex-col items-center gap-3 px-6 text-center">
+        <BookOpen className="h-10 w-10 text-ink2" />
+        <h2 className="text-base font-semibold text-ink">Artigos Científicos</h2>
+        <p className="text-sm text-ink2">
+          Esta funcionalidade está em desenvolvimento. Em breve você poderá
+          monitorar publicações académicas de periódicos como ScienceDirect,
+          MDPI, Nature Energy e Electrochimica Acta diretamente aqui.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// Página principal do Hub: agrupa Notícias, Vagas PhD, Empregos e Artigos
+// Científicos em subabas controladas por estado local — a URL (/hub) não
+// muda entre elas.
 export default function HubContainer() {
   const [tab, setTab] = useState('noticias');
 
@@ -33,6 +53,11 @@ export default function HubContainer() {
               }`}
             >
               <Icon className="h-4 w-4" /> {t.label}
+              {t.badge && (
+                <span className="inline-flex items-center rounded-full bg-surface2 px-2 py-0.5 text-[11px] font-medium text-ink2">
+                  {t.badge}
+                </span>
+              )}
             </button>
           );
         })}
@@ -42,6 +67,7 @@ export default function HubContainer() {
         {tab === 'noticias' && <HubPage />}
         {tab === 'vagas' && <VagasPhDPage />}
         {tab === 'empregos' && <EmpregoPage />}
+        {tab === 'artigos' && <ArtigosCientificosPlaceholder />}
       </div>
     </div>
   );

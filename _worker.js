@@ -7267,12 +7267,12 @@ async function handleCareerOpportunities(request, env, user) {
       const track = url.searchParams.get('track');
       const status = url.searchParams.get('status');
       const priority = url.searchParams.get('priority');
-      const wh = [];
+      const wh = ["o.status != 'deleted'"];
       const args = [];
       if (track) { wh.push('o.track = ?'); args.push(track); }
       if (status) { wh.push('o.status = ?'); args.push(status); }
       if (priority) { wh.push('o.priority = ?'); args.push(Number(priority)); }
-      const where = wh.length ? `WHERE ${wh.join(' AND ')}` : '';
+      const where = `WHERE ${wh.join(' AND ')}`;
       const sql =
         `SELECT o.*, org.name AS organization_name, c.name AS contact_name
            FROM career_opportunities o
@@ -7394,17 +7394,19 @@ async function handleCareerOpportunityItem(request, env, user, id) {
     return json(shapeOpportunity(row));
   }
   if (request.method === 'DELETE') {
-    // Remoção definitiva (v2.17.0) — apenas owner. Distinta do soft-delete
-    // (marcar status='dead'), que continua acessível via PATCH/PUT de status.
+    // Soft delete: status='deleted', distinto de status='dead' (coluna "Vagas
+    // Mortas", que permanece visível no Kanban). Apenas owner. Registro fica
+    // no banco, mas escondido do GET por padrão.
     if (user.role !== 'owner') return json({ error: 'Apenas o owner pode remover' }, 403);
     const existing = await env.DB.prepare('SELECT id FROM career_opportunities WHERE id = ?').bind(id).first();
     if (!existing) return json({ error: 'Oportunidade não encontrada' }, 404);
     try {
-      await env.DB.prepare('DELETE FROM career_opportunities WHERE id = ?').bind(id).run();
+      await env.DB.prepare("UPDATE career_opportunities SET status = 'deleted', updated_at = ? WHERE id = ?")
+        .bind(Math.floor(Date.now() / 1000), id).run();
     } catch (e) {
       return json({ error: 'Falha ao remover oportunidade', detail: String(e) }, 500);
     }
-    return json({ deleted: true });
+    return json({ deleted: true, soft: true });
   }
   return json({ error: 'Método não permitido' }, 405);
 }

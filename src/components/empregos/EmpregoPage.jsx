@@ -267,14 +267,14 @@ export default function EmpregoPage({ refreshToken = 0 }) {
   const moveToPhd = async (item) => {
     setMoving(item.id);
     try {
-      await apiFetch('/api/hub/items/bulk/project', {
+      const res = await apiFetch('/api/hub/items/bulk/project', {
         method: 'PATCH',
         body: JSON.stringify({ ids: [item.id], project_id: 'phd_vagas' }),
       });
       setItems((prev) => prev.filter((it) => it.id !== item.id));
       setSelectedIds((prev) => { const n = new Set(prev); n.delete(item.id); return n; });
       if (selected && selected.id === item.id) setSelected(null);
-      showToast('Vaga movida para PhD');
+      showToast(res?.already_exists?.length ? 'Item já existe no destino' : 'Vaga movida para PhD');
     } catch (e) {
       showToast(`Falha ao mover: ${String(e.message || e).slice(0, 80)}`);
     } finally {
@@ -318,12 +318,15 @@ export default function EmpregoPage({ refreshToken = 0 }) {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
     try {
-      await apiFetch('/api/hub/items/bulk/project', {
+      const res = await apiFetch('/api/hub/items/bulk/project', {
         method: 'PATCH',
         body: JSON.stringify({ ids, project_id: 'phd_vagas' }),
       });
       setItems((prev) => prev.filter((it) => !selectedIds.has(it.id)));
-      showToast(`${ids.length} vaga(s) movida(s) para PhD`);
+      const already = res?.already_exists?.length || 0;
+      showToast(already
+        ? `${res.moved} vaga(s) movida(s) para PhD, ${already} já existia(m) no destino`
+        : `${ids.length} vaga(s) movida(s) para PhD`);
       clearSelection();
     } catch (e) {
       showToast(`Falha ao mover: ${String(e.message || e).slice(0, 80)}`);

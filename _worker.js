@@ -9199,6 +9199,17 @@ async function handleHubItemsBulkDelete(request, env, user) {
 
 // PATCH /api/hub/items/bulk/project — move vários itens para outro projeto
 // (ex.: phd_vagas ↔ emprego_vagas). Sessão obrigatória. Body: { ids, project_id }.
+//
+// hub_items tem UNIQUE(external_id, project_id): se o mesmo external_id já
+// existir no projeto de destino, um simples UPDATE project_id viola essa
+// constraint (D1_ERROR: UNIQUE constraint failed). Por isso cada id é
+// processado individualmente (sem UPDATE em lote) — precisamos checar
+// conflito por item antes de decidir o que fazer com ele:
+//  - sem conflito: UPDATE project_id normal.
+//  - conflito com item soft-deletado no destino: reativa o item do destino
+//    e soft-deleta o original (o external_id "vence" no destino).
+//  - conflito com item ativo no destino: item já existe lá, só soft-deleta
+//    o original (evita duplicar).
 async function handleHubItemsBulkProject(request, env, user) {
   const body = (await readJson(request)) || {};
   const ids = Array.isArray(body.ids)
@@ -9207,12 +9218,37 @@ async function handleHubItemsBulkProject(request, env, user) {
   const projectId = body.project_id;
   if (ids.length === 0) return json({ error: 'ids deve ser um array não vazio' }, 400);
   if (!projectId) return json({ error: 'project_id é obrigatório' }, 400);
+  let moved = 0;
+  const alreadyExists = [];
   try {
-    const placeholders = ids.map(() => '?').join(',');
-    const res = await env.DB.prepare(
-      `UPDATE hub_items SET project_id = ? WHERE id IN (${placeholders}) AND deleted_at IS NULL`
-    ).bind(projectId, ...ids).run();
-    return json({ moved: (res.meta && res.meta.changes) || 0 });
+    for (const id of ids) {
+      const src = await env.DB.prepare(
+        `SELECT id, external_id, project_id FROM hub_items WHERE id = ? AND deleted_at IS NULL`
+      ).bind(id).first();
+      if (!src) continue;
+      if (src.project_id === projectId) continue;
+
+      const dest = await env.DB.prepare(
+        `SELECT id, deleted_at FROM hub_items WHERE external_id = ? AND project_id = ?`
+      ).bind(src.external_id, projectId).first();
+
+      if (!dest) {
+        await env.DB.prepare(`UPDATE hub_items SET project_id = ? WHERE id = ?`)
+          .bind(projectId, id).run();
+        moved++;
+      } else if (dest.deleted_at) {
+        await env.DB.prepare(`UPDATE hub_items SET deleted_at = NULL WHERE id = ?`)
+          .bind(dest.id).run();
+        await env.DB.prepare(`UPDATE hub_items SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`)
+          .bind(id).run();
+        moved++;
+      } else {
+        await env.DB.prepare(`UPDATE hub_items SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`)
+          .bind(id).run();
+        alreadyExists.push(id);
+      }
+    }
+    return json({ moved, already_exists: alreadyExists });
   } catch (e) {
     return json({ error: 'Falha ao mover itens', detail: String(e) }, 500);
   }

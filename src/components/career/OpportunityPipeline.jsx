@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Plus, X, ExternalLink, Loader2, Building2, User, CalendarClock, CheckSquare, Trash2,
+  Plus, X, ExternalLink, Loader2, Building2, User, CalendarClock, CheckSquare, Trash2, Star,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -121,15 +121,22 @@ export default function OpportunityPipeline() {
   );
 
   // Por coluna: cards visíveis (sem EC) + cards com Extrair Conhecimento
-  // ocultos por padrão — ambos os grupos ordenados pela mesma chave da coluna.
+  // ocultos por padrão — dentro de cada grupo, prioritários (is_priority=1)
+  // vêm antes, e só então a ordenação escolhida no select da coluna decide.
+  // `total` conta só os cards normais (sem EC) — o contador de EC fica no
+  // botão de expandir, separado.
   const byColumn = useMemo(() => {
     const map = {};
     PIPELINE_COLUMNS.forEach((c) => {
       const items = filtered.filter((o) => columnKeyForStatus(o.status) === c.key);
       const sortKey = sortBy[c.key] || 'recent';
-      const visible = sortOpps(items.filter((o) => !o.extract_knowledge), sortKey);
-      const ecHidden = sortOpps(items.filter((o) => !!o.extract_knowledge), sortKey);
-      map[c.key] = { visible, ecHidden, total: items.length };
+      const normal = items.filter((o) => !o.extract_knowledge);
+      const ec = items.filter((o) => !!o.extract_knowledge);
+      const byPriority = (list) => [
+        ...sortOpps(list.filter((o) => o.is_priority), sortKey),
+        ...sortOpps(list.filter((o) => !o.is_priority), sortKey),
+      ];
+      map[c.key] = { visible: byPriority(normal), ecHidden: byPriority(ec), total: normal.length };
     });
     return map;
   }, [filtered, sortBy]);
@@ -154,6 +161,19 @@ export default function OpportunityPipeline() {
     setOpps(opps.map((o) => (o.id === id ? { ...o, extract_knowledge: next } : o)));
     try {
       await apiFetch(`/api/career/opportunities/${id}`, { method: 'PATCH', body: JSON.stringify({ extract_knowledge: next }) });
+    } catch {
+      load(); // reverte recarregando se falhar
+    }
+  };
+
+  // Liga/desliga o marcador "prioritário" (estrela) de um card (otimista + PATCH).
+  const togglePriority = async (id) => {
+    const opp = opps.find((o) => o.id === id);
+    if (!opp) return;
+    const next = opp.is_priority ? 0 : 1;
+    setOpps(opps.map((o) => (o.id === id ? { ...o, is_priority: next } : o)));
+    try {
+      await apiFetch(`/api/career/opportunities/${id}`, { method: 'PATCH', body: JSON.stringify({ is_priority: next }) });
     } catch {
       load(); // reverte recarregando se falhar
     }
@@ -247,6 +267,7 @@ export default function OpportunityPipeline() {
             onDragEnd: () => setDraggingId(null),
             onClick: () => setModalId(o.id),
             onToggleExtract: () => toggleExtract(o.id),
+            onTogglePriority: () => togglePriority(o.id),
             onDelete: () => setConfirmItem(o),
             onMove: (status) => moveTo(o.id, status),
             deleting: deleting === o.id,
@@ -347,10 +368,11 @@ export default function OpportunityPipeline() {
   );
 }
 
-function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onDelete, onMove, deleting }) {
+function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onTogglePriority, onDelete, onMove, deleting }) {
   const c = trackColor(opp.track);
   const days = daysUntil(opp.deadline);
   const extracting = !!opp.extract_knowledge;
+  const priority = !!opp.is_priority;
   const currentCol = columnKeyForStatus(opp.status);
   return (
     <div
@@ -404,15 +426,27 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
         <StarRating value={opp.fit_score} size={12} />
         {assignee && <Avatar user={{ name: assignee.name, avatar: assignee.avatar }} size={20} />}
       </div>
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); onToggleExtract(); }}
-        className={`mt-1.5 flex w-full items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
-          extracting ? 'bg-violet-600 text-white hover:opacity-90' : 'border border-line text-ink2 hover:bg-surface2'
-        }`}
-      >
-        📚 Extrair Conhecimento
-      </button>
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggleExtract(); }}
+          className={`flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
+            extracting ? 'bg-violet-600 text-white hover:opacity-90' : 'border border-line text-ink2 hover:bg-surface2'
+          }`}
+        >
+          📚 Extrair Conhecimento
+        </button>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onTogglePriority(); }}
+          title={priority ? 'Remover prioridade' : 'Marcar como prioritário'}
+          className={`flex shrink-0 items-center justify-center rounded-md border p-1.5 transition ${
+            priority ? 'border-amber-300 bg-amber-50 text-amber-500' : 'border-line text-muted hover:bg-surface2'
+          }`}
+        >
+          <Star className={`h-3.5 w-3.5 ${priority ? 'fill-amber-400' : ''}`} />
+        </button>
+      </div>
       <select
         value=""
         onChange={(e) => { if (e.target.value) onMove(e.target.value); }}

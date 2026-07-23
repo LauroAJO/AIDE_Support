@@ -7380,6 +7380,7 @@ async function handleCareerOpportunityItem(request, env, user, id) {
     const sets = [];
     const args = [];
     if (body.extract_knowledge !== undefined) { sets.push('extract_knowledge = ?'); args.push(body.extract_knowledge ? 1 : 0); }
+    if (body.is_priority !== undefined) { sets.push('is_priority = ?'); args.push(body.is_priority ? 1 : 0); }
     if (body.status !== undefined) { sets.push('status = ?'); args.push(body.status); }
     if (body.notes !== undefined) { sets.push('notes = ?'); args.push(body.notes); }
     if (sets.length === 0) return json({ error: 'Nenhum campo para atualizar' }, 400);

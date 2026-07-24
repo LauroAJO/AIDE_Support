@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Briefcase, Search, ExternalLink, X, Tag, FileText,
   Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2, Pencil,
-  ArrowRightLeft, Trash,
+  ArrowRightLeft, Trash, Link2, ClipboardList,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
 import EditItemModal from '../shared/EditItemModal';
+import LinkTaskModal from '../shared/LinkTaskModal';
 import { countryMeta, detectCountry } from '../../lib/countryDetection';
 
 // project_id no hub_items que agrupa as vagas de emprego curadas.
@@ -136,7 +137,9 @@ function enrich(it) {
 }
 
 // refreshToken: incrementado pelo botão "Atualizar" global no HubContainer.
-export default function EmpregoPage({ refreshToken = 0 }) {
+// highlightShortId: vindo de /hub?vaga={short_id} (via HubContainer) — depois
+// que a lista carrega, o card correspondente ganha scroll-into-view + realce.
+export default function EmpregoPage({ refreshToken = 0, highlightShortId = null }) {
   const user = useStore((s) => s.user);
   const isOwner = user?.role === 'owner';
 
@@ -165,6 +168,10 @@ export default function EmpregoPage({ refreshToken = 0 }) {
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [linkingItem, setLinkingItem] = useState(null); // item aberto no modal "Vincular à Tarefa"
+  const [highlightedId, setHighlightedId] = useState(null);
+  const cardRefs = useRef({}); // item.id -> DOM node, para scroll-into-view do highlight
+  const highlightedShortIdRef = useRef(null); // evita re-disparar o highlight no mesmo short_id
 
   const load = async () => {
     setLoading(true);
@@ -198,6 +205,40 @@ export default function EmpregoPage({ refreshToken = 0 }) {
     setToast(msg);
     setTimeout(() => setToast(''), 4000);
   };
+
+  // ── Copiar link ───────────────────────────────────────────────────────────
+  const copyLink = async (item) => {
+    const url = `${window.location.origin}/hub?vaga=${item.short_id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast(`Link copiado: #${item.short_id}`);
+    } catch {
+      showToast('Falha ao copiar link');
+    }
+  };
+
+  // ── Vincular à Tarefa ─────────────────────────────────────────────────────
+  const handleLinked = (task, err) => {
+    setLinkingItem(null);
+    if (err) { showToast(`Falha ao vincular: ${String(err.message || err).slice(0, 80)}`); return; }
+    showToast('Vaga vinculada à tarefa');
+  };
+
+  // ── Highlight vindo de /hub?vaga={short_id} ──────────────────────────────
+  // Quando a lista termina de carregar e highlightShortId aponta para um item
+  // já presente, dá scroll até o card e aplica um realce temporário.
+  useEffect(() => {
+    if (!highlightShortId || loading) return;
+    if (highlightedShortIdRef.current === highlightShortId) return;
+    const target = items.find((it) => it.short_id === highlightShortId);
+    if (!target) return;
+    highlightedShortIdRef.current = highlightShortId;
+    setHighlightedId(target.id);
+    const node = cardRefs.current[target.id];
+    if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const t = setTimeout(() => setHighlightedId(null), 4000);
+    return () => clearTimeout(t);
+  }, [highlightShortId, loading, items]);
 
   // ── Estatísticas ──────────────────────────────────────────────────────────
   // "carregados"/"novasHoje"/"empresas" vêm dos items já buscados (limitados
@@ -478,6 +519,8 @@ export default function EmpregoPage({ refreshToken = 0 }) {
             {filtered.map((it) => (
               <EmpregoCard
                 key={it.id}
+                cardRef={(node) => { cardRefs.current[it.id] = node; }}
+                highlighted={highlightedId === it.id}
                 item={it}
                 onOpen={() => setSelected(it)}
                 onAdd={() => addToCareer(it)}
@@ -489,6 +532,8 @@ export default function EmpregoPage({ refreshToken = 0 }) {
                 moving={moving === it.id}
                 selected={selectedIds.has(it.id)}
                 onToggleSelect={() => toggleSelect(it.id)}
+                onCopyLink={() => copyLink(it)}
+                onLinkTask={() => setLinkingItem(it)}
               />
             ))}
           </div>
@@ -511,6 +556,12 @@ export default function EmpregoPage({ refreshToken = 0 }) {
         item={editingItem}
         onClose={() => setEditingItem(null)}
         onSaved={handleSaved}
+      />
+
+      <LinkTaskModal
+        item={linkingItem}
+        onClose={() => setLinkingItem(null)}
+        onLinked={handleLinked}
       />
 
       <ConfirmModal
@@ -576,16 +627,20 @@ function AddButton({ state, onAdd, full = false }) {
   );
 }
 
-function EmpregoCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting, onMove, moving, selected, onToggleSelect }) {
+function EmpregoCard({
+  item, onOpen, onAdd, state, onDelete, onEdit, deleting, onMove, moving, selected, onToggleSelect,
+  cardRef, highlighted, onCopyLink, onLinkTask,
+}) {
   const title = effectiveTitle(item);
   const resumoFull = effectiveResumo(item);
   const resumo = (resumoFull || '').slice(0, 150);
   const truncated = (resumoFull || '').length > 150;
   return (
     <div
+      ref={cardRef}
       onClick={onOpen}
       className={`flex cursor-pointer flex-col gap-3 rounded-xl border bg-surface p-4 transition hover:border-accent/50 hover:shadow-soft ${
-        selected ? 'border-accent' : 'border-line'
+        highlighted ? 'border-accent ring-2 ring-accent' : selected ? 'border-accent' : 'border-line'
       }`}
     >
       <div className="flex items-start justify-between gap-2">
@@ -635,6 +690,7 @@ function EmpregoCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting, o
         )}
         <span className="inline-flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5" />{fmtDate(item.collected_at || item.received_at)}</span>
         <Badge className="bg-accent/10 text-accent">{areaLabel(item)}</Badge>
+        {item.short_id && <span className="font-mono text-[11px] text-muted">#{item.short_id}</span>}
       </div>
 
       {resumo && (
@@ -656,6 +712,24 @@ function EmpregoCard({ item, onOpen, onAdd, state, onDelete, onEdit, deleting, o
           </a>
         )}
         <div className="flex-1" />
+        {item.short_id && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onCopyLink(); }}
+            className="rounded-lg border border-line bg-surface p-2 text-ink2 transition hover:bg-surface2"
+            title="Copiar link"
+          >
+            <Link2 className="h-4 w-4" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onLinkTask(); }}
+          className="rounded-lg border border-line bg-surface p-2 text-ink2 transition hover:bg-surface2"
+          title="Vincular à Tarefa"
+        >
+          <ClipboardList className="h-4 w-4" />
+        </button>
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onMove(); }}

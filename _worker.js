@@ -9066,8 +9066,8 @@ async function handleHubIngest(request, env) {
       const res = await env.DB.prepare(
         `INSERT INTO hub_items
           (external_id, project_id, title, url, source_name, published_at,
-           relevancia, prioridade, tipo, resumo, topicos, justificativa, collected_at, country)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           relevancia, prioridade, tipo, resumo, topicos, justificativa, collected_at, country, short_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, LOWER(HEX(RANDOMBLOB(3))))
          ON CONFLICT(external_id, project_id) DO UPDATE SET
            relevancia = excluded.relevancia,
            prioridade = excluded.prioridade,
@@ -9078,6 +9078,10 @@ async function handleHubIngest(request, env) {
            country = CASE
              WHEN hub_items.country IS NULL THEN excluded.country
              ELSE hub_items.country
+           END,
+           short_id = CASE
+             WHEN hub_items.short_id IS NULL THEN LOWER(HEX(RANDOMBLOB(3)))
+             ELSE hub_items.short_id
            END
          WHERE hub_items.deleted_at IS NULL`
       ).bind(
@@ -9111,12 +9115,16 @@ function shapeHubItem(row) {
 }
 
 // GET /api/hub/items — lista paginada/filtrada. Sessão obrigatória.
-// Query: project, min_relevancia, limit (50), offset (0),
+// Query: project, min_relevancia, short_id, limit (50), offset (0),
 //        order_by (received_at | relevancia, default received_at).
 // Sem ?project= (ou "todos"): aba Notícias — só h2/energia/ia. As vagas
 // (phd_vagas, emprego_vagas) só aparecem quando pedidas explicitamente por
 // ?project=, para não se misturarem com notícias. Itens com deleted_at
 // preenchido nunca são retornados.
+// ?short_id=: busca por ID curto (link compartilhável /hub?vaga=...) — ignora
+// o filtro de project/"todos" acima, já que o objetivo é achar o item em
+// QUALQUER projeto (o front decide a subaba certa a partir do project_id
+// devolvido).
 async function handleHubItems(request, env, user) {
   if (!isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
   if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
@@ -9124,13 +9132,17 @@ async function handleHubItems(request, env, user) {
   const url = new URL(request.url);
   const project = url.searchParams.get('project');
   const minRel = url.searchParams.get('min_relevancia');
+  const shortId = url.searchParams.get('short_id');
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit'), 10) || 50, 1), 200);
   const offset = Math.max(parseInt(url.searchParams.get('offset'), 10) || 0, 0);
   const orderBy = url.searchParams.get('order_by') === 'relevancia' ? 'relevancia' : 'received_at';
 
   const wh = ['deleted_at IS NULL', 'archived_at IS NULL'];
   const args = [];
-  if (project && project !== 'todos') {
+  if (shortId) {
+    wh.push('short_id = ?');
+    args.push(shortId);
+  } else if (project && project !== 'todos') {
     wh.push('project_id = ?');
     args.push(project);
   } else {

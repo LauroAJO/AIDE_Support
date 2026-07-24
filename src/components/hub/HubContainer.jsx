@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Radar, GraduationCap, Briefcase, BookOpen, RefreshCw } from 'lucide-react';
 import HubPage from './HubPage';
 import VagasPhDPage from '../vagas/VagasPhDPage';
 import EmpregoPage from '../empregos/EmpregoPage';
 import { apiFetch } from '../../lib/api';
+
+// project_id -> subaba, para o link compartilhável /hub?vaga={short_id}
+// (ver Parte 6). Só phd_vagas/emprego_vagas têm subaba própria com cards de
+// vaga (destino do highlight); os demais projetos (h2/energia/ia) caem na
+// aba Notícias com o filtro de projeto pré-selecionado.
+const TAB_BY_PROJECT = { phd_vagas: 'vagas', emprego_vagas: 'empregos' };
 
 const TABS = [
   { key: 'noticias', label: 'Notícias', icon: Radar },
@@ -84,6 +91,30 @@ export default function HubContainer() {
   // Incrementado pelo botão "Atualizar" global — cada subaba observa esse
   // valor e recarrega os próprios itens quando ele muda.
   const [refreshToken, setRefreshToken] = useState(0);
+
+  // /hub?vaga={short_id} (link compartilhável — ver Parte 4/6): resolve o
+  // short_id via GET /api/hub/items?short_id=, navega para a subaba certa e
+  // repassa o short_id para o highlight do card (mantido na URL — recarregar
+  // a página deve continuar apontando para o mesmo card).
+  const [searchParams] = useSearchParams();
+  const vaga = searchParams.get('vaga');
+  const [highlightShortId, setHighlightShortId] = useState(null);
+  const resolvedVagaRef = useRef(null);
+
+  useEffect(() => {
+    if (!vaga || resolvedVagaRef.current === vaga) return;
+    resolvedVagaRef.current = vaga;
+    apiFetch(`/api/hub/items?short_id=${encodeURIComponent(vaga)}`)
+      .then((res) => {
+        const found = (res && res.items && res.items[0]) || null;
+        if (!found) return;
+        const targetTab = TAB_BY_PROJECT[found.project_id];
+        if (targetTab) setTab(targetTab);
+        else { setNewsProject(found.project_id); setTab('noticias'); }
+        setHighlightShortId(vaga);
+      })
+      .catch(() => {});
+  }, [vaga]);
 
   const loadOverview = useCallback(async () => {
     setOverviewLoading(true);
@@ -178,8 +209,8 @@ export default function HubContainer() {
             refreshToken={refreshToken}
           />
         )}
-        {tab === 'vagas' && <VagasPhDPage refreshToken={refreshToken} />}
-        {tab === 'empregos' && <EmpregoPage refreshToken={refreshToken} />}
+        {tab === 'vagas' && <VagasPhDPage refreshToken={refreshToken} highlightShortId={highlightShortId} />}
+        {tab === 'empregos' && <EmpregoPage refreshToken={refreshToken} highlightShortId={highlightShortId} />}
         {tab === 'artigos' && <ArtigosCientificosPlaceholder />}
       </div>
     </div>

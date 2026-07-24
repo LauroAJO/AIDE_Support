@@ -410,6 +410,7 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
       </div>
       <div className="mt-1 flex items-center gap-1.5">
         <OppTypeBadge type={opp.type} />
+        {opp.hub_short_id && <span className="font-mono text-[11px] text-muted">#{opp.hub_short_id}</span>}
       </div>
       {opp.organization_name && (
         <div className="mt-1 flex items-center gap-1 text-xs text-muted">
@@ -446,6 +447,18 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
         >
           <Star className={`h-3.5 w-3.5 ${priority ? 'fill-amber-400' : ''}`} />
         </button>
+        {opp.hub_short_id && (
+          <a
+            href={`/hub?vaga=${opp.hub_short_id}`}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            title="Ver vaga original no Hub"
+            className="flex shrink-0 items-center justify-center rounded-md border border-line p-1.5 text-muted transition hover:bg-surface2"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        )}
       </div>
       <select
         value=""

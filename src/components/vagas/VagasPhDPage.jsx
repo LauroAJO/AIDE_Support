@@ -245,6 +245,7 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
       url: item.url || '',
       description: item.justificativa || '',
       notes: `${fonte}${item.resumo || ''}`.trim(),
+      hub_short_id: item.short_id || null,
     };
     try {
       await apiFetch('/api/career/opportunities', {

@@ -7299,14 +7299,15 @@ async function handleCareerOpportunities(request, env, user) {
         `INSERT INTO career_opportunities
           (id, title, type, track, organization_id, contact_id, project_id, description,
            requirements, location, salary_range, deadline, status, priority, fit_score, url,
-           notes, tags, assigned_to, created_by, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+           notes, tags, assigned_to, hub_short_id, created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).bind(
         id, body.title, body.type, body.track, body.organization_id || null, body.contact_id || null,
         body.project_id || null, body.description || '', body.requirements || '', body.location || '',
         body.salary_range || '', body.deadline || '', body.status || 'to_organize',
         Number(body.priority) || 3, Number(body.fit_score) || 3, body.url || '', body.notes || '',
-        JSON.stringify(body.tags || []), body.assigned_to || null, user.id, now, now
+        JSON.stringify(body.tags || []), body.assigned_to || null, body.hub_short_id || null,
+        user.id, now, now
       ).run();
     } catch (e) {
       return json({ error: 'Falha ao criar oportunidade', detail: String(e) }, 500);

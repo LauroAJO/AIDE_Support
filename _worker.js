@@ -1592,6 +1592,40 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
       } catch { /* migration 0014 not applied */ }
     }
 
+    // Config de recorrência (migration 0046) — BUG encontrado em teste manual:
+    // o RecurrenceSection do TaskModal já enviava esses campos no PUT, mas
+    // nada aqui os gravava (só eram lidos por shapeTask e pela checagem de
+    // conclusão abaixo) — a UI parecia salvar, mas nada persistia. Atualizado
+    // separadamente, tolerando bancos onde a migração 0046 não foi aplicada.
+    if (
+      body.is_recurring !== undefined || body.recurrence_type !== undefined ||
+      body.recurrence_interval !== undefined || body.recurrence_days !== undefined ||
+      body.recurrence_end_date !== undefined
+    ) {
+      const isRecurring = body.is_recurring !== undefined ? (body.is_recurring ? 1 : 0) : existing.is_recurring;
+      const recurrenceType = body.recurrence_type !== undefined ? body.recurrence_type : existing.recurrence_type;
+      const recurrenceInterval = body.recurrence_interval !== undefined
+        ? (Number(body.recurrence_interval) || 1) : existing.recurrence_interval;
+      const recurrenceDays = body.recurrence_days !== undefined
+        ? JSON.stringify(body.recurrence_days || []) : existing.recurrence_days;
+      const recurrenceEndDate = body.recurrence_end_date !== undefined
+        ? (body.recurrence_end_date || '') : existing.recurrence_end_date;
+      try {
+        await env.DB.prepare(
+          `UPDATE tasks SET is_recurring=?, recurrence_type=?, recurrence_interval=?,
+             recurrence_days=?, recurrence_end_date=? WHERE id=?`
+        ).bind(isRecurring, recurrenceType, recurrenceInterval, recurrenceDays, recurrenceEndDate, taskId).run();
+        // Mantém `existing` em dia — a checagem de conclusão logo abaixo usa
+        // `existing.is_recurring` para decidir se cria a próxima ocorrência,
+        // e precisa refletir o que acabou de ser gravado NESTA mesma request.
+        existing.is_recurring = isRecurring;
+        existing.recurrence_type = recurrenceType;
+        existing.recurrence_interval = recurrenceInterval;
+        existing.recurrence_days = recurrenceDays;
+        existing.recurrence_end_date = recurrenceEndDate;
+      } catch { /* migration 0046 não aplicada */ }
+    }
+
     // v2.25.5 — Tarefas recorrentes (migration 0046): ao concluir (transição
     // para status='done') uma tarefa com is_recurring=1, cria automaticamente
     // a próxima ocorrência (cópia com due_date recalculado). Só dispara na
@@ -6831,6 +6865,14 @@ async function handleMarketOrgFull(request, env, user, id) {
     // em contact_org_links (dados legados de antes do fix de sync, ou uma
     // função adicionada só pelo lado Networking). Deduplicado por person_id:
     // contact_org_links tem prioridade quando a pessoa aparece nas duas fontes.
+    //
+    // Fallback por NOME (segunda metade do UNION): a migração 0030
+    // (consolidação network_institutions → market_organizations) zerou o
+    // institution_id da maioria das funções antigas, preservando só
+    // institution_name (mesmo problema já contornado no mapa via
+    // NetworkingPage.jsx::instByName). Backfill rodado em produção cobriu os
+    // dados existentes, mas este fallback evita que o problema volte para
+    // qualquer função futura que fique sem institution_id salvo.
     const rolesContacts = await env.DB.prepare(
       `SELECT DISTINCT pr.id, pr.person_id, pr.role AS role_at_org,
               np.name AS person_name, np.email AS person_email,
@@ -6838,8 +6880,21 @@ async function handleMarketOrgFull(request, env, user, id) {
          FROM person_roles pr
          JOIN network_people np ON np.id = pr.person_id
          LEFT JOIN contact_professional cp ON cp.person_id = np.id
-        WHERE pr.institution_id = ?`
-    ).bind(id).all();
+        WHERE pr.institution_id = ?
+
+        UNION
+
+       SELECT DISTINCT pr.id, pr.person_id, pr.role AS role_at_org,
+              np.name AS person_name, np.email AS person_email,
+              cp.outreach_status AS outreach_status
+         FROM person_roles pr
+         JOIN network_people np ON np.id = pr.person_id
+         LEFT JOIN contact_professional cp ON cp.person_id = np.id
+         JOIN market_organizations mo
+           ON LOWER(TRIM(mo.name)) = LOWER(TRIM(pr.institution_name))
+        WHERE pr.institution_id IS NULL
+          AND mo.id = ?`
+    ).bind(id, id).all();
     const linkedPersonIds = new Set((contacts.results || []).map((c) => c.person_id));
     const extraContactsFromRoles = [];
     for (const rc of (rolesContacts.results || [])) {

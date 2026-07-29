@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Radar, Search, ExternalLink, X, Tag, FileText, Loader2, Trash2,
+  Radar, Search, ExternalLink, X, Tag, FileText, Loader2, Trash2, ChevronDown,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
@@ -67,6 +67,10 @@ function fmtDate(s) {
   return Number.isNaN(t) ? '—' : new Date(t).toISOString().slice(0, 10);
 }
 
+// Itens por página. "Load more" busca a proxima pagina com o mesmo LIMIT,
+// ate hasMore virar false (offset + itens carregados >= total).
+const LIMIT = 50;
+
 // project/onProjectChange são controlados pelo HubContainer (o dashboard
 // geral precisa poder pré-selecionar um projeto ao navegar de um card do
 // overview) — os defaults abaixo só existem para uso isolado/testes.
@@ -82,6 +86,13 @@ export default function HubPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Paginação: offset = quantos itens já foram carregados (== próximo
+  // offset a pedir); total vem do próprio GET /api/hub/items.
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+
   // Filtros
   const [minRel, setMinRel] = useState('');
   const [search, setSearch] = useState('');
@@ -96,15 +107,25 @@ export default function HubPage({
     setTimeout(() => setToast(''), 4000);
   };
 
+  const itemsParams = () => {
+    const params = new URLSearchParams();
+    if (project && project !== 'todos') params.set('project', project);
+    if (minRel) params.set('min_relevancia', minRel);
+    params.set('order_by', 'received_at');
+    params.set('limit', String(LIMIT));
+    return params;
+  };
+
+  // Carga inicial (ou reset): zera offset/items e busca a primeira página.
+  // Disparada ao montar, ao trocar projeto/relevância mínima ou ao pedir
+  // "Atualizar" — qualquer uma dessas invalida a paginação acumulada, para
+  // não misturar resultados obsoletos com o novo filtro.
   const load = async () => {
     setLoading(true);
     setError('');
     try {
-      const params = new URLSearchParams();
-      if (project && project !== 'todos') params.set('project', project);
-      if (minRel) params.set('min_relevancia', minRel);
-      params.set('order_by', 'received_at');
-      params.set('limit', '200');
+      const params = itemsParams();
+      params.set('offset', '0');
 
       // Stats do card por projeto: com um projeto selecionado, pede só o dele;
       // em "todos" restringe ao servidor a h2/energia/ia (?only=noticias) —
@@ -117,7 +138,12 @@ export default function HubPage({
         apiFetch(`/api/hub/items?${params.toString()}`),
         apiFetch(`/api/hub/stats?${statsParams.toString()}`).catch(() => null),
       ]);
-      setItems(itemsRes.items || []);
+      const page = itemsRes.items || [];
+      const totalCount = itemsRes.total || 0;
+      setItems(page);
+      setOffset(page.length);
+      setTotal(totalCount);
+      setHasMore(page.length < totalCount);
       setStats(statsRes);
     } catch (e) {
       setError(String(e.message || e));
@@ -126,8 +152,30 @@ export default function HubPage({
     }
   };
 
-  // Recarrega ao mudar projeto, relevância mínima ou pedido de atualização
-  // global (a busca por texto é local).
+  // Busca a próxima página (offset atual) e acrescenta ao final da lista.
+  const loadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const params = itemsParams();
+      params.set('offset', String(offset));
+      const res = await apiFetch(`/api/hub/items?${params.toString()}`);
+      const page = res.items || [];
+      const totalCount = res.total || total;
+      setItems((prev) => [...prev, ...page]);
+      const newOffset = offset + page.length;
+      setOffset(newOffset);
+      setTotal(totalCount);
+      setHasMore(newOffset < totalCount);
+    } catch (e) {
+      showToast(`Falha ao carregar mais itens: ${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // Recarrega (do zero) ao mudar projeto, relevância mínima ou pedido de
+  // atualização global (a busca por texto é local, não recarrega do servidor).
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -212,6 +260,13 @@ export default function HubPage({
         </div>
       </div>
 
+      {/* Exibindo X de Y itens (paginação) */}
+      {!loading && !error && total > 0 && (
+        <p className="text-xs text-muted">
+          Exibindo {items.length} de {total} itens
+        </p>
+      )}
+
       {/* Tabela */}
       <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-line bg-surface">
         {loading ? (
@@ -271,6 +326,29 @@ export default function HubPage({
           </table>
         )}
       </div>
+
+      {/* Carregar mais (paginação) — independente do filtro de busca local,
+          que só narrows o que já foi carregado do servidor. */}
+      {!loading && !error && (hasMore || loadingMore) && (
+        <div className="flex justify-center py-2">
+          {loadingMore ? (
+            <span className="flex items-center gap-2 text-sm text-muted">
+              <Loader2 className="h-4 w-4 animate-spin" /> Carregando...
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={loadMore}
+              className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-4 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+            >
+              <ChevronDown className="h-4 w-4" /> Carregar mais ({total - items.length} restantes)
+            </button>
+          )}
+        </div>
+      )}
+      {!loading && !error && !hasMore && total > 0 && (
+        <p className="text-center text-xs text-muted">Todos os {total} itens carregados</p>
+      )}
 
       {selected && <DetailModal item={selected} onClose={() => setSelected(null)} />}
 

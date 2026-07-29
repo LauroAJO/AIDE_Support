@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   GraduationCap, Search, ExternalLink, X, Tag, FileText,
   Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2, Pencil,
-  ArrowRightLeft, Trash, Link2, ClipboardList,
+  ArrowRightLeft, Trash, Link2, ClipboardList, ChevronDown,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
@@ -94,6 +94,10 @@ function enrich(it) {
   return { ...it, _country: detectCountry(it).code, _area: detectArea(it) };
 }
 
+// Itens por página. "Load more" busca a proxima pagina com o mesmo LIMIT,
+// ate hasMore virar false (offset + itens carregados >= total).
+const LIMIT = 50;
+
 // refreshToken: incrementado pelo botão "Atualizar" global no HubContainer.
 // highlightShortId: vindo de /hub?vaga={short_id} (via HubContainer) — depois
 // que a lista carrega, o card correspondente ganha scroll-into-view + realce.
@@ -108,6 +112,13 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
   // é limitado pelo `limit` da query, então items.length NÃO é confiável
   // como total.
   const [dbTotal, setDbTotal] = useState(null);
+
+  // Paginação: offset = quantos itens já foram carregados (== próximo
+  // offset a pedir); total vem do próprio GET /api/hub/items.
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
 
   // Filtros (todos aplicados no cliente).
   const [search, setSearch] = useState('');
@@ -131,6 +142,7 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
   const cardRefs = useRef({}); // item.id -> DOM node, para scroll-into-view do highlight
   const highlightedShortIdRef = useRef(null); // evita re-disparar o highlight no mesmo short_id
 
+  // Carga inicial (ou reset): zera offset/items e busca a primeira página.
   const load = async () => {
     setLoading(true);
     setError('');
@@ -138,12 +150,18 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
       const params = new URLSearchParams();
       params.set('project', HUB_PROJECT);
       params.set('order_by', 'received_at');
-      params.set('limit', '100');
+      params.set('limit', String(LIMIT));
+      params.set('offset', '0');
       const [itemsRes, statsRes] = await Promise.all([
         apiFetch(`/api/hub/items?${params.toString()}`),
         apiFetch(`/api/hub/stats?project_id=${HUB_PROJECT}`).catch(() => null),
       ]);
-      setItems((itemsRes.items || []).map(enrich));
+      const page = (itemsRes.items || []).map(enrich);
+      const totalCount = itemsRes.total || 0;
+      setItems(page);
+      setOffset(page.length);
+      setTotal(totalCount);
+      setHasMore(page.length < totalCount);
       const projStats = statsRes && Array.isArray(statsRes.by_project)
         ? statsRes.by_project[0] : null;
       setDbTotal(projStats ? projStats.count : 0);
@@ -151,6 +169,31 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
       setError(String(e.message || e));
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Busca a próxima página (offset atual) e acrescenta ao final da lista.
+  const loadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const params = new URLSearchParams();
+      params.set('project', HUB_PROJECT);
+      params.set('order_by', 'received_at');
+      params.set('limit', String(LIMIT));
+      params.set('offset', String(offset));
+      const res = await apiFetch(`/api/hub/items?${params.toString()}`);
+      const page = (res.items || []).map(enrich);
+      const totalCount = res.total || total;
+      setItems((prev) => [...prev, ...page]);
+      const newOffset = offset + page.length;
+      setOffset(newOffset);
+      setTotal(totalCount);
+      setHasMore(newOffset < totalCount);
+    } catch (e) {
+      showToast(`Falha ao carregar mais vagas: ${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -430,6 +473,13 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
         </label>
       </div>
 
+      {/* Exibindo X de Y itens (paginação) */}
+      {!loading && !error && total > 0 && (
+        <p className="text-xs text-muted">
+          Exibindo {items.length} de {total} vagas
+        </p>
+      )}
+
       {/* Barra de ações em lote */}
       {selectedIds.size > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-accent/30 bg-accent/5 px-3 py-2">
@@ -498,6 +548,28 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
           </div>
         )}
       </div>
+
+      {/* Carregar mais (paginação) */}
+      {!loading && !error && (hasMore || loadingMore) && (
+        <div className="flex justify-center py-2">
+          {loadingMore ? (
+            <span className="flex items-center gap-2 text-sm text-muted">
+              <Loader2 className="h-4 w-4 animate-spin" /> Carregando...
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={loadMore}
+              className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-4 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+            >
+              <ChevronDown className="h-4 w-4" /> Carregar mais ({total - items.length} restantes)
+            </button>
+          )}
+        </div>
+      )}
+      {!loading && !error && !hasMore && total > 0 && (
+        <p className="text-center text-xs text-muted">Todas as {total} vagas carregadas</p>
+      )}
 
       {selected && (
         <DetailModal

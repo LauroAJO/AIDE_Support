@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Pin, PinOff, Trash2, ArrowLeft, Search } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -26,6 +26,9 @@ export default function NotesPage() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all'); // all | pinned | project:<id>
   const [tagFilter, setTagFilter] = useState(null);
+  const [tagMenuOpen, setTagMenuOpen] = useState(false);
+  const [tagMenuSearch, setTagMenuSearch] = useState('');
+  const tagMenuRef = useRef(null);
 
   // Editor local state (synced from selectedNote).
   const [form, setForm] = useState(null);
@@ -71,8 +74,38 @@ export default function NotesPage() {
   const allTags = useMemo(() => {
     const set = new Set();
     notes.forEach((n) => (n.tags || []).forEach((t) => set.add(t)));
-    return [...set];
+    return [...set].sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [notes]);
+
+  const visibleTags = allTags.slice(0, 5);
+  const hiddenTagsCount = Math.max(0, allTags.length - 5);
+  const menuTags = useMemo(() => {
+    const q = tagMenuSearch.trim().toLowerCase();
+    if (!q) return allTags;
+    return allTags.filter((t) => t.toLowerCase().includes(q));
+  }, [allTags, tagMenuSearch]);
+
+  // Fecha o menu de tags ao clicar fora ou pressionar Escape.
+  useEffect(() => {
+    if (!tagMenuOpen) return undefined;
+    const onDocClick = (e) => {
+      if (tagMenuRef.current && !tagMenuRef.current.contains(e.target)) setTagMenuOpen(false);
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setTagMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [tagMenuOpen]);
+
+  const chooseTag = (t) => {
+    setTagFilter(tagFilter === t ? null : t);
+    setTagMenuOpen(false);
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -172,8 +205,8 @@ export default function NotesPage() {
         </div>
 
         {allTags.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1">
-            {allTags.map((t) => (
+          <div className="relative mt-2 flex flex-wrap items-center gap-1" ref={tagMenuRef}>
+            {visibleTags.map((t) => (
               <button
                 key={t}
                 onClick={() => setTagFilter(tagFilter === t ? null : t)}
@@ -184,6 +217,48 @@ export default function NotesPage() {
                 #{t}
               </button>
             ))}
+            {hiddenTagsCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setTagMenuOpen((v) => !v)}
+                className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                  tagMenuOpen ? 'bg-accent text-white' : 'bg-surface2 text-ink2'
+                }`}
+              >
+                🏷 +{hiddenTagsCount} tags
+              </button>
+            )}
+
+            {tagMenuOpen && (
+              <div className="absolute left-0 top-full z-20 mt-1 w-72 rounded-lg border border-line bg-surface p-2 shadow-soft">
+                <input
+                  autoFocus
+                  value={tagMenuSearch}
+                  onChange={(e) => setTagMenuSearch(e.target.value)}
+                  placeholder="Filtrar tags..."
+                  className="mb-2 w-full rounded-md border border-line bg-surface2 px-2 py-1 text-xs text-ink outline-none placeholder:text-muted focus:border-accent"
+                />
+                {menuTags.length === 0 ? (
+                  <p className="px-1 py-2 text-center text-xs text-muted">Nenhuma tag encontrada.</p>
+                ) : (
+                  <div className="grid max-h-52 grid-cols-2 gap-1 overflow-y-auto sm:grid-cols-3">
+                    {menuTags.map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => chooseTag(t)}
+                        title={t}
+                        className={`truncate rounded-md px-2 py-1 text-left text-[11px] ${
+                          tagFilter === t ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+                        }`}
+                      >
+                        #{t}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

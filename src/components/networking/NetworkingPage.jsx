@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Network, Plus, Minus, Home, Maximize2, Settings, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
-  Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase,
+  Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase, ChevronDown,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -786,6 +786,43 @@ function InteractionsSection({ personId }) {
   );
 }
 
+// Seção colapsável de tags no painel de detalhe — recolhida por padrão quando
+// há mais de 6 tags (evita empurrar o resto do painel para baixo). A `key`
+// no local de uso (item.id) garante que o estado de aberto/fechado seja
+// recalculado do zero ao trocar de pessoa, em vez de "vazar" entre seleções.
+function TagsSection({ tags, onEdit }) {
+  const [open, setOpen] = useState(tags.length <= 6);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-2 text-xs font-semibold uppercase text-muted"
+      >
+        <span>Tags ({tags.length})</span>
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {tags.map((t) => (
+            <span key={t} className="rounded-full bg-surface2 px-2 py-0.5 text-[11px] text-ink2">#{t}</span>
+          ))}
+          {onEdit && (
+            <button
+              type="button"
+              onClick={onEdit}
+              title="Editar tags"
+              className="flex items-center gap-1 rounded-full border border-dashed border-line px-2 py-0.5 text-[11px] text-ink2 transition hover:bg-surface2"
+            >
+              <Pencil className="h-3 w-3" /> Editar
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, proProfile, onChangeOutreach, onPatchProfessional, onViewMarket, onEdit, onDelete, onReloadConnections }) {
   const isPerson = kind === 'person';
   const linked = useMemo(() => {
@@ -970,11 +1007,7 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
         )}
 
         {item.tags && item.tags.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
-            {item.tags.map((t) => (
-              <span key={t} className="rounded-full bg-surface2 px-2 py-0.5 text-[11px] text-ink2">#{t}</span>
-            ))}
-          </div>
+          <TagsSection key={item.id} tags={item.tags} onEdit={onEdit} />
         )}
 
         {isPerson && linked.length > 0 && (

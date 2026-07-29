@@ -1,0 +1,727 @@
+================================
+AIDE — AUDITORIA COMPLETA
+Data: 2026-07-29
+================================
+
+1. VERSAO E COMMITS RECENTES
+================================
+
+Versão atual (src/version.js): 2.25.0
+
+Últimos 10 commits (git log --oneline -10):
+93f32c3 feat: hub_short_id em Carreira, link para vaga original no Hub
+b577c04 feat: short_id nas vagas, copiar link, vincular a tarefa
+61fc766 feat: prioritario no Kanban, contadores separados EC vs normal
+e55978e fix: mover item entre projetos com UNIQUE constraint
+6d7a6f1 feat: EC oculto por padrao, ordenacao por coluna, acoes rapidas
+21a9632 fix: stats corretas por projeto, dashboard Hub consolidado
+7ac6b20 feat: subaba Artigos Científicos com placeholder
+76f8c44 fix: soft delete no Kanban de Carreira
+d416481 feat: deletar oportunidade no Kanban de Carreira
+14bffd7 feat: kanban reestruturado, extrair conhecimento, arquivar hub, mover entre projetos, selecao multipla
+
+Observação: os 3 commits mais recentes (93f32c3, b577c04, 61fc766) são todos
+sobre a integração Hub <-> Carreira (short_id, link para vaga original,
+priorização no Kanban) — confirma que essa é a frente de trabalho ativa.
+
+git status:
+  Branch: main, up to date with origin/main
+  Untracked files (NÃO commitados):
+    - aide_hub_bridge_report.md  (relatório de sessão anterior sobre a integração Hub, 2026-07-29)
+    - cleanup_phd.sql            (script SQL solto na raiz, não versionado)
+  Nenhuma modificação em arquivos rastreados.
+
+package.json (aide-support v0.1.0):
+  Scripts: dev, worker (wrangler pages dev + D1 binding), dev:full,
+           build (vite build + postbuild.mjs), deploy (build + wrangler pages deploy),
+           db:migrate / db:migrate:remote (via scripts/migrate.ps1)
+  Dependencies: react 18.3.1, react-dom 18.3.1, react-router-dom 6.26.0,
+                zustand 5.0.0, lucide-react 0.400.0
+  DevDependencies: vite 5.4.6, vite-plugin-pwa 0.20.0, tailwindcss 3.4.0,
+                   @vitejs/plugin-react 4.3.1, concurrently 9.0.0, workbox-window 7.0.0
+
+
+2. BANCO DE DADOS
+================================
+
+Migrations (44 arquivos, migrations/0001 a 0044):
+
+0001_initial.sql                    | (sem comentário)
+0002_tasks.sql                      | Phase 1 — Task management.
+0003_timer.sql                      | Phase 2 — Timer & weekly planning.
+0004_strategic.sql                  | Phase 2 UX — move strategic levels from localStorage into week_plans.
+0005_calendar.sql                   | Phase 3 — Google Calendar & Drive caches.
+0006_notes_notifications.sql        | Phase A+B+Planning — notes, notifications, push subscriptions, month plans.
+0007_bridge.sql                     | Phase 6 — Lifegame bridge.
+0008_phase2.sql                     | Phase 2 — alerts, payment rates, personal data, monthly reports.
+0009_ensure_tables.sql              | Idempotent repair migration. Safe to run any number of times.
+0010_kv_migration.sql               | Move KV-backed deduplication into D1.
+0011_improvements.sql               | AIDE v1.1.0
+0012_access_control.sql             | Owner-managed access control (Drive/Calendars).
+0013_alerts_v2.sql                  | Alerts v2 — scoped/scheduled rules.
+0014_payment_v2.sql                 | Payment v2 — multi-currency (BRL/EUR).
+0015_hierarchy.sql                  | Hierarchy (Áreas > Projetos > Frentes) + Networking.
+0016_files.sql                      | Files attached to notes/tasks + entity links.
+0017_fixes.sql                      | v1.8 fixes: bidirectional Drive/Calendar sharing.
+0018_lifegame_sync.sql              | Importação de tarefas e pessoas do Lifegame.
+0019_availability_v2.sql            | v1.9.8 — Disponibilidade semanal + horário planejado.
+0020_schedule_type.sql              | v1.9.9 — slot_type em weekly_availability.
+0021_user_timezone.sql              | v1.9.11 — Fuso horário por usuário.
+0022_multiuser.sql                  | (sem descrição textual além do nome do arquivo)
+0023_multiuser_repair.sql           | (idem)
+0024_granular_permissions.sql       | (idem)
+0025_mercado_carreira.sql           | Mercado & Carreira.
+0026_task_opportunity.sql           | Etapa 6: Integração entre áreas.
+0027_hub_items.sql                  | Hub de inteligência: itens coletados externamente.
+0028_meeting_notes.sql              | Notas de reunião persistidas em D1.
+0029_PLACEHOLDER.sql                | Placeholder — gap criado durante sessões paralelas de dev. NÃO EXECUTAR.
+0030_consolidate_institutions.sql   | (sem descrição textual além do nome do arquivo)
+0031_market_orgdetail.sql           | OrgDetailPage (v2.4.2).
+0032_bridge_staging.sql             | Curadoria de tarefas do Lifegame (v2.4.4).
+0033_contact_enrichment.sql         | Enriquecimento de perfis de contato (Prompt G). [ver nota de inconsistência abaixo]
+0034_bridge_people_staging.sql      | Curadoria de pessoas do Lifegame (v2.4.6).
+0035_gmail_integration.sql          | (sem descrição textual além do nome do arquivo)
+0036_timer_granular.sql             | (sem descrição textual além do nome do arquivo)
+0037_events_venues.sql              | Eventos & Venues de Publicação (v2.5.0).
+0038_hub_items_editable.sql         | Campos editáveis manualmente em hub_items.
+0039_hub_items_deleted_at.sql       | Soft delete para hub_items.
+0040_backfill_country.sql           | Backfill de country para hub_items pré-IntelligenceHub.
+0041_hub_career_updates.sql         | archived_at em hub_items + extract_knowledge em career_opportunities.
+0042_career_priority.sql            | is_priority em career_opportunities (Kanban).
+0043_hub_items_short_id.sql         | ID curto e legível para hub_item (links compartilháveis).
+0044_career_hub_short_id.sql        | Vincula oportunidade de carreira ao hub_item de origem.
+
+Gaps/duplicatas na numeração: NENHUM. Sequência 0001–0044 contígua e sem
+duplicatas de número. Dois pontos dignos de nota:
+  - 0029_PLACEHOLDER.sql é um gap DELIBERADO ("placeholder — gap created
+    during parallel development sessions; no schema changes needed. Do not
+    run this file."), não um erro.
+  - 0033_contact_enrichment.sql tem um comentário interno inconsistente: o
+    cabeçalho do arquivo diz "-- 0031_contact_enrichment.sql", mas o arquivo
+    é 0033. É apenas um erro de digitação no comentário (provavelmente
+    copiado de um rascunho anterior) — não afeta a numeração real nem a
+    execução, mas pode confundir leitura futura.
+  - Padrão notado: vários arquivos (0027, 0038) têm comentários explicando
+    que o "prompt original" pedia um número já ocupado por outra migration e
+    por isso foram renumerados — sugere um fluxo de trabalho onde migrations
+    são gerdas por IA/prompts e depois renumeradas manualmente para evitar
+    colisão.
+
+--- Query remota: tabelas em aide-db (D1, produção) ---
+npx wrangler d1 execute aide-db --remote --command "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+
+_cf_KV, alert_rules, areas, availability, bridge_config, bridge_person_staging,
+bridge_sync_log, bridge_task_staging, calendar_access_rules,
+calendar_events_cache, calendar_sharing_rules, career_documents,
+career_events, career_goals, career_opportunities, chat_messages,
+contact_interactions, contact_org_links, contact_professional,
+daily_work_schedule, dedup_log, drive_access_rules, drive_items_cache,
+drive_sharing_rules, event_venue_links, events_import_log, exchange_rates,
+external_accounts, fronts, gmail_emails, granular_permissions, hub_items,
+import_log, invitations, market_notes, market_org_drive_links,
+market_organizations, market_projects, meeting_notes, month_plans,
+monthly_reports, network_connections, network_entity_links,
+network_institutions, network_people, note_drive_links, notes,
+notifications, permission_presets, person_roles,
+preset_granular_permissions, projects, publication_venues,
+push_subscriptions, scheduled_notifications, sessions, sqlite_sequence,
+task_drive_links, tasks, time_entries, user_permissions,
+user_profile_data, user_profiles_archive, users, week_plans,
+weekly_availability
+
+Total: 65 tabelas (incluindo _cf_KV e sqlite_sequence, internas).
+
+Nota: network_institutions ainda existe como tabela no schema, mas foi
+DEPRECADA em favor de market_organizations (consolidação v2.4) — ver seção 3.
+
+--- Query remota: contagens por tabela-chave ---
+npx wrangler d1 execute aide-db --remote --command "SELECT (SELECT COUNT(*) FROM users) as users, ..."
+
+| Tabela                    | Contagem |
+|---------------------------|---------:|
+| users                     |        3 |
+| network_people            |       73 |
+| market_organizations      |       39 |
+| career_opportunities      |      143 |
+| career_events             |       56 |
+| publication_venues        |       20 |
+| hub_items                 |     1467 |
+| bridge_task_staging       |        0 |
+| bridge_person_staging     |        0 |
+| gmail_emails              |       21 |
+| market_notes              |        0 |
+| contact_professional      |       55 |
+
+Observações:
+  - hub_items é, disparado, a maior tabela de conteúdo do sistema (1467
+    linhas) — reflexo direto da ingestão do IntelligenceHub.
+  - market_notes está zerada — funcionalidade existe (rota /api/market/notes)
+    mas não tem uso registrado ainda.
+  - bridge_task_staging e bridge_person_staging estão ambos zerados — não há
+    itens pendentes de curadoria do Lifegame no momento da auditoria.
+
+
+3. BACKEND — ROTAS
+================================
+
+_worker.js: 9.401 linhas totais. 165 definições de função handle* (funções
+de rota + auxiliares). Single-file "Cloudflare Pages Advanced Mode Worker"
+(sem pastas functions/ ou workers/); dist/_worker.js é apenas a cópia gerada
+pelo build (scripts/postbuild.mjs).
+
+Roteamento: comparação direta de string (`path === '/api/...'`) para rotas de
+coleção, e `path.startsWith('/api/.../')` + `path.split('/')[n]` para rotas
+de item por ID — não usa nenhum framework de rotas (Express/itty-router etc).
+109 correspondências de `path ===`, 38 de `path.startsWith(`.
+
+Rotas agrupadas por área:
+
+/api/auth/*
+  GET/POST /api/auth/google        — inicia OAuth Google (público)
+  GET      /api/auth/callback      — callback OAuth (público)
+  POST     /api/auth/logout        — encerra sessão (público)
+  GET      /api/auth/me            — dados do usuário logado (sessão)
+
+/api/tasks/*
+  GET/POST /api/tasks              — coleção de tarefas
+  */*      /api/tasks/:id          — item (handleTaskItem)
+
+/api/network/*
+  GET/POST /api/network/routes
+  GET/POST /api/network/people, /api/network/people/:id
+  GET/POST /api/network/institutions, /:id  — DEPRECADO, ver abaixo (301)
+  GET/POST /api/network/connections, /:id
+
+/api/market/*
+  GET/POST /api/market/organizations, /:id
+  GET/POST /api/market/projects, /:id
+  GET/POST /api/market/contacts, /:id
+  POST     /api/market/contacts/link
+  POST     /api/market/import
+  GET/POST /api/market/notes, /:id
+
+/api/career/*
+  GET/POST /api/career/opportunities, /:id
+  GET/POST /api/career/documents, /:id
+  GET/POST /api/career/goals, /:id
+
+/api/hub/*  (ver detalhamento completo na seção 5/9)
+  POST     /api/hub/items                       — ingestão (API key, sem sessão)
+  GET      /api/hub/items                       — listagem (sessão + isHubReader)
+  DELETE   /api/hub/items/bulk                   — remoção em massa (owner)
+  PATCH    /api/hub/items/bulk/project            — mover em massa entre projetos
+  DELETE/PATCH /api/hub/items/:id                 — remover/editar item
+  PATCH    /api/hub/items/:id/archive             — arquivar (enviado p/ Carreira)
+  GET      /api/hub/stats                         — agregados por projeto
+  GET      /api/hub/excluded-ids?project_id=...    — IDs excluídos (consumido pelo IntelligenceHub)
+
+/api/bridge/*
+  GET      /api/bridge/test, /api/bridge/config/debug
+  GET/POST /api/bridge/config
+  GET      /api/bridge/log
+  POST     /api/bridge/push/{tasks,time-entries,timelog(alias),people}
+  POST     /api/bridge/pull/{tasks,people,timelog}
+  POST     /api/bridge/import/{tasks,people}
+  POST     /api/bridge/receive/{sprints,xp,people,timelog}
+  GET      /api/bridge/sync-status
+  GET      /api/bridge/staging, /api/bridge/staging/count
+  POST     /api/bridge/staging/approve, /reject
+  DELETE   /api/bridge/staging/clear
+  GET      /api/bridge/people/staging, /count
+  POST     /api/bridge/people/staging/approve, /reject
+  Auth: sessão AIDE OU header X-Bridge-Secret (sem exigir sessão de usuário).
+
+/api/gmail/*
+  GET  /api/gmail/auth, /api/gmail/callback   (owner via ?token=, callback público)
+  POST /api/gmail/disconnect, /sync, /mark-read
+  GET  /api/gmail/emails, /api/gmail/emails/:id
+
+/api/events/*
+  GET/POST /api/events/import
+  GET/POST /api/events, /api/events/:id
+
+/api/venues/*
+  GET/POST /api/venues, /api/venues/:id
+
+/api/timer/*
+  POST /api/timer/start, /stop
+  GET  /api/timer/active, /entries, /entries/:id
+
+/api/calendar/*
+  GET  /api/calendar/events, /api/calendar/events/:id
+  POST /api/calendar/sync
+  GET  /api/calendar/list
+
+/api/notes/*
+  GET/POST /api/notes, /api/notes/:id
+  POST     /api/notes/:id/images (rota especial antes do genérico /:id)
+
+/api/payment/*
+  GET /api/payment/summary, /default-rate
+  PUT /api/payment/entries/:id/paid (rota especial)
+
+/api/meeting/*
+  POST /api/meeting/start, /stop
+  GET  /api/meeting/status, /notes
+
+/api/users/*
+  GET  /api/users, /api/users/all, /api/users/pending
+  PATCH /api/users/:id/(approve|role|permissions|archive|granular-permissions)
+
+/api/drive/*
+  GET  /api/drive/files
+  GET/POST /api/drive/favorites, /api/drive/favorites/:id
+  POST /api/drive/sort
+
+Outras áreas presentes mas não listadas explicitamente no pedido original:
+  /api/areas, /api/fronts, /api/projects — hierarquia Áreas>Projetos>Frentes
+  /api/planning/week, /api/planning/month — planejamento semanal/mensal
+  /api/availability/*, /api/access/*, /api/sharing/* — disponibilidade e
+    controle de acesso a Drive/Calendar
+  /api/notifications/*, /api/push/* — notificações e push subscriptions
+  /api/alerts/rules/* — regras de alerta
+  /api/exchange/rate — taxas de câmbio
+  /api/profile, /api/profile/personal/* — perfil e dados pessoais
+  /api/reports/monthly, /api/reports/list — relatórios mensais
+  /api/dashboard/alice-timer — dashboard
+  /api/chat/messages — chat
+  /api/cron/run — disparo do job diário (satélite aide_cron_worker)
+  /api/export/tasks, /api/export/notes — exportação
+
+Rotas quebradas/deprecadas (301):
+  handleNetworkInstitutions() e handleNetworkInstitutionItem() (linhas
+  6407–6421) respondem sempre 301 com
+    { deprecated: true, message: 'Use /api/market/organizations instead',
+      redirect: '/api/market/organizations' }
+  Comentário no código (linha 6404): "DEPRECADO (consolidação v2.4):
+  network_institutions foi consolidada em market_organizations. Os handlers
+  são mantidos (não removidos) e respondem 301 ... para não quebrar clientes
+  antigos." — ou seja, é um deprecation intencional e documentado, não um bug.
+  A tabela network_institutions continua existindo no D1 (ver seção 2), mas
+  não deve mais receber escrita via API.
+
+
+4. FRONTEND — COMPONENTES
+================================
+
+src/components/ (63 arquivos .jsx, 33 no nível raiz + subpastas):
+
+Raiz (páginas/globais sem subpasta própria):
+  Layout.jsx              — shell da aplicação: header, sidebar, bottom nav mobile, menu de perfil
+  Login.jsx               — tela de login (OAuth Google)
+  PendingApprovalPage.jsx — tela de espera para usuários com status='pending' pós-OAuth
+  ProfilePage.jsx         — página de perfil do usuário
+  SettingsPage.jsx        — configurações (owner)
+
+admin/
+  AdminPage.jsx           — administração de usuários (aprovar, roles, permissões)
+  PermissionsModal.jsx    — modal de permissões granulares por feature/ação
+
+alerts/
+  AlertsPage.jsx          — regras de alerta agendadas
+
+areas/
+  AreasPage.jsx           — CRUD de Áreas (hierarquia Áreas>Projetos>Frentes)
+
+bridge/
+  BridgeCurationPage.jsx  — curadoria de tarefas/pessoas vindas do Lifegame (staging)
+
+calendar/
+  CalendarPage.jsx        — calendário Google + disponibilidade agregada de todos usuários
+  EventEditor.jsx         — editor de evento de calendário
+
+career/
+  CareerPage.jsx          — página raiz Carreira (Kanban de oportunidades)
+  DocumentsView.jsx       — documentos de carreira (CVs, cartas)
+  GoalsView.jsx           — metas de carreira, com lembrete fixo por trilha
+  OpportunityPipeline.jsx — Kanban de oportunidades (PhD/Emprego/Spin-off)
+  careerShared.jsx        — helpers compartilhados (rótulos PT-BR, cores por trilha, badges)
+
+chat/
+  ChatPage.jsx            — chat interno entre usuários
+
+dashboard/
+  DashboardPage.jsx       — dashboard geral (owner)
+
+drive/
+  DrivePage.jsx           — navegação de arquivos do Google Drive
+
+empregos/
+  EmpregoPage.jsx         — vagas de emprego curadas do Hub (project_id=emprego_vagas)
+
+events/
+  EventsPage.jsx          — eventos e venues de publicação
+  eventsShared.jsx        — helpers compartilhados (rótulos, cores por tipo/status)
+
+gmail/
+  GmailPage.jsx           — inbox compartilhado da conta Gmail lcestech.consulting
+
+hub/
+  HubContainer.jsx        — página raiz /hub: dashboard geral + 4 subabas (Notícias/Vagas PhD/Empregos/Artigos)
+  HubPage.jsx              — subaba "Notícias" (h2/energia/ia): tabela filtrável + modal de detalhe
+
+import/
+  ImportPage.jsx          — importação manual de dados
+
+market/
+  MarketPage.jsx           — página raiz Mercado
+  OrgDetailPage.jsx        — detalhe de uma organização
+  OrganizationsView.jsx    — lista de organizações
+  ProjectsView.jsx         — lista de projetos de mercado
+  marketShared.jsx         — helpers compartilhados (rótulos, badges, estrelas)
+
+meeting/
+  MeetingPage.jsx          — notas de reunião com timer
+
+networking/
+  NetworkingPage.jsx       — rede de contatos profissionais (pessoas, conexões)
+
+notes/
+  NotesPage.jsx            — notas gerais
+
+notifications/
+  NotificationBell.jsx     — sino de notificações no header
+  SendAlertModal.jsx       — modal para enviar alerta manual
+
+payment/
+  PaymentPage.jsx          — pagamentos e taxas de câmbio
+
+planning/
+  PlanningPage.jsx         — planejamento semanal/mensal (níveis estratégicos)
+
+settings/
+  AccessControl.jsx        — controle de acesso Drive/Calendar (owner-only, para Alice)
+  Sharing.jsx               — compartilhamento simétrico Drive/Calendar entre usuários
+
+shared/
+  Avatar.jsx                — avatar circular (foto Google ou iniciais)
+  ConfirmModal.jsx           — modal de confirmação (substitui window.confirm bloqueante)
+  DriveAttachmentZone.jsx    — anexar arquivos do Drive a notas/tarefas
+  EditItemModal.jsx          — modal de edição de campos manuais (usado por hub_items)
+  ErrorBoundary.jsx          — contém erros de render por seção sem derrubar o app
+  LinkTaskModal.jsx          — vincula uma vaga (Hub) a uma tarefa existente
+  LoadingSpinner.jsx         — spinner de carregamento
+  ScopeBanner.jsx            — aviso quando falta escopo OAuth (403 do Google)
+
+tasks/
+  EisenhowerMatrix.jsx       — matriz de Eisenhower (4 quadrantes)
+  ImportModal.jsx            — importação em massa de tarefas (uma por linha)
+  KanbanBoard.jsx            — quadro Kanban de tarefas
+  MentionText.jsx            — renderiza @menções destacadas
+  TaskCard.jsx               — card de tarefa
+  TaskDetail.jsx             — detalhe de tarefa
+  TaskEditor.jsx             — editor slide-in de tarefa
+  TaskModal.jsx              — modal central read-only + ações rápidas
+  TaskTreeFilter.jsx         — filtro em árvore (Área>Projeto>Frente)
+  TaskTreeView.jsx            — visão em árvore de tarefas
+  TasksPage.jsx               — página raiz de Tarefas (Lista/Kanban/Árvore)
+
+timer/
+  TimerCheckMonitor.jsx      — popup de "ainda está nessa tarefa?" a cada 30min
+  TimerIndicator.jsx         — indicador funcional na sidebar/header
+  TimerPage.jsx               — página de entradas de tempo
+
+vagas/
+  VagasPhDPage.jsx            — vagas de PhD curadas do Hub (project_id=phd_vagas)
+
+--- Rotas em App.jsx com controle de acesso ---
+
+| Rota                  | Componente        | Controle de acesso                          |
+|-----------------------|--------------------|----------------------------------------------|
+| /                     | Navigate → /tasks  | —                                              |
+| /tasks                | TasksPage          | livre (autenticado)                           |
+| /planning             | PlanningPage       | ProtectedRoute feature="planning"             |
+| /timer                | TimerPage          | livre (autenticado)                           |
+| /calendar             | CalendarPage       | ProtectedRoute feature="calendar"             |
+| /drive                | DrivePage          | ProtectedRoute feature="drive"                |
+| /notes                | NotesPage          | ProtectedRoute feature="notes"                |
+| /alerts               | AlertsPage         | ProtectedRoute feature="alerts"                |
+| /meeting              | MeetingPage        | ProtectedRoute feature="meeting"                |
+| /areas                | Navigate → /planning | — (rota antiga; AreasPage agora vive dentro de PlanningPage) |
+| /networking           | NetworkingPage     | ProtectedRoute feature="networking"            |
+| /payment              | PaymentPage        | ProtectedRoute feature="payment"                |
+| /dashboard            | DashboardPage      | livre (autenticado) — sem gate explícito       |
+| /chat                 | ChatPage           | ProtectedRoute feature="chat"                   |
+| /import               | ImportPage         | FixedRoute (owner + assistant_fixed)            |
+| /market               | MarketPage         | FixedRoute                                       |
+| /market/org/:id       | OrgDetailPage      | FixedRoute                                       |
+| /career               | CareerPage         | FixedRoute                                       |
+| /events               | EventsPage         | FixedRoute                                       |
+| /gmail                | GmailPage          | livre (autenticado) — acessível a todos          |
+| /hub                  | HubContainer       | FixedRoute                                       |
+| /admin                | AdminPage          | OwnerRoute                                       |
+| /bridge/staging       | BridgeCurationPage | OwnerRoute                                       |
+| /settings             | SettingsPage       | livre (autenticado)                               |
+| /profile              | ProfilePage        | livre (autenticado)                               |
+| *  (catch-all)        | Navigate → /tasks  | —                                                  |
+
+Nota: /dashboard e /settings não têm gate explícito de rota no App.jsx —
+o controle de acesso a essas áreas (se houver) acontece dentro dos próprios
+componentes/endpoints, não na definição da rota.
+
+
+5. HUB/SCRAPER INTEGRATION
+================================
+
+Tabela hub_items EXISTE (migrations/0027_hub_items.sql, criada em
+2026-06-28). Schema efetivo atual (após todas as migrations 0027→0044):
+
+  id INTEGER PRIMARY KEY AUTOINCREMENT
+  external_id TEXT NOT NULL
+  project_id TEXT NOT NULL
+  title TEXT NOT NULL
+  url TEXT
+  source_name TEXT
+  published_at DATETIME
+  relevancia REAL
+  prioridade TEXT
+  tipo TEXT
+  resumo TEXT
+  topicos TEXT              (JSON stringificado, parseado no front)
+  justificativa TEXT
+  collected_at DATETIME
+  received_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  country TEXT NULL          (0038 — editável manualmente)
+  area TEXT NULL              (0038 — editável manualmente)
+  user_notes TEXT NULL        (0038)
+  title_override TEXT NULL    (0038)
+  resumo_override TEXT NULL   (0038)
+  edited_at DATETIME NULL     (0038)
+  deleted_at DATETIME NULL    (0039 — soft delete)
+  short_id TEXT NULL          (0043 — UNIQUE parcial WHERE short_id IS NOT NULL)
+  archived_at DATETIME NULL   (0041 — enviado para Carreira)
+
+  UNIQUE(external_id, project_id)
+  Índices: project_id, relevancia DESC, received_at DESC, deleted_at,
+           archived_at, short_id (único parcial)
+
+Rotas /api/hub/*: ver detalhamento completo na seção 3. Resumo:
+  POST   /api/hub/items                 → handleHubIngest        (API key, sem sessão)
+  GET    /api/hub/items                 → handleHubItems          (sessão + isHubReader)
+  DELETE /api/hub/items/bulk            → handleHubItemsBulkDelete (owner)
+  PATCH  /api/hub/items/bulk/project    → handleHubItemsBulkProject
+  DELETE /api/hub/items/:id             → handleHubItemDelete      (owner)
+  PATCH  /api/hub/items/:id             → handleHubItemPatch       (qualquer sessão)
+  PATCH  /api/hub/items/:id/archive     → handleHubItemArchive
+  GET    /api/hub/stats                 → handleHubStats           (sessão + isHubReader)
+  GET    /api/hub/excluded-ids          → handleHubExcludedIds     (sessão + isHubReader)
+
+HubPage.jsx EXISTE (src/components/hub/HubPage.jsx) — é a subaba "Notícias"
+dentro de HubContainer.jsx (que é o componente montado em /hub). HubPage
+mostra: cards de estatísticas por projeto (StatsCards), barra de filtros
+(projeto h2/energia/ia/todos, relevância mínima 1-5, busca textual local) e
+uma tabela (Relevância, Título, Fonte, Projeto, Data de coleta) com modal de
+detalhe ao clicar no título (resumo, tópicos, justificativa do LLM, link
+para fonte original). Owner vê botão de exclusão (soft-delete) por linha.
+
+Classificação/exibição dos itens:
+  - `relevancia` (REAL) e `prioridade` (TEXT: alta/media/baixa) vêm prontos
+    do LLM do IntelligenceHub na ingestão; o front deriva um "nível" visual
+    (badge colorido) combinando prioridade textual OU relevância numérica
+    como fallback (função nivel() em HubPage.jsx: >=4 alta, >=2.5 media,
+    senão baixa).
+  - `topicos` é um array JSON (tags) exibido como badges no modal de detalhe.
+  - Itens com deleted_at OU archived_at preenchidos NUNCA aparecem em
+    GET /api/hub/items nem /api/hub/stats.
+  - VagasPhDPage.jsx e EmpregoPage.jsx (subabas Vagas PhD/Empregos) fazem
+    classificação adicional client-side: detecção automática de país
+    (detectCountry) e área temática (detectArea, por keyword matching em
+    título/resumo/tópicos — 4 categorias: H₂/Energia, Simulação/Modelagem,
+    Eng. de Processos, IA/Digital Twin) — sobreposta por overrides manuais
+    (`item.country`/`item.area`, editáveis via EditItemModal → PATCH
+    /api/hub/items/:id).
+
+Nenhuma tabela NOVA foi adicionada especificamente para a integração com o
+scraper além de colunas incrementais em hub_items (ver acima) e
+career_opportunities.hub_short_id (migration 0044, ligação de volta
+Carreira→Hub).
+
+
+6. STORE
+================================
+
+src/store.js — Zustand, um único store global (useStore). Campos de estado
+(agrupados pelos comentários de fase no próprio arquivo):
+
+  user, isLoading, currentView
+  userPermissions, userGranular, allUsers, pendingUsers, chatMessages, chatUnread   (v1.10/v2.1 — permissões, admin, chat)
+  tasks, projects, users, selectedTask, taskFilter, kanbanView                        (Fase 1 — tarefas)
+  activeEntry, elapsedSeconds, timeEntries, weekPlan, availability, timerCheckPopup   (Fase 2 — timer/planning)
+  calendarEvents, calendarView, calendarDate, driveFiles, driveFavorites,
+    driveParent, driveSearch                                                          (Fase 3 — calendar/drive)
+  notes, selectedNote, notifications, unreadCount, monthPlan, meetingDate             (Fase A+B — notas/notificações)
+  alertRules, paymentSummary, monthlyReport, personalData                             (Fase 2 — alerts/payment/reports)
+  areas, fronts, networkPeople, networkInstitutions, networkConnections,
+    bridgeSyncStatus                                                                  (v1.6 — hierarquia + networking)
+  marketOrgs, marketProjects, marketContacts                                          (Etapa 4 — Mercado)
+  careerOpportunities, careerDocuments, careerGoals                                   (Etapa 5 — Carreira)
+  careerEvents, publicationVenues, eventsFilter                                       (v2.5.0 — Eventos & Venues)
+  taskView, treeCollapse, taskTreeFilter                                              (v1.8 — árvore de tarefas)
+  weeklyAvailability, dailySchedule, allUsersSchedule                                 (v1.9.8 — disponibilidade)
+
+Além disso: um seletor derivado `selectFilteredTasks` (filtra tasks por
+taskFilter.status/search/assignedTo, com regra especial para status='all'
+esconder tarefas 'done').
+
+Estado adicionado mais recentemente (por ordem dos comentários no arquivo):
+  careerEvents / publicationVenues / eventsFilter (v2.5.0, Eventos & Venues)
+  são o bloco mais novo identificável explicitamente por versão.
+
+ACHADO RELEVANTE: não existe NENHUM campo de estado global para o Hub/Scraper
+(hub_items, filtros do Hub, stats do Hub etc.). Toda a área /hub
+(HubContainer, HubPage, VagasPhDPage, EmpregoPage) gerencia seu próprio
+estado local via useState — os dados do Hub nunca passam pelo store.js
+Zustand. Isso é consistente entre os quatro componentes, mas é uma
+divergência arquitetural em relação ao resto do app (Mercado, Carreira,
+Networking etc. têm slices dedicados no store).
+
+
+7. NAVEGACAO ATUAL
+================================
+
+Layout.jsx — array NAV_ITEMS (ordem exata de definição, que é também a ordem
+de exibição na sidebar/bottom nav mobile):
+
+ 1. Tarefas               /tasks         feature=tasks           grupo=trabalho
+ 2. Planejamento          /planning      feature=planning        grupo=trabalho
+ 3. Notas                 /notes         feature=notes           grupo=conteudo
+ 4. Calendário             /calendar      feature=calendar        grupo=conteudo
+ 5. Reunião                /meeting       feature=meeting         grupo=conteudo
+ 6. Drive                  /drive         feature=drive           grupo=conteudo
+ 7. Contatos-Networking    /networking    feature=networking      grupo=rede       (shortLabel: Contatos)
+ 8. Mercado                /market        fixed=true              grupo=rede
+ 9. Carreira                /career        fixed=true              grupo=rede
+10. Eventos & Venues        /events        fixed=true              grupo=rede       (shortLabel: Eventos)
+11. LCEStech Email          /gmail         (sem feature — todos)     grupo=rede       (shortLabel: Email)
+12. Hub                     /hub           fixed=true              grupo=ferramentas
+13. Chat                     /chat          feature=chat, badge=chatUnread  grupo=chat
+
+Grupos visuais na sidebar (divisores + cor de fundo): trabalho (azul),
+conteudo (verde), rede (índigo), ferramentas (cinza), chat (cinza — mesmo
+grupo visual de ferramentas, mas separado só para inserir divisor entre Hub
+e Chat).
+
+Itens do dropdown de perfil (na ordem em que aparecem no menu):
+  1. Meu Perfil          → /profile           (todos)
+  2. Admin                → /admin             (owner only, badge = pendingUsers)
+  3. Dashboard            → /dashboard         (owner only)
+  4. Timer                → /timer             (todos — só o link; widget fica na sidebar)
+  5. Pagamentos           → /payment           (todos)
+  6. Avisos               → /alerts            (todos)
+  7. Configurações        → /settings          (owner only)
+  8. Importar Dados       → /import            (todos — owner + fixo + externo)
+  9. Revisar Bridge       → /bridge/staging    (owner only, badge = bridgePending)
+  --- divisor ---
+ 10. Sair                 (logout)             (todos)
+
+Bottom nav mobile: 4 slots fixos (Tarefas, Planejamento, Calendário, Notas)
++ botão "Mais" que abre bottom sheet com o restante dos itens permitidos
+(respeitando as mesmas permissões do array NAV_ITEMS).
+
+
+8. BUGS CONHECIDOS
+================================
+
+grep -r "TODO\|FIXME\|console.error" src/ --include="*.jsx"
+
+Nenhuma ocorrência real de TODO ou FIXME encontrada — as únicas
+correspondências ao padrão "TODO" foram falsos positivos da palavra
+portuguesa "TODOS" (ex.: "Agrega blocos de TODOS os usuários" em
+CalendarPage.jsx), não marcadores de pendência.
+
+console.error (3 ocorrências, todas tratamento de erro legítimo, não bugs
+pendentes):
+  src/components/notes/NotesPage.jsx:45           — log de falha ao buscar notas
+  src/components/shared/ErrorBoundary.jsx:17      — log do error boundary (por design)
+  src/components/tasks/TaskModal.jsx:50            — log de falha ao excluir tarefa
+
+Nenhum bug/dívida técnica explicitamente marcado no código-fonte frontend.
+(Esta auditoria não cobriu TODO/FIXME dentro de _worker.js nem arquivos
+.js fora de src/, que não foram pedidos no escopo.)
+
+
+9. INTELLIGENCE HUB
+================================
+
+Endpoints que o Hub (IntelligenceHub, projeto externo em
+X:\_Software\Projetos Pessoais\IntelligenceHub) usa para se comunicar com o
+AIDE:
+  - POST /api/hub/items                    — envia itens coletados/classificados
+    (autenticado por API key, header Authorization: ApiKey <HUB_API_KEY>,
+    não usa sessão de usuário). Body: { items: [{ external_id, project_id,
+    title, url, source_name, published_at, relevancia, prioridade, tipo,
+    resumo, topicos, justificativa, collected_at, country }, ...] }.
+    Idempotente via UNIQUE(external_id, project_id) + ON CONFLICT DO UPDATE;
+    nunca reativa um item com deleted_at preenchido.
+  - GET /api/hub/excluded-ids?project_id=... — consultado pelo IntelligenceHub
+    (visto nos logs como "aide_exporter") ANTES de cada envio, para saber
+    quais external_ids já foram deletados/arquivados no AIDE e não devem ser
+    reingeridos. Requer sessão de usuário do AIDE (não API key) — ver nota
+    abaixo sobre falhas 401 observadas nos logs do Hub.
+
+Categorização/filtro na UI:
+  - project_id é uma coluna TEXT livre (não há tabela hub_projects) — valores
+    observados em produção: h2, energia, ia, phd_vagas, emprego_vagas.
+  - h2/energia/ia caem na subaba "Notícias" (HubPage.jsx) por padrão; vagas
+    (phd_vagas, emprego_vagas) só aparecem quando explicitamente pedidas por
+    ?project=, cada uma com subaba própria (VagasPhDPage / EmpregoPage) e
+    lógica de categorização adicional client-side (país + área temática por
+    keyword matching, com overrides manuais).
+  - Um dashboard "visão geral" (HubContainer) mostra 1 card por projeto
+    (contagem + data do último item) e permite navegar diretamente para a
+    subaba/filtro correspondente.
+  - relevancia/prioridade vêm prontas do LLM do Hub; badges coloridos no
+    front (verde=alta, âmbar=media, cinza=baixa).
+
+Contagem por projeto (D1 remoto, produção — consistente com a query da
+seção 2, total geral 1467):
+  phd_vagas:      510 total | 41 ativos (visíveis)
+  h2:             460 total | 460 ativos
+  emprego_vagas:  192 total | 34 ativos
+  ia:             165 total | 165 ativos
+  energia:        140 total | 140 ativos
+  (h2/ia/energia têm 100% dos itens ativos — nenhum deletado/arquivado ainda;
+  phd_vagas e emprego_vagas têm alta taxa de itens inativos, consistente com
+  vagas expiradas/removidas ou migradas para Carreira via archived_at +
+  hub_short_id)
+
+Filtro, busca e paginação em HubPage.jsx:
+  - Filtro de projeto (select: Todos/H₂/Energia/IA) — controlado pelo
+    HubContainer pai (para permitir pré-seleção via clique no dashboard).
+  - Filtro de relevância mínima (1 a 5) — enviado ao backend
+    (?min_relevancia=).
+  - Busca textual (título/resumo) — 100% client-side (filtra o array já
+    carregado, não faz nova request).
+  - "Paginação": não há paginação real na UI — a página sempre pede
+    limit=200 de uma vez (order_by=received_at DESC) e não há botão de
+    "carregar mais"/scroll infinito. O backend (handleHubItems) SUPORTA
+    limit/offset (?limit=, ?offset=, até 200 por página), mas o frontend
+    não usa offset — se um projeto tiver mais de 200 itens ativos, os itens
+    além do 200º não aparecem na UI atualmente. Nenhum dos projetos ativos
+    (máx. 460 em h2) excede visivelmente esse limite hoje pela contagem de
+    "ativos", mas vale monitorar caso o volume cresça.
+
+ACHADO IMPORTANTE (relacionado ao Hub, para revisão antes de novas
+mudanças): os logs mais recentes do IntelligenceHub (logs/hub.log, runs
+#106–#109, 26–29/jul/2026) mostram falha recorrente de 401 Unauthorized ao
+chamar GET /api/hub/excluded-ids para os 5 projetos, em TODOS os runs
+recentes:
+  "AIDE excluded-ids: falha ao consultar projeto <X> (401 Client Error:
+  Unauthorized for url: https://aide-support.pages.dev/api/hub/excluded-ids
+  ?project_id=<X>). Continuando sem filtrar por essa fonte neste run."
+Isso é coerente com o código: handleHubExcludedIds exige sessão de usuário
+válida (isHubReader), não a HUB_API_KEY usada pela ingestão — se o
+IntelligenceHub estiver usando a mesma API key para os dois endpoints (ou um
+token de sessão expirado), a chamada a excluded-ids sempre falhará com 401.
+O hub continua funcionando (a ingestão via API key não é afetada), mas o
+mecanismo de "não reingerir itens deletados/arquivados" está inoperante há
+pelo menos 4 execuções diárias consecutivas — pode causar reativação
+indevida de itens ou apenas silenciosamente listar excluded_ids: [] sempre
+(que é o efeito prático hoje). Recomenda-se decidir entre (a) o
+IntelligenceHub passar a autenticar excluded-ids com uma sessão/token válido
+de usuário AIDE, ou (b) mudar handleHubExcludedIds para aceitar também a
+HUB_API_KEY, já que é uma leitura de suporte à mesma pipeline de ingestão.
+
+================================
+FIM DA AUDITORIA
+================================

@@ -77,8 +77,8 @@ export default function NotesPage() {
     return [...set].sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [notes]);
 
-  const visibleTags = allTags.slice(0, 5);
-  const hiddenTagsCount = Math.max(0, allTags.length - 5);
+  const visibleTags = allTags.slice(0, 3);
+  const hiddenTagsCount = Math.max(0, allTags.length - 3);
   const menuTags = useMemo(() => {
     const q = tagMenuSearch.trim().toLowerCase();
     if (!q) return allTags;

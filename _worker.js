@@ -63,6 +63,13 @@ async function handleAPI(request, env, ctx) {
   // (Authorization: ApiKey <chave>). Tem de vir antes do gate de sessão.
   if (path === '/api/hub/items' && method === 'POST') return handleHubIngest(request, env);
 
+  // Hub — leitura de excluded-ids pelo Intelligence Hub externo: mesmo padrão
+  // acima, API key autoriza direto sem sessão. Se não vier ApiKey válida, cai
+  // no gate de sessão normal logo abaixo (comportamento antigo preservado).
+  if (path === '/api/hub/excluded-ids' && method === 'GET' && validateHubApiKey(request, env)) {
+    return handleHubExcludedIds(request, env, null, true);
+  }
+
   // Protected routes — require valid session token
   const user = await getUserFromRequest(request, env);
   if (!user) return json({ error: 'Não autorizado' }, 401);
@@ -9284,9 +9291,11 @@ async function handleHubItemArchive(request, env, user, id) {
 
 // GET /api/hub/excluded-ids?project_id=... — external_ids que estão
 // deletados ou arquivados, para o Hub local não os reativar numa próxima
-// ingestão. Sessão obrigatória.
-async function handleHubExcludedIds(request, env, user) {
-  if (!isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
+// ingestão. Aceita Authorization: ApiKey (Hub externo, ver dispatch em
+// handleAPI) ou sessão de navegador (isHubReader) — apiKeyAuthorized indica
+// que a validação de API key já ocorreu no router.
+async function handleHubExcludedIds(request, env, user, apiKeyAuthorized = false) {
+  if (!apiKeyAuthorized && !isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
   const url = new URL(request.url);
   const projectId = url.searchParams.get('project_id');
   if (!projectId) return json({ error: 'project_id é obrigatório' }, 400);

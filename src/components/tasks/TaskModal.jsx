@@ -254,12 +254,25 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
     // Bug fix (v2.4.8): o modal apenas chamava o callback de refresh e NUNCA
     // enviava o DELETE — a tarefa reaparecia após o loadAll(). Agora exclui de
     // fato no backend antes de atualizar a lista (mesmo padrão do TaskEditor).
+    // eslint-disable-next-line no-console
+    console.log('[TaskModal] DELETE disparado para a tarefa', task.id);
     try {
-      await apiFetch(`/api/tasks/${task.id}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/tasks/${task.id}`, { method: 'DELETE' });
+      // eslint-disable-next-line no-console
+      console.log('[TaskModal] DELETE respondeu OK', res);
       onDelete(task.id);
     } catch (err) {
-      console.error('Falha ao excluir tarefa', task.id, err);
-      window.alert('Falha ao excluir a tarefa. Tente novamente.');
+      // eslint-disable-next-line no-console
+      console.error('[TaskModal] Falha ao excluir tarefa', task.id, err);
+      // Investigação (bug de exclusão): apiFetch lança com o TEXTO CRU do
+      // corpo da resposta (ver src/lib/api.js), que em erros do backend é um
+      // JSON tipo {"error":"..."}. Um alerta genérico fixo escondia a causa
+      // real (ex.: 403 de permissão) e sugeria "tente novamente" mesmo quando
+      // repetir jamais vai funcionar. Mostra a mensagem real quando dá pra
+      // extrair; só cai no genérico se o corpo não for o JSON esperado.
+      let detail = '';
+      try { detail = JSON.parse(err.message)?.error || ''; } catch { /* corpo não era JSON */ }
+      window.alert(detail || 'Falha ao excluir a tarefa. Tente novamente.');
     }
   };
 

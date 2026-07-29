@@ -126,6 +126,8 @@ export default function TasksPage() {
     loadAll();
   };
   const onDeleted = (id) => {
+    // eslint-disable-next-line no-console
+    console.log('[TasksPage] onDeleted chamado para', id, '— recarregando lista');
     setEditorTask(undefined);
     setEditorStatus(undefined);
     if (selectedTask?.id === id) setSelectedTask(null);

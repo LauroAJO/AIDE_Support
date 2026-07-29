@@ -1498,6 +1498,15 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
   }
 
   if (request.method === 'DELETE' && !canDo(user.granular, 'tasks', 'delete')) {
+    // Investigação (bug de exclusão) — log temporário para confirmar se uma
+    // falha de exclusão relatada é rejeição de permissão (403) e não outra
+    // causa. user.granular é null para owner (bypass), então nunca deveria
+    // logar aqui para o owner — se aparecer, é sinal de que o bypass quebrou.
+    console.log(
+      '[DELETE /api/tasks/:id] negado por permissão — user', user.id,
+      'role', user.role, "granular['tasks.delete']",
+      user.granular ? !!user.granular['tasks.delete'] : '(null = owner, nao deveria cair aqui)'
+    );
     return json({ error: 'Sem permissão para deletar tarefas' }, 403);
   }
 
@@ -1647,7 +1656,21 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
   }
 
   if (request.method === 'DELETE') {
-    await env.DB.prepare('DELETE FROM tasks WHERE id = ?').bind(taskId).run();
+    // Correção: antes disparava o DELETE incondicionalmente e sempre
+    // respondia { ok: true }, mesmo que o id não existisse (0 linhas
+    // afetadas) — indistinguível de um sucesso real no frontend. Agora
+    // confere existência antes (mesmo padrão de GET/PUT) e loga o resultado
+    // (temporário, para a investigação do bug de exclusão).
+    const existingRow = await env.DB.prepare('SELECT id FROM tasks WHERE id = ?').bind(taskId).first();
+    if (!existingRow) {
+      console.log('[DELETE /api/tasks/:id] tarefa não encontrada', taskId);
+      return json({ error: 'Tarefa não encontrada' }, 404);
+    }
+    const result = await env.DB.prepare('DELETE FROM tasks WHERE id = ?').bind(taskId).run();
+    console.log(
+      '[DELETE /api/tasks/:id] excluída', taskId, 'por', user.id,
+      '— changes:', result && result.meta && result.meta.changes
+    );
     return json({ ok: true });
   }
 

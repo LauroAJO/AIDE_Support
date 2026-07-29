@@ -5,6 +5,7 @@ import { apiFetch } from '../../lib/api';
 import Avatar from '../shared/Avatar';
 import MentionText from './MentionText';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
+import { MarkdownViewer } from '../../lib/markdownRenderer';
 import { scoreColor, STATUS_LABELS, STATUS_COLORS, formatDate, isOverdue } from '../../lib/tasks';
 
 // Centered modal: read-only view + quick actions. Editing the full task still
@@ -113,7 +114,7 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete }
             </div>
           )}
 
-          {task.description && <p className="whitespace-pre-wrap text-sm text-ink">{task.description}</p>}
+          {task.description && <MarkdownViewer content={task.description} className="text-sm" />}
 
           {/* Subtasks */}
           {subs.length > 0 && (

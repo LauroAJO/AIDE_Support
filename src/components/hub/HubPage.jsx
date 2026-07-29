@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
+import { MarkdownViewer } from '../../lib/markdownRenderer';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
 
@@ -359,7 +360,7 @@ function DetailModal({ item, onClose }) {
 
           {item.resumo && (
             <Row label="Resumo">
-              <p className="whitespace-pre-wrap leading-relaxed text-ink2">{item.resumo}</p>
+              <MarkdownViewer content={item.resumo} className="text-ink2" />
             </Row>
           )}
 
@@ -378,10 +379,10 @@ function DetailModal({ item, onClose }) {
 
           {item.justificativa && (
             <Row label="Justificativa do LLM">
-              <p className="whitespace-pre-wrap leading-relaxed text-ink2">
-                <FileText className="mr-1 inline h-3.5 w-3.5 text-muted" />
-                {item.justificativa}
-              </p>
+              <div className="flex items-start gap-1.5">
+                <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" />
+                <MarkdownViewer content={item.justificativa} className="text-ink2" />
+              </div>
             </Row>
           )}
 

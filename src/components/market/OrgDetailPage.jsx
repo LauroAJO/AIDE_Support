@@ -8,6 +8,8 @@ import { apiFetch } from '../../lib/api';
 import Avatar from '../shared/Avatar';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
+import MarkdownEditor from '../shared/MarkdownEditor';
+import { stripMarkdown } from '../../lib/markdownRenderer';
 import { OrgEditor } from './OrganizationsView';
 import {
   StarRating, OrgTypeBadge, OrgStatusBadge, ProjectTypeBadge, ProjectStatusBadge,
@@ -781,7 +783,7 @@ function NotesTab({ orgId }) {
               <div className="flex items-center gap-1.5">
                 {n.pinned && <Pin className="h-3 w-3 shrink-0 fill-current text-amber-500" />}
                 <span className="truncate text-sm font-medium text-ink">
-                  {n.title || (n.body || '').slice(0, 50) || '(sem título)'}
+                  {n.title || stripMarkdown(n.body, 100) || '(sem título)'}
                 </span>
               </div>
               <div className="mt-1 flex items-center gap-2 text-[11px] text-muted">
@@ -889,13 +891,15 @@ function NoteEditor({ note, onSaved, onDeleted }) {
         />
       </div>
 
-      <textarea
-        value={body}
-        onChange={(e) => setBody(e.target.value)}
-        onBlur={() => save()}
-        placeholder="Escreva aqui..."
-        className="min-h-[220px] flex-1 resize-none rounded-lg bg-surface2 px-3 py-2 text-sm text-ink outline-none focus:ring-1 focus:ring-accent"
-      />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <MarkdownEditor
+          value={body}
+          onChange={setBody}
+          onBlur={() => save()}
+          placeholder="Escreva aqui... (markdown suportado)"
+          minHeight={220}
+        />
+      </div>
 
       <div className="mt-2 flex items-center justify-between text-[11px] text-muted">
         <span>

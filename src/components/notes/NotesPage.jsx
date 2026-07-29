@@ -6,6 +6,7 @@ import { canDo } from '../../lib/can';
 import { formatDate } from '../../lib/tasks';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
+import MarkdownEditor from '../shared/MarkdownEditor';
 
 function preview(note) {
   if (note.title) return note.title;
@@ -275,13 +276,15 @@ export default function NotesPage() {
               </button>
             </div>
 
-            <textarea
-              value={form.body}
-              onChange={(e) => setForm({ ...form, body: e.target.value })}
-              onBlur={() => persistForm()}
-              placeholder="Escreva sua nota aqui..."
-              className="mt-3 min-h-0 flex-1 resize-none bg-transparent text-sm text-ink outline-none placeholder:text-muted"
-            />
+            <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+              <MarkdownEditor
+                value={form.body}
+                onChange={(body) => setForm({ ...form, body })}
+                onBlur={() => persistForm()}
+                placeholder="Escreva sua nota aqui... (markdown suportado)"
+                minHeight={240}
+              />
+            </div>
 
             <div className="mt-3 border-t border-line pt-3">
               <DriveAttachmentZone entityType="note" entityId={selectedNote.id} />

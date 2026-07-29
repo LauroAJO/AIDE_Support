@@ -10,6 +10,8 @@ import { getTodayStr, scoreColor } from '../../lib/tasks';
 import { formatHMS, formatDuration } from '../../lib/time';
 import Avatar from '../shared/Avatar';
 import TaskModal from '../tasks/TaskModal';
+import MarkdownEditor from '../shared/MarkdownEditor';
+import { MarkdownViewer } from '../../lib/markdownRenderer';
 
 const MEET_URL = 'https://meet.google.com/xbo-mcvw-reh';
 const MEET_LABEL = 'meet.google.com/xbo-mcvw-reh';
@@ -534,27 +536,43 @@ export default function MeetingPage() {
             <label className="mb-1 block text-sm font-semibold text-ink">
               Pauta de hoje
             </label>
-            <textarea
-              value={form.agenda}
-              onChange={(e) => onChangeField('agenda', e.target.value)}
-              readOnly={readOnly}
-              placeholder="O que será discutido hoje..."
-              rows={5}
-              className="w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:shadow-[0_0_0_3px_rgba(99,102,241,0.12)] read-only:opacity-70"
-            />
+            {readOnly ? (
+              <div className="rounded-lg border border-line bg-surface px-3 py-2 opacity-70">
+                {form.agenda ? (
+                  <MarkdownViewer content={form.agenda} className="text-sm" />
+                ) : (
+                  <p className="text-sm text-muted">Sem pauta registrada.</p>
+                )}
+              </div>
+            ) : (
+              <MarkdownEditor
+                value={form.agenda}
+                onChange={(v) => onChangeField('agenda', v)}
+                placeholder="O que será discutido hoje..."
+                minHeight={110}
+              />
+            )}
           </div>
           <div>
             <label className="mb-1 block text-sm font-semibold text-ink">
               Notas da reunião
             </label>
-            <textarea
-              value={form.notes}
-              onChange={(e) => onChangeField('notes', e.target.value)}
-              readOnly={readOnly}
-              placeholder="Anotações durante a reunião..."
-              rows={8}
-              className="w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:shadow-[0_0_0_3px_rgba(99,102,241,0.12)] read-only:opacity-70"
-            />
+            {readOnly ? (
+              <div className="rounded-lg border border-line bg-surface px-3 py-2 opacity-70">
+                {form.notes ? (
+                  <MarkdownViewer content={form.notes} className="text-sm" />
+                ) : (
+                  <p className="text-sm text-muted">Sem notas registradas.</p>
+                )}
+              </div>
+            ) : (
+              <MarkdownEditor
+                value={form.notes}
+                onChange={(v) => onChangeField('notes', v)}
+                placeholder="Anotações durante a reunião..."
+                minHeight={170}
+              />
+            )}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">

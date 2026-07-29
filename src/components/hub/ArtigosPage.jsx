@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
+import { MarkdownViewer } from '../../lib/markdownRenderer';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
 
@@ -443,7 +444,7 @@ function ArticleDetail({ item, onBack, onCopyDoi, copied, onDelete, deleting }) 
       {item.resumo && (
         <div className="mt-3 flex flex-col gap-1 border-t border-line pt-3">
           <span className="text-xs font-medium text-muted">Resumo</span>
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-ink2">{item.resumo}</p>
+          <MarkdownViewer content={item.resumo} className="text-sm text-ink2" />
         </div>
       )}
 
@@ -452,7 +453,7 @@ function ArticleDetail({ item, onBack, onCopyDoi, copied, onDelete, deleting }) 
           <span className="text-xs font-medium text-muted">Relevância &amp; Justificativa</span>
           {item.relevancia != null && <RelevanceDots value={item.relevancia} />}
           {item.justificativa && (
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-ink2">{item.justificativa}</p>
+            <MarkdownViewer content={item.justificativa} className="text-sm text-ink2" />
           )}
         </div>
       )}

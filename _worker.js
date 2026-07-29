@@ -9074,8 +9074,10 @@ async function handleHubIngest(request, env) {
       const res = await env.DB.prepare(
         `INSERT INTO hub_items
           (external_id, project_id, title, url, source_name, published_at,
-           relevancia, prioridade, tipo, resumo, topicos, justificativa, collected_at, country, short_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, LOWER(HEX(RANDOMBLOB(3))))
+           relevancia, prioridade, tipo, resumo, topicos, justificativa, collected_at, country, short_id,
+           doi, journal_name, impact_factor, sjr_quartile, access_type, article_type, publication_year)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, LOWER(HEX(RANDOMBLOB(3))),
+                 ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(external_id, project_id) DO UPDATE SET
            relevancia = excluded.relevancia,
            prioridade = excluded.prioridade,
@@ -9090,7 +9092,14 @@ async function handleHubIngest(request, env) {
            short_id = CASE
              WHEN hub_items.short_id IS NULL THEN LOWER(HEX(RANDOMBLOB(3)))
              ELSE hub_items.short_id
-           END
+           END,
+           doi = COALESCE(excluded.doi, hub_items.doi),
+           journal_name = COALESCE(excluded.journal_name, hub_items.journal_name),
+           impact_factor = COALESCE(excluded.impact_factor, hub_items.impact_factor),
+           sjr_quartile = COALESCE(excluded.sjr_quartile, hub_items.sjr_quartile),
+           access_type = COALESCE(excluded.access_type, hub_items.access_type),
+           article_type = COALESCE(excluded.article_type, hub_items.article_type),
+           publication_year = COALESCE(excluded.publication_year, hub_items.publication_year)
          WHERE hub_items.deleted_at IS NULL`
       ).bind(
         String(item.external_id),
@@ -9106,7 +9115,14 @@ async function handleHubIngest(request, env) {
         topicos,
         item.justificativa || null,
         item.collected_at || null,
-        item.country || null
+        item.country || null,
+        item.doi || '',
+        item.journal_name || '',
+        item.impact_factor || null,
+        item.sjr_quartile || '',
+        item.access_type || '',
+        item.article_type || item.tipo || '',
+        item.publication_year || null
       ).run();
       if (res.meta && res.meta.changes > 0) accepted += 1;
       else duplicates += 1;

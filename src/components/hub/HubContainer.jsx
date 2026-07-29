@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Radar, GraduationCap, Briefcase, BookOpen, RefreshCw } from 'lucide-react';
 import HubPage from './HubPage';
+import ArtigosPage from './ArtigosPage';
 import VagasPhDPage from '../vagas/VagasPhDPage';
 import EmpregoPage from '../empregos/EmpregoPage';
 import { apiFetch } from '../../lib/api';
@@ -16,7 +17,7 @@ const TABS = [
   { key: 'noticias', label: 'Notícias', icon: Radar },
   { key: 'vagas', label: 'Vagas PhD', icon: GraduationCap },
   { key: 'empregos', label: 'Empregos', icon: Briefcase },
-  { key: 'artigos', label: 'Artigos Científicos', icon: BookOpen, badge: 'Em breve' },
+  { key: 'artigos', label: 'Artigos Científicos', icon: BookOpen },
 ];
 
 // Dashboard geral (overview) — um card compacto por projeto do hub_items,
@@ -41,24 +42,6 @@ function fmtDate(s) {
   if (str.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(str)) return str.slice(0, 10);
   const t = Date.parse(str);
   return Number.isNaN(t) ? null : new Date(t).toISOString().slice(0, 10);
-}
-
-// Placeholder da subaba "Artigos Científicos" — funcionalidade ainda não
-// implementada (monitoramento de periódicos académicos).
-function ArtigosCientificosPlaceholder() {
-  return (
-    <div className="flex h-full min-h-[24rem] items-center justify-center rounded-xl border border-dashed border-line">
-      <div className="flex max-w-md flex-col items-center gap-3 px-6 text-center">
-        <BookOpen className="h-10 w-10 text-ink2" />
-        <h2 className="text-base font-semibold text-ink">Artigos Científicos</h2>
-        <p className="text-sm text-ink2">
-          Esta funcionalidade está em desenvolvimento. Em breve você poderá
-          monitorar publicações académicas de periódicos como ScienceDirect,
-          MDPI, Nature Energy e Electrochimica Acta diretamente aqui.
-        </p>
-      </div>
-    </div>
-  );
 }
 
 function OverviewCard({ projectId, stat, onClick }) {
@@ -211,7 +194,7 @@ export default function HubContainer() {
         )}
         {tab === 'vagas' && <VagasPhDPage refreshToken={refreshToken} highlightShortId={highlightShortId} />}
         {tab === 'empregos' && <EmpregoPage refreshToken={refreshToken} highlightShortId={highlightShortId} />}
-        {tab === 'artigos' && <ArtigosCientificosPlaceholder />}
+        {tab === 'artigos' && <ArtigosPage />}
       </div>
     </div>
   );

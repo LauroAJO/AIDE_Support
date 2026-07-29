@@ -66,3 +66,33 @@ export function isDueSoon(due) {
 export function needsDate(task) {
   return task.status !== 'done' && !task.due_date && !task.delivery_date;
 }
+
+// Recorrência (v2.25.5) — dias da semana na convenção Date.getDay() (0=domingo),
+// exibidos em ordem PT-BR (Seg…Dom). Mesma convenção usada em recurrence_days
+// e em _worker.js::calcNextDate.
+export const WEEKDAY_CHIPS = [
+  { day: 1, label: 'Seg' },
+  { day: 2, label: 'Ter' },
+  { day: 3, label: 'Qua' },
+  { day: 4, label: 'Qui' },
+  { day: 5, label: 'Sex' },
+  { day: 6, label: 'Sáb' },
+  { day: 0, label: 'Dom' },
+];
+
+// Descrição curta da recorrência para tooltip/badge (ex.: "Toda semana (Seg, Qua, Sex)").
+export function recurrenceSummary(task) {
+  if (!task || !task.is_recurring) return '';
+  const n = Number(task.recurrence_interval) || 1;
+  if (task.recurrence_type === 'daily') return n === 1 ? 'Todo dia' : `A cada ${n} dias`;
+  if (task.recurrence_type === 'monthly') return n === 1 ? 'Todo mês' : `A cada ${n} meses`;
+  if (task.recurrence_type === 'weekly') {
+    const days = Array.isArray(task.recurrence_days) ? task.recurrence_days : [];
+    if (days.length > 0) {
+      const labels = WEEKDAY_CHIPS.filter((c) => days.includes(c.day)).map((c) => c.label);
+      return `Toda semana (${labels.join(', ')})`;
+    }
+    return n === 1 ? 'Toda semana' : `A cada ${n} semanas`;
+  }
+  return 'Recorrente';
+}

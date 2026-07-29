@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch, Briefcase } from 'lucide-react';
+import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch, Briefcase, Repeat } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { canDo } from '../../lib/can';
-import { needsDate } from '../../lib/tasks';
+import { needsDate, formatDate } from '../../lib/tasks';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import TaskCard from './TaskCard';
 import EisenhowerMatrix from './EisenhowerMatrix';
@@ -44,6 +44,13 @@ export default function TasksPage() {
   const setCareerOpportunities = useStore((s) => s.setCareerOpportunities);
   // Etapa 6 — filtro "Tarefas de carreira" (só tarefas com oportunidade vinculada).
   const [careerOnly, setCareerOnly] = useState(false);
+  // v2.25.5 — filtro "Recorrentes" + toast de próxima ocorrência criada.
+  const [recurringOnly, setRecurringOnly] = useState(false);
+  const [toast, setToast] = useState('');
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 5000);
+  };
 
   // Compute locally with useMemo. Subscribing via useStore(selectFilteredTasks)
   // would return a new array every render → Zustand v5 + useSyncExternalStore
@@ -65,8 +72,9 @@ export default function TasksPage() {
       });
     }
     if (careerOnly) list = list.filter((t) => t.opportunity_id);
+    if (recurringOnly) list = list.filter((t) => t.is_recurring);
     return list;
-  }, [filteredBase, treeFilter, careerOnly]);
+  }, [filteredBase, treeFilter, careerOnly, recurringOnly]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -134,7 +142,14 @@ export default function TasksPage() {
     setTasks(tasks.map((t) => (t.id === task.id ? next : t)));
     if (selectedTask?.id === task.id) setSelectedTask(next);
     try {
-      await apiFetch(`/api/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify(patch) });
+      const res = await apiFetch(`/api/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify(patch) });
+      // v2.25.5 — quando a conclusão gera a próxima ocorrência (tarefa
+      // recorrente), o backend anexa `nextRecurrence` na resposta.
+      if (res && res.nextRecurrence && res.nextRecurrence.due_date) {
+        showToast(`✓ Concluída! Próxima ocorrência criada para ${formatDate(res.nextRecurrence.due_date)}`);
+        loadAll();
+      }
+      return res;
     } catch {
       loadAll();
     }
@@ -286,6 +301,17 @@ export default function TasksPage() {
             <Briefcase className="h-3.5 w-3.5" />
             Tarefas de carreira
           </button>
+          <button
+            type="button"
+            onClick={() => setRecurringOnly((v) => !v)}
+            title="Mostrar só tarefas recorrentes"
+            className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition ${
+              recurringOnly ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'
+            }`}
+          >
+            <Repeat className="h-3.5 w-3.5" />
+            Recorrentes
+          </button>
         </div>
 
         {/* Alert banner */}
@@ -367,6 +393,7 @@ export default function TasksPage() {
           }}
           onPersist={persistTask}
           onDelete={onDeleted}
+          onOpenTask={(t) => setSelectedTask(t)}
         />
       )}
 
@@ -387,6 +414,12 @@ export default function TasksPage() {
 
       {/* Import modal */}
       {showImport && <ImportModal onClose={() => setShowImport(false)} onImported={onImported} />}
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 rounded-lg bg-ink px-4 py-2.5 text-sm font-medium text-white shadow-soft">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }

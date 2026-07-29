@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, Star, ChevronRight, ChevronDown, Briefcase } from 'lucide-react';
+import { AlertTriangle, Star, ChevronRight, ChevronDown, Briefcase, Repeat } from 'lucide-react';
 import Avatar from '../shared/Avatar';
 import { useStore } from '../../store';
 import {
@@ -9,6 +9,7 @@ import {
   formatDate,
   isOverdue,
   needsDate,
+  recurrenceSummary,
 } from '../../lib/tasks';
 
 export default function TaskCard({ task, selected, onClick, onToggleFavorite, onToggleSubtask }) {
@@ -54,6 +55,12 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
             >
               LG
             </span>
+          )}
+          {!!task.is_recurring && (
+            <Repeat
+              className="ml-1.5 inline-block h-3.5 w-3.5 align-middle text-accent"
+              title={`Recorrente · ${recurrenceSummary(task)}`}
+            />
           )}
         </span>
         <div className="flex shrink-0 items-center gap-1">

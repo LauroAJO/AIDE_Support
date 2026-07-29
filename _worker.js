@@ -95,6 +95,11 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/export/notes') return handleExportNotes(env);
 
   if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
+  // Tarefas recorrentes — precisa vir ANTES da rota genérica /api/tasks/:id
+  // abaixo, senão 'recurring' seria tratado como um task id.
+  if (path === '/api/tasks/recurring' && method === 'GET') {
+    return handleTasksRecurring(request, env, user);
+  }
   // Task files — must match BEFORE the generic /api/tasks/:id route below.
   if (path.match(/^\/api\/tasks\/[^/]+\/files\/link$/)) {
     return handleAttachmentLink(request, env, user, 'task', path.split('/')[3]);
@@ -1232,6 +1237,13 @@ function shapeTask(row) {
     drive_attachments: parseJsonArray(row.drive_attachments),
     source: row.source || 'aide',
     lifegame_id: row.lifegame_id || null,
+    is_recurring: row.is_recurring ? 1 : 0,
+    recurrence_type: row.recurrence_type || '',
+    recurrence_interval: row.recurrence_interval != null ? row.recurrence_interval : 1,
+    recurrence_days: parseJsonArray(row.recurrence_days),
+    recurrence_end_date: row.recurrence_end_date || '',
+    recurrence_count: row.recurrence_count || 0,
+    parent_task_id: row.parent_task_id || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     score: calcScore(row.urgency, row.importance),
@@ -1410,6 +1422,72 @@ async function handleTasksCollection(request, env, user, ctx) {
   return json({ error: 'Método não permitido' }, 405);
 }
 
+// Calcula a próxima ocorrência de uma tarefa recorrente a partir da data de
+// conclusão. `task` é a linha crua do banco (recurrence_days ainda como
+// string JSON). recurrence_type só chega aqui como 'daily'/'weekly'/'monthly'
+// — o frontend resolve "Personalizada" para um desses três antes de salvar.
+function calcNextDate(task, completedDate) {
+  const base = new Date(completedDate || Date.now());
+  const interval = Number(task.recurrence_interval) > 0 ? Number(task.recurrence_interval) : 1;
+  switch (task.recurrence_type) {
+    case 'daily':
+      base.setDate(base.getDate() + interval);
+      break;
+    case 'weekly': {
+      let days = [];
+      try { days = JSON.parse(task.recurrence_days || '[]'); } catch { days = []; }
+      if (Array.isArray(days) && days.length > 0) {
+        const next = new Date(base);
+        next.setDate(next.getDate() + 1);
+        // Guarda contra recurrence_days corrompido (nenhum valor bate num
+        // dia real 0-6) — sem isso o while abaixo giraria para sempre.
+        let guard = 0;
+        while (!days.includes(next.getDay()) && guard < 14) {
+          next.setDate(next.getDate() + 1);
+          guard += 1;
+        }
+        return next.toISOString().split('T')[0];
+      }
+      base.setDate(base.getDate() + 7 * interval);
+      break;
+    }
+    case 'monthly':
+      base.setMonth(base.getMonth() + interval);
+      break;
+    default:
+      break;
+  }
+  return base.toISOString().split('T')[0];
+}
+
+// GET /api/tasks/recurring — tarefas recorrentes ainda ativas (não concluídas),
+// com os detalhes de recorrência. Mesma regra de visibilidade de
+// handleTasksCollection: owner/view_all vê todas; assigned_only só as suas.
+async function handleTasksRecurring(request, env, user) {
+  if (!requirePermission(user, 'tasks', 'view')) return json([]);
+  if (!canDo(user.granular, 'tasks', 'view_assigned') && !canDo(user.granular, 'tasks', 'view_all')) {
+    return json([]);
+  }
+  const tasksLevel = (user.permissions && user.permissions.tasks) || 'full';
+  const granularViewAllDenied = user.granular && !canDo(user.granular, 'tasks', 'view_all');
+  const assignedOnly = tasksLevel === 'assigned_only' || granularViewAllDenied;
+
+  const conds = ["t.is_recurring = 1", "t.status != 'done'"];
+  const binds = [];
+  if (assignedOnly) {
+    conds.push('(t.assigned_to = ? OR t.created_by = ?)');
+    binds.push(user.id, user.id);
+  }
+  try {
+    const { results } = await env.DB.prepare(
+      `${TASK_SELECT} WHERE ${conds.join(' AND ')} ORDER BY t.due_date ASC, t.created_at DESC`
+    ).bind(...binds).all();
+    return json((results || []).map(shapeTask));
+  } catch {
+    return json([]);
+  }
+}
+
 async function handleTaskItem(request, env, user, taskId, ctx) {
   if (!taskId) return json({ error: 'ID ausente' }, 400);
 
@@ -1504,8 +1582,56 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
           .bind(rateType, rateValue, taskId).run();
       } catch { /* migration 0014 not applied */ }
     }
+
+    // v2.25.5 — Tarefas recorrentes (migration 0046): ao concluir (transição
+    // para status='done') uma tarefa com is_recurring=1, cria automaticamente
+    // a próxima ocorrência (cópia com due_date recalculado). Só dispara na
+    // transição — não a cada PUT redundante numa tarefa já concluída.
+    let nextRecurrenceRow = null;
+    const justCompleted = existing.status !== 'done' && merged.status === 'done';
+    if (justCompleted && existing.is_recurring) {
+      const nextDate = calcNextDate(existing, now * 1000);
+      const endDate = existing.recurrence_end_date || '';
+      const pastEnd = !!endDate && nextDate > endDate;
+      if (!pastEnd) {
+        const newId = crypto.randomUUID();
+        try {
+          await env.DB.prepare(
+            `INSERT INTO tasks
+              (id, title, description, project_id, assigned_to, created_by,
+               urgency, importance, energy, status, due_date,
+               tags, comments, subtasks, time_entries, favorited, drive_attachments,
+               is_recurring, recurrence_type, recurrence_interval, recurrence_days,
+               recurrence_end_date, recurrence_count, parent_task_id,
+               created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          ).bind(
+            newId, existing.title, existing.description, existing.project_id,
+            existing.assigned_to, user.id,
+            existing.urgency, existing.importance, existing.energy, 'todo', nextDate,
+            '[]', '[]', '[]', '[]', 0, '[]',
+            1, existing.recurrence_type, existing.recurrence_interval,
+            existing.recurrence_days || '[]', existing.recurrence_end_date || '',
+            (existing.recurrence_count || 0) + 1, taskId,
+            now, now
+          ).run();
+          if (existing.front_id) {
+            try {
+              await env.DB.prepare('UPDATE tasks SET front_id = ? WHERE id = ?')
+                .bind(existing.front_id, newId).run();
+            } catch { /* migration 0015 not applied */ }
+          }
+          nextRecurrenceRow = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(newId).first();
+        } catch { /* migration 0046 não aplicada, ou falha pontual — não trava a conclusão */ }
+      }
+    }
+
     const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(taskId).first();
     const shaped = shapeTask(row);
+    // Anexado como campo extra (não substitui o formato de resposta plano de
+    // sempre) para não quebrar os demais consumidores de PUT /api/tasks/:id
+    // que esperam o task atualizado direto na raiz do JSON.
+    if (nextRecurrenceRow) shaped.nextRecurrence = shapeTask(nextRecurrenceRow);
     const assigneeChanged = (existing.assigned_to || null) !== (merged.assigned_to || null);
     if (assigneeChanged && shaped.assigned_to && shaped.assigned_to !== user.id) {
       await notifyTaskAssignment(env, ctx, user, shaped);

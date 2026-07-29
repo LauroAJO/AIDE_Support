@@ -1,16 +1,226 @@
-import { useState } from 'react';
-import { X, Star, Pencil, CheckCircle2, Trash2, Paperclip, ExternalLink, Send } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { X, Star, Pencil, CheckCircle2, Trash2, Paperclip, ExternalLink, Send, CornerDownRight } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import Avatar from '../shared/Avatar';
 import MentionText from './MentionText';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
 import { MarkdownViewer } from '../../lib/markdownRenderer';
-import { scoreColor, STATUS_LABELS, STATUS_COLORS, formatDate, isOverdue } from '../../lib/tasks';
+import { scoreColor, STATUS_LABELS, STATUS_COLORS, formatDate, isOverdue, WEEKDAY_CHIPS } from '../../lib/tasks';
+
+// Recorrência (v2.25.5): "Personalizada" no seletor é só uma forma alternativa
+// de configurar o mesmo recurrence_type ('daily'/'weekly'/'monthly') — deixa
+// escolher intervalo + unidade num único controle em vez de um botão fixo por
+// frequência. Não existe recurrence_type='custom' de fato gravado no banco:
+// o backend (calcNextDate) só sabe calcular daily/weekly/monthly, então usar
+// uma dessas três por baixo dos panos evita uma recorrência sem cálculo de
+// próxima data. Ao reabrir uma tarefa salva via "Personalizada", o seletor
+// mostra o botão nativo correspondente (Diária/Semanal/Mensal) — a "Personalizada"
+// é só um atalho de entrada, não um estado próprio persistido.
+function RecurrenceSection({ task, onPersist }) {
+  const [isRecurring, setIsRecurring] = useState(!!task.is_recurring);
+  const [freqMode, setFreqMode] = useState(task.recurrence_type || 'daily');
+  const [interval, setIntervalValue] = useState(Number(task.recurrence_interval) || 1);
+  const [days, setDays] = useState(Array.isArray(task.recurrence_days) ? task.recurrence_days : []);
+  const [endDate, setEndDate] = useState(task.recurrence_end_date || '');
+  const [customUnit, setCustomUnit] = useState('daily');
+
+  useEffect(() => {
+    setIsRecurring(!!task.is_recurring);
+    setFreqMode(task.recurrence_type || 'daily');
+    setIntervalValue(Number(task.recurrence_interval) || 1);
+    setDays(Array.isArray(task.recurrence_days) ? task.recurrence_days : []);
+    setEndDate(task.recurrence_end_date || '');
+  }, [task.id]);
+
+  // Persiste o objeto de recorrência inteiro a cada mudança — mesmo padrão já
+  // usado no resto do modal para edições rápidas (favoritar, subtarefas etc.).
+  const persistRecurrence = (patch) => {
+    onPersist(task, {
+      is_recurring: isRecurring ? 1 : 0,
+      recurrence_type: freqMode === 'custom' ? customUnit : freqMode,
+      recurrence_interval: interval,
+      recurrence_days: days,
+      recurrence_end_date: endDate,
+      ...patch,
+    });
+  };
+
+  const toggleRecurring = () => {
+    const next = !isRecurring;
+    setIsRecurring(next);
+    persistRecurrence({ is_recurring: next ? 1 : 0 });
+  };
+  const chooseFreq = (mode) => {
+    setFreqMode(mode);
+    persistRecurrence({ recurrence_type: mode === 'custom' ? customUnit : mode });
+  };
+  const chooseCustomUnit = (unit) => {
+    setCustomUnit(unit);
+    persistRecurrence({ recurrence_type: unit });
+  };
+  const changeInterval = (n) => {
+    const v = Math.max(1, Number(n) || 1);
+    setIntervalValue(v);
+    persistRecurrence({ recurrence_interval: v });
+  };
+  const toggleDay = (d) => {
+    const next = days.includes(d) ? days.filter((x) => x !== d) : [...days, d].sort((a, b) => a - b);
+    setDays(next);
+    persistRecurrence({ recurrence_days: next });
+  };
+  const changeEndDate = (v) => {
+    setEndDate(v);
+    persistRecurrence({ recurrence_end_date: v });
+  };
+
+  const numberInputClass = 'w-16 rounded-md border border-line bg-surface2 px-2 py-1 text-sm text-ink';
+
+  return (
+    <div className="rounded-lg border border-line p-3">
+      <label className="flex items-center gap-2 text-sm font-medium text-ink">
+        <input type="checkbox" checked={isRecurring} onChange={toggleRecurring} className="accent-[#6366f1]" />
+        🔄 Esta tarefa se repete
+      </label>
+
+      {isRecurring && (
+        <div className="mt-3 space-y-3">
+          <div className="flex flex-wrap gap-1.5">
+            {[
+              ['daily', 'Diária'],
+              ['weekly', 'Semanal'],
+              ['monthly', 'Mensal'],
+              ['custom', 'Personalizada'],
+            ].map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => chooseFreq(key)}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                  freqMode === key ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {freqMode === 'daily' && (
+            <label className="flex items-center gap-2 text-sm text-ink2">
+              A cada
+              <input type="number" min="1" value={interval} onChange={(e) => changeInterval(e.target.value)} className={numberInputClass} />
+              dia(s)
+            </label>
+          )}
+
+          {freqMode === 'weekly' && (
+            <>
+              <label className="flex items-center gap-2 text-sm text-ink2">
+                A cada
+                <input type="number" min="1" value={interval} onChange={(e) => changeInterval(e.target.value)} className={numberInputClass} />
+                semana(s)
+              </label>
+              <div>
+                <p className="mb-1 text-xs font-medium text-muted">Dias</p>
+                <div className="flex flex-wrap gap-1">
+                  {WEEKDAY_CHIPS.map((c) => (
+                    <button
+                      key={c.day}
+                      type="button"
+                      onClick={() => toggleDay(c.day)}
+                      className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
+                        days.includes(c.day) ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'
+                      }`}
+                    >
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          {freqMode === 'monthly' && (
+            <label className="flex items-center gap-2 text-sm text-ink2">
+              A cada
+              <input type="number" min="1" value={interval} onChange={(e) => changeInterval(e.target.value)} className={numberInputClass} />
+              mês(es)
+            </label>
+          )}
+
+          {freqMode === 'custom' && (
+            <label className="flex items-center gap-2 text-sm text-ink2">
+              A cada
+              <input type="number" min="1" value={interval} onChange={(e) => changeInterval(e.target.value)} className={numberInputClass} />
+              <select
+                value={customUnit}
+                onChange={(e) => chooseCustomUnit(e.target.value)}
+                className="rounded-md border border-line bg-surface2 px-2 py-1 text-sm text-ink"
+              >
+                <option value="daily">dias</option>
+                <option value="weekly">semanas</option>
+                <option value="monthly">meses</option>
+              </select>
+            </label>
+          )}
+
+          <div>
+            <p className="mb-1 text-xs font-medium text-muted">Termina em</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => changeEndDate(e.target.value)}
+                className="rounded-md border border-line bg-surface2 px-2 py-1 text-sm text-ink"
+              />
+              <span className="text-xs text-muted">{endDate ? '' : 'Sem data de término'}</span>
+              {endDate && (
+                <button type="button" onClick={() => changeEndDate('')} className="text-xs text-ink2 hover:text-danger">
+                  Remover data de término
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Nota "gerada de [tarefa pai]" — busca o título sob demanda (a tarefa pai
+// pode já estar concluída e fora dos filtros padrão da lista, então não dá
+// pra assumir que já está em memória). onOpenTask é opcional: quando o
+// chamador não o fornece (ex.: modal aberto a partir da Reunião), a nota
+// aparece como texto simples, sem link clicável.
+function ParentTaskNote({ parentTaskId, onOpenTask }) {
+  const [parent, setParent] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch(`/api/tasks/${parentTaskId}`)
+      .then((t) => { if (!cancelled) setParent(t); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [parentTaskId]);
+
+  if (!parent) return null;
+  const label = `Gerada automaticamente de "${parent.title}"`;
+  return (
+    <div className="flex items-center gap-1.5 rounded-lg bg-surface2 px-3 py-2 text-xs text-ink2">
+      <CornerDownRight className="h-3.5 w-3.5 shrink-0 text-muted" />
+      {onOpenTask ? (
+        <button type="button" onClick={() => onOpenTask(parent)} className="text-left hover:text-accent hover:underline">
+          {label}
+        </button>
+      ) : (
+        <span>{label}</span>
+      )}
+    </div>
+  );
+}
 
 // Centered modal: read-only view + quick actions. Editing the full task still
 // uses the existing TaskEditor slide-in (opened via onEdit).
-export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete }) {
+export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, onOpenTask }) {
   const currentUser = useStore((s) => s.user);
   const [comment, setComment] = useState('');
 
@@ -105,6 +315,10 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete }
             {task.projectName && <span className="text-ink2">Projeto: {task.projectName}</span>}
             <span className="text-ink2">U {task.urgency} · I {task.importance} · E {task.energy}</span>
           </div>
+
+          {task.parent_task_id && <ParentTaskNote parentTaskId={task.parent_task_id} onOpenTask={onOpenTask} />}
+
+          <RecurrenceSection key={task.id} task={task} onPersist={onPersist} />
 
           {task.tags?.length > 0 && (
             <div className="flex flex-wrap gap-1.5">

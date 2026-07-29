@@ -551,6 +551,7 @@ export default function NetworkingPage() {
           editor={editor}
           institutions={institutions}
           people={people}
+          connections={connections}
           areas={areas}
           projects={projects}
           fronts={fronts}
@@ -1653,7 +1654,7 @@ function connectsTo(focusId, otherId, connections, personRoles) {
 
 // Editor: handles person AND institution. Adds the new roles + entity_links
 // editors for people.
-function NetworkEditor({ editor, institutions, people, areas, projects, fronts, tasks, onClose, onSaved }) {
+function NetworkEditor({ editor, institutions, people, connections, areas, projects, fronts, tasks, onClose, onSaved }) {
   const { kind, mode, payload } = editor;
   const isPerson = kind === 'person';
   const [form, setForm] = useState(() => ({
@@ -1664,10 +1665,34 @@ function NetworkEditor({ editor, institutions, people, areas, projects, fronts, 
     entity_links: payload.entity_links || [],
   }));
   const [tagInput, setTagInput] = useState((payload.tags || []).join(', '));
-  const [connTarget, setConnTarget] = useState('');
-  const [connType, setConnType] = useState('');
+  // Conexões pessoa-a-pessoa: as já salvas (edição) removem na hora via DELETE;
+  // as novas ficam pendentes até "Salvar" (a pessoa pode ainda nem ter id, no
+  // modo criação) e são enviadas uma a uma via POST /api/network/connections.
+  const [existingConns, setExistingConns] = useState(() => (
+    isPerson && mode === 'edit'
+      ? (connections || []).filter((c) => c.person_a_id === payload.id || c.person_b_id === payload.id)
+      : []
+  ));
+  const [pendingConnections, setPendingConnections] = useState([]); // [{ target, type }]
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  const otherPersonName = (c) => {
+    const otherId = c.person_a_id === payload.id ? c.person_b_id : c.person_a_id;
+    const other = people.find((p) => p.id === otherId);
+    return other ? other.name : '—';
+  };
+  const addPendingConnection = () => setPendingConnections((list) => [...list, { target: '', type: '' }]);
+  const updatePendingConnection = (idx, patch) =>
+    setPendingConnections((list) => list.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
+  const removePendingConnection = (idx) =>
+    setPendingConnections((list) => list.filter((_, i) => i !== idx));
+  const removeExistingConnection = async (connId) => {
+    try {
+      await apiFetch(`/api/network/connections/${connId}`, { method: 'DELETE' });
+      setExistingConns((list) => list.filter((c) => c.id !== connId));
+    } catch { /* mantém na lista se a remoção falhar */ }
+  };
 
   const titles = {
     person: mode === 'create' ? 'Nova Pessoa' : 'Editar Pessoa',
@@ -1718,14 +1743,18 @@ function NetworkEditor({ editor, institutions, people, areas, projects, fronts, 
         ? { ...form, tags, roles, entity_links }
         : { ...form, tags };
       const saved = await apiFetch(path, { method, body: JSON.stringify(body) });
-      if (isPerson && connTarget && saved && saved.id) {
-        await apiFetch('/api/network/connections', {
-          method: 'POST',
-          body: JSON.stringify({
-            person_a_id: saved.id, person_b_id: connTarget,
-            connection_type: connType, description: '',
-          }),
-        });
+      if (isPerson && saved && saved.id) {
+        const newTargets = pendingConnections.filter((c) => c.target);
+        for (const c of newTargets) {
+          // eslint-disable-next-line no-await-in-loop
+          await apiFetch('/api/network/connections', {
+            method: 'POST',
+            body: JSON.stringify({
+              person_a_id: saved.id, person_b_id: c.target,
+              connection_type: c.type, description: '',
+            }),
+          });
+        }
       }
       onSaved();
     } catch (e) {
@@ -1878,15 +1907,65 @@ function NetworkEditor({ editor, institutions, people, areas, projects, fronts, 
                 )}
               </div>
 
-              <div className="rounded-lg border border-line bg-surface2 p-3">
-                <p className="mb-2 text-xs font-semibold text-ink2">Adicionar conexão a outra pessoa</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <select value={connTarget} onChange={(e) => setConnTarget(e.target.value)} className="input">
-                    <option value="">—</option>
-                    {people.filter((p) => p.id !== form.id).map((p) => (<option key={p.id} value={p.id}>{p.name}</option>))}
-                  </select>
-                  <input value={connType} onChange={(e) => setConnType(e.target.value)} placeholder="Tipo (ex: colega)" className="input" />
+              <div className="rounded-lg border border-line p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-ink2">Conexões com outras pessoas</span>
+                  <button type="button" onClick={addPendingConnection} className="flex items-center gap-1 rounded-md border border-line px-2 py-0.5 text-[10px] font-medium text-ink2 hover:bg-surface2">
+                    <Plus className="h-3 w-3" /> Adicionar conexão
+                  </button>
                 </div>
+
+                {existingConns.length === 0 && pendingConnections.length === 0 ? (
+                  <p className="text-[11px] text-muted">Nenhuma conexão.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {existingConns.map((c) => (
+                      <div key={c.id} className="flex items-center justify-between gap-2 rounded-md bg-surface2 p-2">
+                        <div className="min-w-0 flex-1 text-sm text-ink">
+                          {otherPersonName(c)}
+                          {c.connection_type && <span className="ml-2 text-[11px] text-ink2">— {c.connection_type}</span>}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeExistingConnection(c.id)}
+                          title="Remover conexão"
+                          className="shrink-0 text-muted hover:text-danger"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+
+                    {pendingConnections.map((c, idx) => (
+                      <div key={idx} className="flex items-center gap-2 rounded-md bg-surface2 p-2">
+                        <select
+                          value={c.target}
+                          onChange={(e) => updatePendingConnection(idx, { target: e.target.value })}
+                          className="input flex-1"
+                        >
+                          <option value="">— Selecionar pessoa —</option>
+                          {people
+                            .filter((p) => p.id !== form.id && !existingConns.some((ec) => ec.person_a_id === p.id || ec.person_b_id === p.id))
+                            .map((p) => (<option key={p.id} value={p.id}>{p.name}</option>))}
+                        </select>
+                        <input
+                          value={c.type}
+                          onChange={(e) => updatePendingConnection(idx, { type: e.target.value })}
+                          placeholder="Tipo (ex: colega)"
+                          className="input w-32 shrink-0"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removePendingConnection(idx)}
+                          title="Remover"
+                          className="shrink-0 text-muted hover:text-danger"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </>
           ) : (

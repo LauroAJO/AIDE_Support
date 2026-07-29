@@ -6677,6 +6677,29 @@ async function handleMarketOrgFull(request, env, user, id) {
         ORDER BY p.name`
     ).bind(id).all();
 
+    // v2.25.4 — Pessoas com uma função (person_roles) vinculada a esta
+    // organização também devem aparecer na aba Contatos, mesmo sem uma linha
+    // em contact_org_links (dados legados de antes do fix de sync, ou uma
+    // função adicionada só pelo lado Networking). Deduplicado por person_id:
+    // contact_org_links tem prioridade quando a pessoa aparece nas duas fontes.
+    const rolesContacts = await env.DB.prepare(
+      `SELECT DISTINCT pr.id, pr.person_id, pr.role AS role_at_org,
+              np.name AS person_name, np.email AS person_email,
+              cp.outreach_status AS outreach_status
+         FROM person_roles pr
+         JOIN network_people np ON np.id = pr.person_id
+         LEFT JOIN contact_professional cp ON cp.person_id = np.id
+        WHERE pr.institution_id = ?`
+    ).bind(id).all();
+    const linkedPersonIds = new Set((contacts.results || []).map((c) => c.person_id));
+    const extraContactsFromRoles = [];
+    for (const rc of (rolesContacts.results || [])) {
+      if (linkedPersonIds.has(rc.person_id)) continue;
+      linkedPersonIds.add(rc.person_id);
+      extraContactsFromRoles.push({ ...rc, relevance_notes: '' });
+    }
+    const mergedContacts = [...(contacts.results || []), ...extraContactsFromRoles];
+
     // Iniciativas: coordenadora (organization_id) OU parceira (partner_org_ids LIKE).
     const projects = await env.DB.prepare(
       `SELECT * FROM market_projects
@@ -6701,7 +6724,7 @@ async function handleMarketOrgFull(request, env, user, id) {
     return json({
       ...shapeMarketOrg(org),
       created_by_name: org.created_by_name || null,
-      contacts: contacts.results || [],
+      contacts: mergedContacts,
       projects: (projects.results || []).map(shapeMarketProject),
       opportunities: (opportunities.results || []).map(shapeOpportunity),
       notes_count: (notesCount && notesCount.n) || 0,
@@ -8438,6 +8461,29 @@ async function persistPersonRoles(env, personId, roles) {
         r.current === false ? 0 : 1, Math.floor(Date.now() / 1000)
       ).run();
     } catch { /* table missing or row invalid — skip silently */ }
+
+    // v2.25.4 — Sync bidirecional Networking → Mercado: uma função com
+    // organização vinculada (institution_id) deve aparecer automaticamente
+    // na aba Contatos da organização no Mercado (contact_org_links), sem
+    // exigir que o usuário repita a vinculação manualmente nos dois lugares.
+    // Só cria se ainda não existir vínculo para esse par pessoa+organização.
+    if (r.institution_id) {
+      try {
+        const existingLink = await env.DB.prepare(
+          'SELECT id FROM contact_org_links WHERE person_id = ? AND organization_id = ?'
+        ).bind(personId, r.institution_id).first();
+        if (!existingLink) {
+          await env.DB.prepare(
+            `INSERT INTO contact_org_links
+              (id, person_id, organization_id, project_id, role_at_org, relevance_notes, created_at)
+             VALUES (?,?,?,?,?,?,?)`
+          ).bind(
+            crypto.randomUUID(), personId, r.institution_id, null,
+            String(r.role).trim(), '', Math.floor(Date.now() / 1000)
+          ).run();
+        }
+      } catch { /* best-effort — não bloqueia o salvamento da pessoa */ }
+    }
   }
 }
 

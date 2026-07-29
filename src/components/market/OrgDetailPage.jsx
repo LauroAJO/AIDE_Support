@@ -462,10 +462,16 @@ function ContactsTab({ org, onReload, navigate }) {
 
 // Modal com busca de network_people para vincular à organização.
 function LinkContactModal({ orgId, existingPersonIds, onClose, onLinked }) {
+  // 'search' — vincula uma pessoa já existente no Networking (fluxo original).
+  // 'create' — pessoa ainda não existe: cria um perfil básico em network_people
+  // e já vincula, num só passo (evita ida e volta manual entre Mercado e
+  // Networking para cadastrar alguém novo).
+  const [mode, setMode] = useState('search');
   const [people, setPeople] = useState([]);
   const [query, setQuery] = useState('');
   const [role, setRole] = useState('');
   const [selected, setSelected] = useState(null);
+  const [newName, setNewName] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -498,6 +504,27 @@ function LinkContactModal({ orgId, existingPersonIds, onClose, onLinked }) {
     }
   };
 
+  const createAndLink = async () => {
+    const name = newName.trim();
+    if (!name) { setError('Nome é obrigatório'); return; }
+    setSaving(true);
+    setError('');
+    try {
+      const person = await apiFetch('/api/network/people', {
+        method: 'POST',
+        body: JSON.stringify({ name, role }),
+      });
+      await apiFetch('/api/market/contacts/link', {
+        method: 'POST',
+        body: JSON.stringify({ person_id: person.id, organization_id: orgId, role_at_org: role, relevance_notes: '' }),
+      });
+      onLinked();
+    } catch (e) {
+      setError(String(e.message || e));
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
@@ -505,39 +532,73 @@ function LinkContactModal({ orgId, existingPersonIds, onClose, onLinked }) {
           <h3 className="text-base font-bold text-ink">Vincular contato</h3>
           <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
-        <div className="border-b border-line px-4 py-3">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Buscar pessoa..."
-              className="input pl-9"
-              autoFocus
-            />
-          </div>
-        </div>
-        {error && <div className="mx-4 mt-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
-        <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 py-2">
-          {filtered.length === 0 && <p className="px-2 py-3 text-center text-sm text-muted">Nenhuma pessoa encontrada.</p>}
-          {filtered.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => setSelected(p)}
-              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition ${
-                selected?.id === p.id ? 'bg-accent/10 ring-1 ring-accent' : 'hover:bg-surface2'
-              }`}
-            >
-              <Avatar user={{ name: p.name }} size={28} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm text-ink">{p.name}</div>
-                {p.institution && <div className="truncate text-xs text-muted">{p.institution}</div>}
+
+        {mode === 'search' ? (
+          <>
+            <div className="border-b border-line px-4 py-3">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Buscar pessoa..."
+                  className="input pl-9"
+                  autoFocus
+                />
               </div>
-              {selected?.id === p.id && <Check className="h-4 w-4 shrink-0 text-accent" />}
+              <button
+                type="button"
+                onClick={() => { setMode('create'); setError(''); }}
+                className="mt-2 flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+              >
+                <UserPlus className="h-3.5 w-3.5" /> Criar novo contato
+              </button>
+            </div>
+            {error && <div className="mx-4 mt-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
+            <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 py-2">
+              {filtered.length === 0 && <p className="px-2 py-3 text-center text-sm text-muted">Nenhuma pessoa encontrada.</p>}
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setSelected(p)}
+                  className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition ${
+                    selected?.id === p.id ? 'bg-accent/10 ring-1 ring-accent' : 'hover:bg-surface2'
+                  }`}
+                >
+                  <Avatar user={{ name: p.name }} size={28} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-ink">{p.name}</div>
+                    {p.institution && <div className="truncate text-xs text-muted">{p.institution}</div>}
+                  </div>
+                  {selected?.id === p.id && <Check className="h-4 w-4 shrink-0 text-accent" />}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            <button
+              type="button"
+              onClick={() => { setMode('search'); setError(''); }}
+              className="flex items-center gap-1 text-xs font-medium text-ink2 hover:text-accent"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" /> Buscar contato existente
             </button>
-          ))}
-        </div>
+            {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
+            <div>
+              <label className="mb-1 block text-xs font-medium text-ink2">Nome</label>
+              <input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Nome do novo contato"
+                className="input"
+                autoFocus
+              />
+            </div>
+          </div>
+        )}
+
         <div className="border-t border-line px-4 py-3">
           <input
             value={role}
@@ -547,9 +608,15 @@ function LinkContactModal({ orgId, existingPersonIds, onClose, onLinked }) {
           />
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
-            <button type="button" onClick={link} disabled={saving || !selected} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
-              {saving && <Loader2 className="h-4 w-4 animate-spin" />} Vincular
-            </button>
+            {mode === 'search' ? (
+              <button type="button" onClick={link} disabled={saving || !selected} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
+                {saving && <Loader2 className="h-4 w-4 animate-spin" />} Vincular
+              </button>
+            ) : (
+              <button type="button" onClick={createAndLink} disabled={saving || !newName.trim()} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
+                {saving && <Loader2 className="h-4 w-4 animate-spin" />} Criar e vincular
+              </button>
+            )}
           </div>
         </div>
       </div>

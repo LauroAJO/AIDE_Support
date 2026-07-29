@@ -1,0 +1,190 @@
+================================================================
+VERIFICAÇÃO — Implementações v2.25.1 a v2.25.6
+Data: 2026-07-29
+Método: leitura direta dos arquivos + grep, sem nenhuma modificação
+================================================================
+
+
+v2.25.1 — Artigos Científicos
+----------------------------------------------------------------
+
+1. src/components/hub/ArtigosPage.jsx existe?
+   ✅ FOUND — arquivo existe em src/components/hub/ArtigosPage.jsx.
+
+2. HubContainer.jsx importa ArtigosPage? Placeholder e badge "Em breve" sumiram?
+   ✅ FOUND — `import ArtigosPage from './ArtigosPage';` (linha 5) e uso real
+   `{tab === 'artigos' && <ArtigosPage />}` (linha 197). Grep por
+   "ArtigosCientificosPlaceholder" e "Em breve" não retornou nenhuma
+   ocorrência no arquivo — placeholder e badge removidos.
+
+3. handleHubIngest aceita doi, journal_name, impact_factor, sjr_quartile,
+   access_type, article_type, publication_year?
+   ✅ FOUND — o INSERT INTO hub_items (linha ~9270) inclui as 7 colunas
+   explicitamente, com bind dos 7 campos do payload e cláusula
+   ON CONFLICT ... DO UPDATE SET usando COALESCE(excluded.X, hub_items.X)
+   para cada um deles (não sobrescreve com NULL num reenvio parcial).
+
+4. migrations/0045_hub_articles.sql existe?
+   ✅ FOUND — arquivo presente em migrations/0045_hub_articles.sql.
+
+
+v2.25.2 — Rich text markdown
+----------------------------------------------------------------
+
+5. src/lib/markdownRenderer.jsx existe?
+   ✅ FOUND — arquivo existe (extensão .jsx, não .js — necessário para o
+   componente MarkdownViewer com JSX ser transformado pelo esbuild/Vite).
+
+6. src/components/shared/MarkdownEditor.jsx existe?
+   ✅ FOUND — arquivo presente.
+
+7. NotesPage.jsx — MarkdownEditor importado e usado?
+   ✅ FOUND — `import MarkdownEditor from '../shared/MarkdownEditor';`
+   (linha 9) e uso no editor do corpo da nota (linha 355).
+
+8. TaskModal.jsx — MarkdownViewer importado e usado?
+   ✅ FOUND — `import { MarkdownViewer } from '../../lib/markdownRenderer';`
+   (linha 8); renderiza `task.description` via MarkdownViewer (linha 344).
+
+9. MeetingPage.jsx — MarkdownEditor importado e usado?
+   ✅ FOUND — import na linha 13; usado 2x (linhas 548 e 569) — pauta e
+   notas da reunião, cada um com seu próprio MarkdownEditor.
+
+10. HubPage.jsx — MarkdownViewer usado para resumo?
+    ✅ FOUND — import na linha 7; usado para `item.resumo` (linha 441) E
+    também para `item.justificativa` (linha 462, além do pedido).
+
+11. OrgDetailPage.jsx — MarkdownEditor usado na aba de notas?
+    ✅ FOUND — import na linha 11; usado no editor de nota de mercado
+    (NoteEditor, linha 962).
+
+
+v2.25.3 — Tags hamburger menu
+----------------------------------------------------------------
+
+12. NotesPage.jsx — filtro de tags com overflow "+N" e dropdown/painel?
+    ✅ FOUND — grep confirma:
+      - `const visibleTags = allTags.slice(0, 5);` (linha 80)
+      - `🏷 +{hiddenTagsCount} tags` (linha 228) — botão de overflow
+      - painel dropdown com grid 2-3 colunas e scroll (linha 244):
+        `<div className="grid max-h-52 grid-cols-2 gap-1 overflow-y-auto sm:grid-cols-3">`
+      Também presentes (não pedidos no grep, mas verificados por leitura):
+      busca "Filtrar tags...", fechar ao clicar fora/Escape, destaque indigo
+      da tag selecionada.
+
+13. NetworkingPage.jsx — cards com só 3 tags + "+N"; seção colapsável no
+    painel de detalhe?
+    ✅ FOUND — grep confirma:
+      - `(it.tags || []).slice(0, 3).map(...)` (linha 453) + comentário
+        explícito "Tags no card — no máximo 3 + '+N'" (linha 450)
+      - `function TagsSection({ tags, onEdit })` (linha 794) com
+        `ChevronDown` (linha 804) para o toggle colapsar/expandir
+      - uso: `<TagsSection key={item.id} tags={item.tags} onEdit={onEdit} />`
+        (linha 1011) dentro do painel de detalhe (DetailPanel)
+
+
+v2.25.4 — Múltiplas conexões + sync bidirecional
+----------------------------------------------------------------
+
+14. NetworkEditor — lista de conexões (não só um select) + botão "+"?
+    ✅ FOUND — grep confirma:
+      - `const [existingConns, setExistingConns] = useState(...)` (linha 1671)
+        — conexões já salvas, com remoção imediata via DELETE
+      - `const [pendingConnections, setPendingConnections] = useState([])`
+        (linha 1676) — conexões novas, adicionadas antes de salvar
+      - renderização de ambas as listas (linhas 1918-1948)
+      - botão "+ Adicionar conexão" (linha 1949) que insere uma nova linha
+        pendente com select de pessoa + campo de tipo
+      Nomenclatura interna difere da sugerida no grep (`existingConns`/
+      `pendingConnections` em vez de `connList`/`addConn`), mas a
+      funcionalidade pedida está implementada de ponta a ponta.
+
+15. persistPersonRoles cria contact_org_links automaticamente?
+    ✅ FOUND — dentro de `persistPersonRoles` (linha 8598), após inserir
+    cada person_role com institution_id, verifica se já existe um
+    contact_org_links para o par pessoa+organização e, se não, insere um
+    novo (linhas 8619-8635). Comentado explicitamente como "v2.25.4 — Sync
+    bidirecional Networking → Mercado".
+
+16. OrgDetailPage.jsx LinkContactModal — opção "Criar novo contato"?
+    ✅ FOUND — grep confirma:
+      - função `createAndLink` (linha 507): cria o network_people básico
+        (POST /api/network/people) e encadeia o vínculo
+        (POST /api/market/contacts/link)
+      - botão "Criar novo contato" (linha 554) que alterna o modal para o
+        modo de criação
+
+
+v2.25.5 — Tarefas recorrentes
+----------------------------------------------------------------
+
+17. migrations/0046_recurring_tasks.sql existe?
+    ✅ FOUND — arquivo presente em migrations/0046_recurring_tasks.sql.
+
+18. TaskModal.jsx — seção de recorrência?
+    ✅ FOUND — grep confirma `is_recurring` usado em estado local
+    (`isRecurring`, linhas 21/29/40/52) dentro do componente
+    `RecurrenceSection`, com toggle, seletor de frequência
+    (Diária/Semanal/Mensal/Personalizada), chips de dia da semana e campo
+    de data de término.
+
+19. _worker.js PUT /api/tasks/:id — trata is_recurring e cria próxima
+    ocorrência?
+    ✅ FOUND — grep confirma:
+      - `function calcNextDate(task, completedDate)` (linha 1429)
+      - checagem `if (justCompleted && existing.is_recurring)` (linha 1601)
+      - `nextDate = calcNextDate(existing, now * 1000)` (linha 1602)
+      - INSERT da nova ocorrência com is_recurring/recurrence_type/
+        recurrence_interval/recurrence_days copiados do original
+      - `shaped.nextRecurrence = shapeTask(nextRecurrenceRow)` (linha 1643)
+        anexado à resposta plana do PUT sem quebrar o formato de sempre.
+      - também: `GET /api/tasks/recurring` presente (linha 1475,
+        `t.is_recurring = 1 AND t.status != 'done'`).
+
+20. TaskCard.jsx — ícone 🔄 de recorrência?
+    ✅ FOUND — `{!!task.is_recurring && (` (linha 59), renderizando o ícone
+    `Repeat` do lucide-react com tooltip via `recurrenceSummary(task)`.
+
+
+v2.25.6 — Paginação do Hub + correção de exclusão
+----------------------------------------------------------------
+
+21. HubPage.jsx — estado offset/loadingMore/hasMore?
+    ✅ FOUND — grep confirma os três: `const [offset, setOffset] = useState(0)`
+    (linha 91), `const [loadingMore, setLoadingMore] = useState(false)`
+    (linha 93), `const [hasMore, setHasMore] = useState(true)` (linha 94),
+    e o botão "Carregar mais (N restantes)" (linha 344).
+
+22. _worker.js DELETE /api/tasks/:id — confere existência (404)?
+    ✅ FOUND — bloco DELETE (linha 1658) faz
+    `SELECT id FROM tasks WHERE id = ?` antes de excluir; se não encontrar,
+    retorna `json({ error: 'Tarefa não encontrada' }, 404)` (linha 1667)
+    em vez de responder `{ok:true}` incondicionalmente.
+
+23. TaskModal.jsx — mostra mensagem de erro real (não só genérica)?
+    ✅ FOUND — `try { detail = JSON.parse(err.message)?.error || ''; }
+    catch { ... }` (linha 274) extrai o campo `.error` do corpo JSON da
+    resposta de erro do backend e mostra essa mensagem real no alerta,
+    caindo no texto genérico só se o corpo não for o JSON esperado.
+
+
+================================================================
+RESUMO GERAL
+================================================================
+
+23 de 23 itens verificados: ✅ FOUND (100%)
+0 ❌ MISSING
+0 ⚠️ PARTIAL
+
+Todas as implementações de v2.25.1 a v2.25.6 descritas no escopo desta
+verificação estão presentes no código-fonte atual, sem lacunas
+detectadas. Nenhum arquivo foi modificado durante esta verificação —
+apenas leitura (Read/Grep) e consultas de existência de arquivo (ls).
+
+Observação: os padrões de grep sugeridos no pedido (nomes de variável
+como `connList`, `addConn`, `tagCollaps`) não batem literalmente com a
+nomenclatura usada na implementação real (`pendingConnections`,
+`existingConns`, `TagsSection`) — isso é esperado, já que os nomes de
+variável são detalhes de implementação; a funcionalidade descrita foi
+confirmada por leitura direta do código em cada caso.
+================================================================

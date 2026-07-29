@@ -1,0 +1,54 @@
+================================
+AIDE — RELATÓRIO v2.25.1
+Artigos Científicos
+================================
+MIGRAÇÃO 0045: OK (local)
+Remota: PENDENTE
+
+ARQUIVOS CRIADOS:
+- migrations/0045_hub_articles.sql
+- src/components/hub/ArtigosPage.jsx
+- relatorios/v2251_artigos.txt (este relatório)
+
+ARQUIVOS MODIFICADOS:
+- _worker.js (handleHubIngest — novos campos de artigo)
+- src/components/hub/HubContainer.jsx (placeholder removido, ArtigosPage real,
+  badge "Em breve" removido)
+- src/version.js (2.25.0 -> 2.25.1)
+
+BACKEND — campos novos aceitos em POST /api/hub/items (handleHubIngest):
+  doi              (TEXT, default '')
+  journal_name     (TEXT, default '')
+  impact_factor    (REAL, nullable)
+  sjr_quartile     (TEXT, default '')
+  access_type      (TEXT, default '')
+  article_type     (TEXT, default '' — fallback para item.tipo se ausente)
+  publication_year (INTEGER, nullable)
+Todos opcionais; ON CONFLICT DO UPDATE usa COALESCE(excluded.x, hub_items.x)
+em cada um, preservando o valor já gravado quando o Hub reenviar sem o campo.
+
+GET /api/hub/items: nenhuma mudança de código necessária — o handler já usa
+SELECT * FROM hub_items, então as 7 colunas novas passam a vir automaticamente
+no JSON de resposta assim que a migration roda, inclusive para
+?project=artigos.
+
+VERIFICAÇÃO:
+npm run build: OK (zero erros, 1592 módulos, build em ~4s)
+node --check _worker.js: OK (sintaxe válida)
+Teste funcional local (wrangler pages dev + POST /api/hub/items com
+Authorization: ApiKey, project_id=artigos, todos os campos novos preenchidos):
+insert confirmado via SELECT direto no D1 local — todas as 7 colunas
+persistidas corretamente. Registro de teste removido após a verificação.
+
+DEPLOY: OK — https://e683f2c5.aide-support.pages.dev (alias de produção)
+
+GIT: commit cb3aef6 ("v2.25.1 — Artigos Científicos: migration + sub-aba
+real"), 5 arquivos, 547 inserções / 25 remoções. Push para origin/main OK
+(93f32c3..cb3aef6). Nota: 3 arquivos não relacionados a esta feature
+(aide_hub_bridge_report.md, cleanup_phd.sql,
+relatorios/auditoria_completa_2026-07-29.txt) foram deixados de fora do
+commit por não pertencerem a esta mudança — seguem untracked.
+
+COMANDO MIGRAÇÃO REMOTA:
+npx wrangler d1 execute aide-db --remote --file=migrations/0045_hub_articles.sql
+================================

@@ -6497,6 +6497,7 @@ async function handleNetworkPeople(request, env, user) {
     if (!body.name) return json({ error: 'name é obrigatório' }, 400);
     const id = crypto.randomUUID();
     const now = Math.floor(Date.now() / 1000);
+    const derivedRole = currentRoleFromList(body.roles);
     try {
       await env.DB.prepare(
         `INSERT INTO network_people
@@ -6505,7 +6506,7 @@ async function handleNetworkPeople(request, env, user) {
            created_by, created_at, updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).bind(
-        id, body.name, body.type || 'person', body.institution || '', body.role || '',
+        id, body.name, body.type || 'person', body.institution || '', derivedRole || body.role || '',
         body.area_of_work || '', body.email || '', body.phone || '', body.linkedin || '',
         body.notes || '', body.connection_to_lauro || '',
         Number(body.connection_strength) || 3,
@@ -6539,13 +6540,14 @@ async function handleNetworkPersonItem(request, env, user, id) {
     if (!existing) return json({ error: 'Pessoa não encontrada' }, 404);
     const now = Math.floor(Date.now() / 1000);
     const pick = (key, fallback) => (body[key] !== undefined ? body[key] : fallback);
+    const derivedRole = currentRoleFromList(body.roles);
     await env.DB.prepare(
       `UPDATE network_people SET name=?, type=?, institution=?, role=?, area_of_work=?,
          email=?, phone=?, linkedin=?, notes=?, connection_to_lauro=?, connection_strength=?,
          tags=?, lifegame_person_id=?, dex_contact_id=?, updated_at=? WHERE id=?`
     ).bind(
       pick('name', existing.name), pick('type', existing.type), pick('institution', existing.institution),
-      pick('role', existing.role), pick('area_of_work', existing.area_of_work),
+      derivedRole || pick('role', existing.role), pick('area_of_work', existing.area_of_work),
       pick('email', existing.email), pick('phone', existing.phone), pick('linkedin', existing.linkedin),
       pick('notes', existing.notes), pick('connection_to_lauro', existing.connection_to_lauro),
       Number(pick('connection_strength', existing.connection_strength)) || 3,
@@ -8729,6 +8731,18 @@ async function hydratePeople(env, rows) {
     // Temperatura do contato pela última interação; 'never' se nenhuma.
     temperature: tempByPerson[p.id] || 'never'
   }));
+}
+
+// Deriva o cargo "atual" (current=1, ou o primeiro da lista) a partir do
+// array roles[] enviado pelo editor — usado para manter network_people.role
+// consistente com person_roles mesmo que o formulário não exponha mais um
+// campo de cargo solto.
+function currentRoleFromList(roles) {
+  if (!Array.isArray(roles) || roles.length === 0) return null;
+  const withRole = roles.filter((r) => r && r.role && String(r.role).trim());
+  if (withRole.length === 0) return null;
+  const current = withRole.find((r) => r.current !== false) || withRole[0];
+  return String(current.role).trim();
 }
 
 async function persistPersonRoles(env, personId, roles) {

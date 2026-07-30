@@ -939,6 +939,17 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
               {!isPerson && (
                 <p className="text-xs text-ink2">{[item.area].filter(Boolean).join(' · ')}</p>
               )}
+              {isPerson && (() => {
+                const current = item.roles && item.roles.length > 0
+                  ? (item.roles.find((r) => r.current) || item.roles[0])
+                  : null;
+                if (current) {
+                  const label = [current.role, current.institution_name].filter(Boolean).join(' @ ');
+                  return label ? <p className="text-xs font-medium text-accent">Função atual: {label}</p> : null;
+                }
+                const fallback = [item.role, item.institution].filter(Boolean).join(' · ');
+                return fallback ? <p className="text-xs text-ink2">{fallback}</p> : null;
+              })()}
               {isPerson && item.lifegame_person_id && (
                 <span className="mt-1 inline-block rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
                   Sincronizado com Lifegame

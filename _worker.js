@@ -1769,6 +1769,20 @@ async function handleProjectItem(request, env, user, projectId) {
       !canDo(user.granular, 'areas', 'manage_projects')) {
     return json({ error: 'Sem permissão para gerenciar projetos' }, 403);
   }
+  if (request.method === 'GET') {
+    // Preview do impacto de uma exclusão — usado pelo diálogo de confirmação
+    // no front-end ANTES do DELETE real (que já desvincula fronts/tasks).
+    const project = await env.DB.prepare('SELECT * FROM projects WHERE id = ?').bind(projectId).first();
+    if (!project) return json({ error: 'Projeto não encontrado' }, 404);
+    const frontsRow = await env.DB.prepare('SELECT COUNT(*) AS n FROM fronts WHERE project_id = ?').bind(projectId).first();
+    const tasksRow = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM tasks WHERE project_id = ? OR front_id IN (SELECT id FROM fronts WHERE project_id = ?)'
+    ).bind(projectId, projectId).first();
+    return json({
+      ...project,
+      impact: { fronts: (frontsRow && frontsRow.n) || 0, tasks: (tasksRow && tasksRow.n) || 0 },
+    });
+  }
   if (request.method === 'PUT') {
     const body = (await readJson(request)) || {};
     const existing = await env.DB.prepare('SELECT * FROM projects WHERE id = ?').bind(projectId).first();
@@ -4386,6 +4400,32 @@ async function handleBridgeLog(env) {
   return json(results || []);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Um HTTP 200 do Lifegame não garante que os dados foram persistidos — o
+// worker do Lifegame pode cair no fallback de assets estáticos (SPA) para
+// rotas não reconhecidas, o que também responde 200. Por isso validamos que
+// o corpo é JSON e contém um contador de recebidos coerente com o que foi
+// enviado, em vez de confiar só em r.ok.
+function validateBridgePushResponse(r, expectedCount) {
+  if (!r.ok) return { valid: false, reason: `HTTP ${r.status}` };
+  let parsed = null;
+  try { parsed = JSON.parse(r.body); } catch { /* não é JSON */ }
+  if (!parsed || typeof parsed !== 'object') {
+    return { valid: false, reason: 'Lifegame respondeu HTTP 200 mas o corpo não é JSON (possível fallback de SPA — endpoint pode não existir do lado do Lifegame)' };
+  }
+  const receivedCount = Number(parsed.received);
+  if (expectedCount > 0 && !Number.isFinite(receivedCount)) {
+    return { valid: false, reason: 'Lifegame respondeu HTTP 200 mas sem o campo "received" esperado' };
+  }
+  if (expectedCount > 0 && receivedCount === 0) {
+    return { valid: false, reason: 'Lifegame respondeu HTTP 200 com received=0 apesar de tarefas terem sido enviadas' };
+  }
+  return { valid: true, receivedCount };
+}
+
 async function handleBridgePushTasks(env, config) {
   // Erro de configuração com diagnóstico — diz QUAL campo está faltando.
   if (!config.lifegame_url || !config.bridge_secret) {
@@ -4409,32 +4449,50 @@ async function handleBridgePushTasks(env, config) {
     (t.source || 'aide') !== 'lifegame' ? { ...t, aideTaskId: t.id, source: 'aide' } : t
   );
   const requestBody = JSON.stringify({ tasks });
-  const r = await lifegameFetch(config, '/api/bridge/tasks', {
-    method: 'POST', body: requestBody,
-  });
-  // Log inclui tamanho do payload e amostra do primeiro task pra diagnóstico
-  // (Cloudflare guarda só os primeiros 500 chars de error).
+
+  // Até 3 tentativas — cobre falhas transitórias de rede/cold-start do Lifegame.
+  const MAX_ATTEMPTS = 3;
+  let r = null;
+  let validation = null;
+  let attempt = 0;
+  for (attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // eslint-disable-next-line no-await-in-loop
+    r = await lifegameFetch(config, '/api/bridge/tasks', { method: 'POST', body: requestBody });
+    validation = validateBridgePushResponse(r, tasks.length);
+    if (validation.valid) break;
+    if (attempt < MAX_ATTEMPTS) {
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(300 * attempt);
+    }
+  }
+
+  // Log inclui tamanho do payload, tentativas e amostra do primeiro task pra
+  // diagnóstico (Cloudflare guarda só os primeiros 500 chars de error).
   await logBridge(env, {
     direction: 'outbound', entity_type: 'tasks',
-    status: r.ok ? 'success' : 'error',
-    payload: `${tasks.length} tarefas, ${requestBody.length} bytes`,
-    error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 300)}` : ''}`,
+    status: validation.valid ? 'success' : 'error',
+    payload: `${tasks.length} tarefas, ${requestBody.length} bytes, tentativa ${attempt}/${MAX_ATTEMPTS}` +
+      (validation.valid ? `, lifegame confirmou received=${validation.receivedCount}` : ''),
+    error: validation.valid ? null : `${validation.reason}${r.body ? ` — corpo: ${r.body.slice(0, 300)}` : ''}`,
   });
-  if (r.ok) {
+
+  if (validation.valid) {
     await env.DB.prepare("UPDATE bridge_config SET last_sync_at=? WHERE id='singleton'")
       .bind(Math.floor(Date.now() / 1000)).run().catch(() => {});
-    return json({ pushed: tasks.length, errors: [] });
+    return json({ pushed: tasks.length, confirmed: validation.receivedCount, attempts: attempt, errors: [] });
   }
-  // Spec: retornar 400 com detalhe completo da rejeição do Lifegame, para
-  // o usuário ver direto na resposta o que o LG disse.
+  // Retorna 400 com detalhe completo da rejeição/falha de validação do
+  // Lifegame, para o usuário ver direto na resposta o que aconteceu.
   return json({
-    error: 'lifegame_rejected',
+    error: 'lifegame_push_failed',
+    reason: validation.reason,
     status: r.status,
     detail: r.body.slice(0, 500),
     url: r.url,
     secret_length: r.secret_length,
     body_size: requestBody.length,
     task_count: tasks.length,
+    attempts: attempt,
     first_task_sample: tasks[0] ? JSON.stringify(tasks[0]).slice(0, 300) : null,
   }, 400);
 }
@@ -6079,6 +6137,29 @@ async function handleAreaItem(request, env, user, id) {
   if ((request.method === 'PUT' || request.method === 'DELETE') &&
       !canDo(user.granular, 'areas', 'manage_areas')) {
     return json({ error: 'Sem permissão para gerenciar áreas' }, 403);
+  }
+  if (request.method === 'GET') {
+    // Preview do impacto de uma exclusão — usado pelo diálogo de confirmação
+    // no front-end ANTES do DELETE real (que já desvincula projects/fronts/tasks).
+    const area = await env.DB.prepare('SELECT * FROM areas WHERE id = ?').bind(id).first();
+    if (!area) return json({ error: 'Área não encontrada' }, 404);
+    const projectsRow = await env.DB.prepare('SELECT COUNT(*) AS n FROM projects WHERE area_id = ?').bind(id).first();
+    const frontsRow = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM fronts WHERE project_id IN (SELECT id FROM projects WHERE area_id = ?)'
+    ).bind(id).first();
+    const tasksRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM tasks
+        WHERE project_id IN (SELECT id FROM projects WHERE area_id = ?)
+           OR front_id IN (SELECT id FROM fronts WHERE project_id IN (SELECT id FROM projects WHERE area_id = ?))`
+    ).bind(id, id).first();
+    return json({
+      ...area,
+      impact: {
+        projects: (projectsRow && projectsRow.n) || 0,
+        fronts: (frontsRow && frontsRow.n) || 0,
+        tasks: (tasksRow && tasksRow.n) || 0,
+      },
+    });
   }
   if (request.method === 'PUT') {
     const body = (await readJson(request)) || {};

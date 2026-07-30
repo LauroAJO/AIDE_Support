@@ -103,8 +103,28 @@ export default function AreasPage() {
 
   const onDelete = async (kind, id) => {
     const labels = { area: 'área', project: 'projeto', front: 'frente' };
-    if (!window.confirm(`Excluir esta ${labels[kind]}? Tarefas associadas serão desvinculadas.`)) return;
     const path = kind === 'area' ? `/api/areas/${id}` : kind === 'project' ? `/api/projects/${id}` : `/api/fronts/${id}`;
+
+    // Área e projeto têm cascata (desvincula fronts/tasks) — mostra a contagem
+    // real ANTES de confirmar, em vez de uma mensagem genérica.
+    let message = `Excluir esta ${labels[kind]}? Tarefas associadas serão desvinculadas.`;
+    if (kind === 'area' || kind === 'project') {
+      try {
+        const preview = await apiFetch(path);
+        const impact = preview && preview.impact;
+        if (impact) {
+          const parts = [];
+          if (kind === 'area' && impact.projects) parts.push(`${impact.projects} projeto${impact.projects === 1 ? '' : 's'}`);
+          if (impact.fronts) parts.push(`${impact.fronts} front${impact.fronts === 1 ? '' : 's'}`);
+          if (impact.tasks) parts.push(`${impact.tasks} tarefa${impact.tasks === 1 ? '' : 's'}`);
+          message = parts.length > 0
+            ? `Apagar est${kind === 'area' ? 'a área' : 'e projeto'} irá desligar ${parts.join(' e ')}. Continuar?`
+            : `Apagar est${kind === 'area' ? 'a área' : 'e projeto'} não afeta nenhum front ou tarefa. Continuar?`;
+        }
+      } catch { /* preview é best-effort — cai na mensagem genérica */ }
+    }
+
+    if (!window.confirm(message)) return;
     await apiFetch(path, { method: 'DELETE' });
     load();
   };

@@ -377,7 +377,7 @@ export default function Layout({ children }) {
         </aside>
 
         {/* Content */}
-        <main className="min-w-0 flex-1 overflow-auto bg-base p-6 pb-20 md:pb-6">
+        <main className="min-h-0 min-w-0 flex-1 overflow-auto bg-base p-6 pb-20 md:pb-6">
           {children}
         </main>
       </div>

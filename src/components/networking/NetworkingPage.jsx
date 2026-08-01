@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Network, Plus, Minus, Home, Maximize2, Settings, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
-  Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase, ChevronDown,
+  Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase, ChevronDown, RefreshCw,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -133,6 +133,9 @@ const ORG_TYPE_LABELS = {
 };
 
 export default function NetworkingPage() {
+  const user = useStore((s) => s.user);
+  const setDexLastSync = useStore((s) => s.setDexLastSync);
+  const setDexSyncResult = useStore((s) => s.setDexSyncResult);
   const people = useStore((s) => s.networkPeople);
   const setPeople = useStore((s) => s.setNetworkPeople);
   const institutions = useStore((s) => s.networkInstitutions);
@@ -169,6 +172,13 @@ export default function NetworkingPage() {
   const [proStatus, setProStatus] = useState(() => ({}));
   // Perfil profissional completo (contact_professional) por person_id — enriquece o detalhe.
   const [proProfile, setProProfile] = useState(() => ({}));
+  // DEX CRM sync (owner only) — botão "Sincronizar DEX" no cabeçalho.
+  const [dexSyncing, setDexSyncing] = useState(false);
+  const [toast, setToast] = useState('');
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 5000);
+  };
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -215,6 +225,21 @@ export default function NetworkingPage() {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const syncDex = async () => {
+    setDexSyncing(true);
+    try {
+      const res = await apiFetch('/api/dex/sync', { method: 'POST' });
+      setDexSyncResult(res);
+      setDexLastSync(new Date().toISOString());
+      await loadAll();
+      showToast(`DEX: ${res.inserted} novos, ${res.updated} atualizados`);
+    } catch (e) {
+      showToast(`Erro ao sincronizar DEX: ${(e && e.message) || e}`, 'error');
+    } finally {
+      setDexSyncing(false);
+    }
+  };
 
   // Auto-seed "Networking" area + 5 projects + 15 frentes on first visit.
   useEffect(() => {
@@ -382,6 +407,17 @@ export default function NetworkingPage() {
               <MapIcon className="h-3.5 w-3.5" /> Mapa
             </button>
           </div>
+          {user?.role === 'owner' && (
+            <button
+              onClick={syncDex}
+              disabled={dexSyncing}
+              title="Sincronizar contatos do DEX CRM"
+              className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2 disabled:opacity-60"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${dexSyncing ? 'animate-spin' : ''}`} />
+              {dexSyncing ? 'Sincronizando...' : '↻ DEX'}
+            </button>
+          )}
           <button
             onClick={() => setEditor({ kind: 'person', mode: 'create', payload: emptyPerson() })}
             className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-hover"
@@ -511,6 +547,11 @@ export default function NetworkingPage() {
                       )}
                       {it._kind === 'person' && it.lifegame_person_id && (
                         <span className="rounded-full bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">LG</span>
+                      )}
+                      {it._kind === 'person' && it.dex_contact_id && (
+                        <span className="rounded bg-purple-100 px-1 py-0.5 text-[9px] font-medium text-purple-600" title="Importado do DEX CRM">
+                          DEX
+                        </span>
                       )}
                       {it._kind === 'person' && proIds.has(it.id) && (
                         <span className="flex items-center gap-0.5 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium text-indigo-700" title="Tem perfil profissional no Mercado">
@@ -643,6 +684,12 @@ export default function NetworkingPage() {
           onClose={() => setEditor(null)}
           onSaved={() => { setEditor(null); loadAll(); }}
         />
+      )}
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 rounded-lg bg-ink px-4 py-2.5 text-sm font-medium text-white shadow-soft">
+          {toast}
+        </div>
       )}
     </div>
   );
@@ -1068,6 +1115,17 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
             {item.linkedin && <a href={item.linkedin} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-ink hover:text-accent"><Linkedin className="h-3.5 w-3.5 text-muted" /> {item.linkedin}</a>}
             {item.website && <a href={item.website} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-ink hover:text-accent"><LinkIcon className="h-3.5 w-3.5 text-muted" /> {item.website}</a>}
           </div>
+        )}
+
+        {isPerson && item.dex_contact_id && (
+          <a
+            href={`https://getdex.com/appv3/contacts/${item.dex_contact_id}`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-purple-600 hover:bg-purple-50"
+          >
+            🔗 Ver no DEX
+          </a>
         )}
 
         {isPerson && item.connection_to_lauro && (

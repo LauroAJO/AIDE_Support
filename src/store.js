@@ -66,6 +66,8 @@ export const useStore = create((set) => ({
   networkInstitutions: [],
   networkConnections: [],
   bridgeSyncStatus: null,
+  dexLastSync: null,     // ISO string da última sincronização DEX bem-sucedida
+  dexSyncResult: null,   // { total, inserted, updated, skipped } do último /api/dex/sync
 
   // Mercado (Etapa 4) — organizações, projetos, contatos profissionais
   marketOrgs: [],
@@ -154,6 +156,8 @@ export const useStore = create((set) => ({
   setNetworkInstitutions: (networkInstitutions) => set({ networkInstitutions }),
   setNetworkConnections: (networkConnections) => set({ networkConnections }),
   setBridgeSyncStatus: (bridgeSyncStatus) => set({ bridgeSyncStatus }),
+  setDexLastSync: (dexLastSync) => set({ dexLastSync }),
+  setDexSyncResult: (dexSyncResult) => set({ dexSyncResult }),
 
   setMarketOrgs: (marketOrgs) => set({ marketOrgs: marketOrgs || [] }),
   setMarketProjects: (marketProjects) => set({ marketProjects: marketProjects || [] }),

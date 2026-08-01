@@ -138,6 +138,11 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/network/connections') return handleNetworkConnections(request, env, user);
   if (path.startsWith('/api/network/connections/')) return handleNetworkConnectionItem(request, env, user, path.split('/')[4]);
 
+  // DEX CRM (getdex.com) — owner only.
+  if (path === '/api/dex/status') return handleDexStatus(request, env, user);
+  if (path === '/api/dex/sync' && method === 'POST') return handleDexSync(request, env, user);
+  if (path.startsWith('/api/dex/contacts/')) return handleDexContactItem(request, env, user, path.split('/')[4]);
+
   // Timer
   if (path === '/api/timer/start') return handleTimerStart(request, env, user);
   if (path === '/api/timer/stop') return handleTimerStop(request, env, user);
@@ -6569,6 +6574,135 @@ async function handleNetworkPersonItem(request, env, user, id) {
     return json({ ok: true });
   }
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---------------------------------------------------------------------------
+// DEX CRM (getdex.com) — sync pessoal de contatos para network_people.
+// Owner only. dex_contact_id/source já existem no schema (migração 0015 /
+// bridge ALTER); nenhuma coluna nova é necessária.
+// ---------------------------------------------------------------------------
+const DEX_API_BASE = 'https://api.prod.getdex.com/v1';
+
+async function handleDexStatus(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  const dexKey = env.DEX_API_KEY;
+  if (!dexKey) return json({ configured: false });
+  try {
+    const test = await fetch(`${DEX_API_BASE}/search/contacts?take=1`, {
+      headers: { Authorization: `Bearer ${dexKey}` }
+    });
+    return json({ configured: true, connected: test.ok, status: test.status });
+  } catch (e) {
+    return json({ configured: true, connected: false, status: 0, error: String((e && e.message) || e) });
+  }
+}
+
+async function handleDexSync(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  try {
+    const result = await syncDexContacts(env);
+    return json({ ok: true, ...result });
+  } catch (e) {
+    return json({ error: String((e && e.message) || e) }, 500);
+  }
+}
+
+async function handleDexContactItem(request, env, user, dexId) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  if (!dexId) return json({ error: 'ID ausente' }, 400);
+  const dexKey = env.DEX_API_KEY;
+  if (!dexKey) return json({ error: 'DEX_API_KEY não configurada' }, 503);
+  try {
+    const res = await fetch(`${DEX_API_BASE}/contacts/${encodeURIComponent(dexId)}`, {
+      headers: { Authorization: `Bearer ${dexKey}` }
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return json({ error: `DEX API error: ${res.status}`, detail: data }, res.status);
+    return json(data);
+  } catch (e) {
+    return json({ error: String((e && e.message) || e) }, 502);
+  }
+}
+
+// Puxa todos os contatos do DEX (paginado, máx. 1000) e faz upsert em
+// network_people por dex_contact_id — casando por email quando a pessoa já
+// existe no AIDE sem vínculo DEX, para não duplicar. Campos AIDE-specific
+// (notes, tags, connection_strength, roles etc.) nunca são sobrescritos.
+async function syncDexContacts(env) {
+  const dexKey = env.DEX_API_KEY;
+  if (!dexKey) throw new Error('DEX_API_KEY not configured');
+
+  let cursor = null;
+  let allContacts = [];
+  let page = 0;
+
+  do {
+    const url = new URL(`${DEX_API_BASE}/search/contacts`);
+    url.searchParams.set('take', '100');
+    if (cursor) url.searchParams.set('cursor', cursor);
+
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${dexKey}`, 'Content-Type': 'application/json' }
+    });
+    if (!res.ok) throw new Error(`DEX API error: ${res.status}`);
+
+    const data = await res.json();
+    const contacts = data.data || [];
+    allContacts = allContacts.concat(contacts);
+    cursor = data.nextCursor || null;
+    page++;
+    if (page >= 10) break; // safety limit: 1000 contatos
+  } while (cursor);
+
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const contact of allContacts) {
+    if (!contact.full_name && !contact.first_name) { skipped++; continue; }
+
+    const name = contact.full_name || [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+    const email = contact.emails?.[0]?.address || '';
+    const role = contact.job_title || '';
+
+    const existing = await env.DB.prepare(
+      'SELECT id FROM network_people WHERE dex_contact_id = ?'
+    ).bind(contact.id).first();
+
+    if (existing) {
+      // Update — só sobrescreve email/role se estavam vazios; nunca mexe em
+      // campos AIDE-specific (notes, tags, connection_strength, roles...).
+      await env.DB.prepare(`
+        UPDATE network_people SET
+          name = ?,
+          email = CASE WHEN email = '' THEN ? ELSE email END,
+          role = CASE WHEN role = '' THEN ? ELSE role END,
+          updated_at = unixepoch()
+        WHERE dex_contact_id = ?
+      `).bind(name, email, role, contact.id).run();
+      updated++;
+    } else {
+      const byEmail = email
+        ? await env.DB.prepare('SELECT id FROM network_people WHERE email = ?').bind(email).first()
+        : null;
+
+      if (byEmail) {
+        await env.DB.prepare(
+          'UPDATE network_people SET dex_contact_id = ? WHERE id = ?'
+        ).bind(contact.id, byEmail.id).run();
+        updated++;
+      } else {
+        await env.DB.prepare(`
+          INSERT INTO network_people
+            (id, name, email, role, dex_contact_id, source, tags, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 'dex', '[]', unixepoch(), unixepoch())
+        `).bind(crypto.randomUUID(), name, email, role, contact.id).run();
+        inserted++;
+      }
+    }
+  }
+
+  return { total: allContacts.length, inserted, updated, skipped };
 }
 
 // ---------------------------------------------------------------------------

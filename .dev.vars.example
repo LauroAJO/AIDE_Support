@@ -29,3 +29,7 @@ OWNER_EMAIL=lauro.ajo@gmail.com
 VAPID_SUBJECT=mailto:lauro.ajo@gmail.com
 VAPID_PUBLIC_KEY=
 VAPID_PRIVATE_KEY=
+
+# DEX CRM (getdex.com) — manual sync of contacts into Networking (owner only).
+#   npx wrangler pages secret put DEX_API_KEY --project-name aide-support
+DEX_API_KEY=

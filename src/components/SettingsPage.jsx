@@ -49,6 +49,32 @@ export default function SettingsPage() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
 
+  // DEX CRM (owner only) — status card em Integrações.
+  const [dexStatus, setDexStatus] = useState(null); // { configured, connected, status } | null enquanto carrega
+  const [dexSyncing, setDexSyncing] = useState(false);
+  const dexLastSync = useStore((s) => s.dexLastSync);
+  const dexSyncResult = useStore((s) => s.dexSyncResult);
+  const setDexLastSync = useStore((s) => s.setDexLastSync);
+  const setDexSyncResult = useStore((s) => s.setDexSyncResult);
+
+  const loadDexStatus = () => {
+    apiFetch('/api/dex/status').then(setDexStatus).catch(() => setDexStatus({ configured: false }));
+  };
+
+  const syncDexNow = async () => {
+    setDexSyncing(true);
+    try {
+      const res = await apiFetch('/api/dex/sync', { method: 'POST' });
+      setDexSyncResult(res);
+      setDexLastSync(new Date().toISOString());
+      loadDexStatus();
+    } catch (e) {
+      setDexSyncResult({ error: String((e && e.message) || e) });
+    } finally {
+      setDexSyncing(false);
+    }
+  };
+
   const testBridge = async () => {
     setTesting(true);
     setTestResult(null);
@@ -102,6 +128,8 @@ export default function SettingsPage() {
     apiFetch('/api/calendar/list').then(() => setCalStatus('ok')).catch((e) => setCalStatus(isAuthScopeError(e) ? 'no' : 'ok'));
     apiFetch('/api/drive/files').then(() => setDriveStatus('ok')).catch((e) => setDriveStatus(isAuthScopeError(e) ? 'no' : 'ok'));
     loadBridge();
+    if (currentUser?.role === 'owner') loadDexStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadBridge = async () => {
@@ -206,6 +234,57 @@ export default function SettingsPage() {
           <IntegrationCard label="Google Drive" status={driveStatus} />
         </div>
       </Section>
+
+      {/* DEX CRM (getdex.com) — owner only. Sync manual de contatos para o Networking. */}
+      {currentUser?.role === 'owner' && (
+        <Section title="DEX CRM">
+          {!dexStatus ? (
+            <p className="text-sm text-muted">Verificando...</p>
+          ) : !dexStatus.configured ? (
+            <div className="rounded-lg border border-line bg-base p-3">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                <AlertTriangle className="h-4 w-4 text-amber-500" /> DEX API Key não configurada
+              </div>
+              <p className="mt-1 text-xs text-ink2">
+                Configure <code className="rounded bg-surface2 px-1 py-0.5">DEX_API_KEY</code> nas
+                variáveis de ambiente do Cloudflare Pages:
+              </p>
+              <code className="mt-1 block rounded-md bg-surface2 px-2 py-1.5 text-[11px] text-ink2">
+                npx wrangler pages secret put DEX_API_KEY --project-name aide-support
+              </code>
+            </div>
+          ) : dexStatus.connected ? (
+            <div className="rounded-lg border border-line bg-base p-3">
+              <div className="flex items-center gap-1.5 text-sm font-medium" style={{ color: '#22C55E' }}>
+                <CheckCircle2 className="h-4 w-4" /> DEX conectado
+              </div>
+              <p className="mt-1 text-xs text-ink2">
+                Última sincronização: {dexLastSync ? new Date(dexLastSync).toLocaleString('pt-BR') : 'nunca (nesta sessão)'}
+              </p>
+              {dexSyncResult && !dexSyncResult.error && (
+                <p className="mt-1 text-xs text-ink2">
+                  {dexSyncResult.inserted} novos, {dexSyncResult.updated} atualizados, {dexSyncResult.skipped} ignorados (de {dexSyncResult.total})
+                </p>
+              )}
+              {dexSyncResult?.error && (
+                <p className="mt-1 text-xs text-danger">Falha na última sincronização: {dexSyncResult.error}</p>
+              )}
+              <button
+                onClick={syncDexNow}
+                disabled={dexSyncing}
+                className="mt-2 flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${dexSyncing ? 'animate-spin' : ''}`} />
+                {dexSyncing ? 'Sincronizando...' : 'Sincronizar agora'}
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 rounded-lg border border-line bg-base p-3 text-sm font-medium" style={{ color: '#F59E0B' }}>
+              <AlertTriangle className="h-4 w-4" /> DEX: erro de autenticação (verifique a API key)
+            </div>
+          )}
+        </Section>
+      )}
 
       {/* Bidirectional Drive/Calendar sharing — both Lauro and Alice can grant
           and receive access to items in their own Google accounts. */}

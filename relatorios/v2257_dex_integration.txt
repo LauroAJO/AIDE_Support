@@ -1,0 +1,66 @@
+================================
+AIDE — RELATÓRIO v2.25.7
+DEX CRM Integration
+================================
+Data: 2026-08-01
+
+MUDANÇAS:
+- _worker.js
+  - Rota dispatch (após Networking, antes de Timer): GET /api/dex/status,
+    POST /api/dex/sync, GET /api/dex/contacts/:dexId
+  - handleDexStatus, handleDexSync, handleDexContactItem, syncDexContacts
+    (bloco novo, inserido antes de "Interações de contato / Prompt G",
+    logo após handleNetworkPersonItem)
+- .dev.vars.example — documentado DEX_API_KEY + comando de secret
+- src/store.js — dexLastSync, dexSyncResult (state) + setDexLastSync,
+  setDexSyncResult (actions), ao lado de bridgeSyncStatus
+- src/components/networking/NetworkingPage.jsx
+  - Import RefreshCw; leitura de `user` e dos setters DEX do store
+  - Botão "↻ DEX" / "Sincronizando..." no cabeçalho (ao lado de "+ Pessoa"),
+    visível só para user.role === 'owner'
+  - Badge "DEX" (bg-purple-100/text-purple-600) no card da pessoa quando
+    dex_contact_id está presente (ao lado do badge "LG" já existente)
+  - Botão "🔗 Ver no DEX" no painel de detalhe → getdex.com/appv3/contacts/{id}
+  - Toast de resultado (mesmo padrão local já usado em TasksPage.jsx)
+- src/components/SettingsPage.jsx
+  - Nova seção "DEX CRM" (Section), visível só para currentUser.role === 'owner',
+    logo após "Integrações"
+  - GET /api/dex/status no mount; card com os 3 estados (não configurado /
+    conectado / erro de auth) + botão "Sincronizar agora"
+- src/version.js — 2.25.6 → 2.25.7
+
+DESVIOS DO SPEC ORIGINAL (e por quê):
+- network_people NÃO tem coluna `website` (só network_institutions tem).
+  O INSERT/UPDATE de sync não grava esse campo — gravá-lo quebraria a query
+  (schema real confirmado em migrations/0015_hierarchy.sql).
+- "loadPeople()" do spec não existe; a função real de recarga em
+  NetworkingPage.jsx é `loadAll()` — usada no lugar.
+- Não havia helper `showToast` compartilhado; segui o padrão já usado em
+  TasksPage.jsx (state local + setTimeout, banner fixed bottom).
+- dexLastSync/dexSyncResult ficam só em memória (Zustand, sem persistência
+  em D1) — "Última sincronização" mostra "nunca (nesta sessão)" após reload
+  de página, não um histórico real. Bater com o spec exigiria uma coluna/
+  linha de config nova, fora do escopo pedido.
+
+ROTAS ADICIONADAS:
+GET  /api/dex/status         → owner only
+POST /api/dex/sync           → owner only
+GET  /api/dex/contacts/:dexId → owner only
+
+VERIFICAÇÃO:
+npm run build: OK (zero erros; warning de chunk >500kB é pré-existente,
+  não relacionado a esta mudança)
+node --check _worker.js: OK
+node --check dist/_worker.js: OK
+
+DEPLOY:
+npx wrangler pages deploy dist --project-name aide-support → sucesso
+  https://c6388342.aide-support.pages.dev (produção, aide-support.pages.dev)
+
+INSTRUÇÃO PRÉ-USO (a rodar pelo usuário, requer credenciais Cloudflare):
+npx wrangler pages secret put DEX_API_KEY --project-name aide-support
+
+Sem essa secret configurada, GET /api/dex/status responde
+{ configured: false } e a UI mostra "DEX API Key não configurada" —
+comportamento seguro, não quebra nada.
+================================

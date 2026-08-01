@@ -25,6 +25,7 @@ import {
   MoreHorizontal,
   X,
   User,
+  Users,
   Settings,
   LogOut,
 } from 'lucide-react';
@@ -94,6 +95,7 @@ export default function Layout({ children }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [bridgePending, setBridgePending] = useState(0);
+  const [dexPending, setDexPending] = useState(0);
   const menuRef = useRef(null);
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
@@ -154,6 +156,9 @@ export default function Layout({ children }) {
     if (!isOwner) return;
     apiFetch('/api/bridge/staging/count')
       .then((r) => setBridgePending((r && r.pending) || 0))
+      .catch(() => {});
+    apiFetch('/api/dex/staging/count')
+      .then((r) => setDexPending((r && r.pending) || 0))
       .catch(() => {});
   }, [isOwner]);
 
@@ -307,6 +312,22 @@ export default function Layout({ children }) {
                     {bridgePending > 0 && (
                       <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
                         {bridgePending}
+                      </span>
+                    )}
+                  </button>
+                )}
+                {/* Revisar DEX — owner only, com badge de pendências */}
+                {isOwner && (
+                  <button
+                    type="button"
+                    onClick={() => go('/dex/staging')}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                  >
+                    <Users className="h-4 w-4" />
+                    <span className="flex-1">Revisar DEX</span>
+                    {dexPending > 0 && (
+                      <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+                        {dexPending}
                       </span>
                     )}
                   </button>

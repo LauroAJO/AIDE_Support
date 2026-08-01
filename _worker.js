@@ -141,6 +141,11 @@ async function handleAPI(request, env, ctx) {
   // DEX CRM (getdex.com) — owner only.
   if (path === '/api/dex/status') return handleDexStatus(request, env, user);
   if (path === '/api/dex/sync' && method === 'POST') return handleDexSync(request, env, user);
+  if (path === '/api/dex/staging' && method === 'GET') return handleDexStagingList(request, env, user);
+  if (path === '/api/dex/staging/count' && method === 'GET') return handleDexStagingCount(env, user);
+  if (path === '/api/dex/staging/approve' && method === 'POST') return handleDexStagingApprove(request, env, user);
+  if (path === '/api/dex/staging/reject' && method === 'POST') return handleDexStagingReject(request, env, user);
+  if (path === '/api/dex/staging/clear' && method === 'DELETE') return handleDexStagingClear(env, user);
   if (path.startsWith('/api/dex/contacts/')) return handleDexContactItem(request, env, user, path.split('/')[4]);
 
   // Timer
@@ -6607,6 +6612,121 @@ async function handleDexSync(request, env, user) {
   }
 }
 
+function shapeDexStagingRow(r) {
+  if (!r) return r;
+  return { ...r, reviewed: !!r.reviewed, approved: !!r.approved, rejected: !!r.rejected };
+}
+
+async function handleDexStagingList(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  const url = new URL(request.url);
+  const search = (url.searchParams.get('search') || '').trim();
+  let sql = 'SELECT * FROM dex_contact_staging WHERE reviewed = 0';
+  const args = [];
+  if (search) {
+    sql += ' AND (full_name LIKE ? OR company LIKE ? OR email LIKE ?)';
+    const like = `%${search}%`;
+    args.push(like, like, like);
+  }
+  sql += ' ORDER BY full_name ASC';
+  try {
+    const { results } = await env.DB.prepare(sql).bind(...args).all();
+    return json((results || []).map(shapeDexStagingRow));
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/no such table/i.test(msg)) return json({ error: 'Migração 0047 não aplicada', detail: msg }, 503);
+    return json({ error: 'Falha ao listar staging do DEX', detail: msg }, 500);
+  }
+}
+
+async function handleDexStagingCount(env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  try {
+    const row = await env.DB.prepare(
+      'SELECT COUNT(*) AS pending FROM dex_contact_staging WHERE reviewed = 0'
+    ).first();
+    return json({ pending: (row && row.pending) || 0 });
+  } catch {
+    return json({ pending: 0 });
+  }
+}
+
+async function handleDexStagingApprove(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.ids) ? body.ids : [];
+  if (!ids.length) return json({ error: 'ids é obrigatório' }, 400);
+  const now = Math.floor(Date.now() / 1000);
+  let approved = 0;
+  const errors = [];
+  for (const id of ids) {
+    try {
+      const s = await env.DB.prepare('SELECT * FROM dex_contact_staging WHERE id = ?').bind(id).first();
+      if (!s) { errors.push({ id, error: 'não encontrado' }); continue; }
+      if (s.imported_person_id) { errors.push({ id, error: 'já importado' }); continue; }
+
+      const existing = s.email
+        ? await env.DB.prepare(
+            'SELECT id FROM network_people WHERE dex_contact_id = ? OR email = ?'
+          ).bind(s.dex_contact_id, s.email).first()
+        : await env.DB.prepare(
+            'SELECT id FROM network_people WHERE dex_contact_id = ?'
+          ).bind(s.dex_contact_id).first();
+
+      let personId;
+      if (existing) {
+        personId = existing.id;
+        await env.DB.prepare('UPDATE network_people SET dex_contact_id = ? WHERE id = ?')
+          .bind(s.dex_contact_id, personId).run();
+      } else {
+        personId = crypto.randomUUID();
+        await env.DB.prepare(
+          `INSERT INTO network_people
+            (id, name, email, role, linkedin, dex_contact_id, source, tags, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'dex', '[]', ?, ?)`
+        ).bind(
+          personId, s.full_name, s.email || '', s.job_title || '', s.linkedin || '', s.dex_contact_id, now, now
+        ).run();
+      }
+
+      await env.DB.prepare(
+        'UPDATE dex_contact_staging SET reviewed=1, approved=1, imported_at=?, imported_person_id=? WHERE id=?'
+      ).bind(now, personId, id).run();
+      approved += 1;
+    } catch (e) {
+      errors.push({ id, error: String((e && e.message) || e).slice(0, 200) });
+    }
+  }
+  return json({ approved, errors });
+}
+
+async function handleDexStagingReject(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.ids) ? body.ids : [];
+  if (!ids.length) return json({ error: 'ids é obrigatório' }, 400);
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    await env.DB.prepare(
+      `UPDATE dex_contact_staging SET reviewed=1, rejected=1 WHERE id IN (${placeholders})`
+    ).bind(...ids).run();
+    return json({ rejected: ids.length });
+  } catch (e) {
+    return json({ error: 'Falha ao rejeitar', detail: String((e && e.message) || e) }, 500);
+  }
+}
+
+async function handleDexStagingClear(env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  try {
+    const res = await env.DB.prepare('DELETE FROM dex_contact_staging WHERE reviewed = 1').run();
+    const deleted = (res && res.meta && res.meta.changes) || 0;
+    return json({ deleted });
+  } catch (e) {
+    return json({ error: 'Falha ao limpar', detail: String((e && e.message) || e) }, 500);
+  }
+}
+
 async function handleDexContactItem(request, env, user, dexId) {
   if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
   if (!dexId) return json({ error: 'ID ausente' }, 400);
@@ -6624,10 +6744,11 @@ async function handleDexContactItem(request, env, user, dexId) {
   }
 }
 
-// Puxa todos os contatos do DEX (paginado, máx. 1000) e faz upsert em
-// network_people por dex_contact_id — casando por email quando a pessoa já
-// existe no AIDE sem vínculo DEX, para não duplicar. Campos AIDE-specific
-// (notes, tags, connection_strength, roles etc.) nunca são sobrescritos.
+// Puxa todos os contatos do DEX (paginado, máx. 1000) e manda pra
+// dex_contact_staging — waiting room revisada em /dex/staging antes de virar
+// registro em network_people (v2.25.8). Contatos já vinculados a uma pessoa
+// existente (por dex_contact_id ou email) são pulados; contatos já em staging
+// são atualizados com os dados mais recentes do DEX.
 async function syncDexContacts(env) {
   const dexKey = env.DEX_API_KEY;
   if (!dexKey) throw new Error('DEX_API_KEY not configured');
@@ -6654,55 +6775,65 @@ async function syncDexContacts(env) {
     if (page >= 10) break; // safety limit: 1000 contatos
   } while (cursor);
 
-  let inserted = 0;
-  let updated = 0;
+  let staged = 0;
   let skipped = 0;
+  let alreadyImported = 0;
+  const now = Math.floor(Date.now() / 1000);
 
   for (const contact of allContacts) {
-    if (!contact.full_name && !contact.first_name) { skipped++; continue; }
+    const fullName = contact.full_name
+      || [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+    if (!fullName) { skipped++; continue; }
 
-    const name = contact.full_name || [contact.first_name, contact.last_name].filter(Boolean).join(' ');
     const email = contact.emails?.[0]?.address || '';
-    const role = contact.job_title || '';
+    const phone = contact.phone_numbers?.[0]?.number || '';
+    const jobTitle = contact.job_title || '';
+    const company = contact.company || '';
+    const linkedin = contact.social_profiles?.find((s) => s.type === 'linkedin')?.url || '';
+    const imageUrl = contact.image_url || '';
 
-    const existing = await env.DB.prepare(
-      'SELECT id FROM network_people WHERE dex_contact_id = ?'
+    const importedPerson = email
+      ? await env.DB.prepare(
+          'SELECT id FROM network_people WHERE dex_contact_id = ? OR email = ?'
+        ).bind(contact.id, email).first()
+      : await env.DB.prepare(
+          'SELECT id FROM network_people WHERE dex_contact_id = ?'
+        ).bind(contact.id).first();
+
+    if (importedPerson) { alreadyImported++; continue; }
+
+    const inStaging = await env.DB.prepare(
+      'SELECT id FROM dex_contact_staging WHERE dex_contact_id = ?'
     ).bind(contact.id).first();
 
-    if (existing) {
-      // Update — só sobrescreve email/role se estavam vazios; nunca mexe em
-      // campos AIDE-specific (notes, tags, connection_strength, roles...).
-      await env.DB.prepare(`
-        UPDATE network_people SET
-          name = ?,
-          email = CASE WHEN email = '' THEN ? ELSE email END,
-          role = CASE WHEN role = '' THEN ? ELSE role END,
-          updated_at = unixepoch()
-        WHERE dex_contact_id = ?
-      `).bind(name, email, role, contact.id).run();
-      updated++;
-    } else {
-      const byEmail = email
-        ? await env.DB.prepare('SELECT id FROM network_people WHERE email = ?').bind(email).first()
-        : null;
-
-      if (byEmail) {
-        await env.DB.prepare(
-          'UPDATE network_people SET dex_contact_id = ? WHERE id = ?'
-        ).bind(contact.id, byEmail.id).run();
-        updated++;
-      } else {
-        await env.DB.prepare(`
-          INSERT INTO network_people
-            (id, name, email, role, dex_contact_id, source, tags, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, 'dex', '[]', unixepoch(), unixepoch())
-        `).bind(crypto.randomUUID(), name, email, role, contact.id).run();
-        inserted++;
-      }
-    }
+    await env.DB.prepare(`
+      INSERT INTO dex_contact_staging
+        (id, dex_contact_id, full_name, first_name, last_name, email, phone,
+         job_title, company, description, linkedin, image_url, raw_payload, staged_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(dex_contact_id) DO UPDATE SET
+        full_name = excluded.full_name,
+        first_name = excluded.first_name,
+        last_name = excluded.last_name,
+        email = excluded.email,
+        phone = excluded.phone,
+        job_title = excluded.job_title,
+        company = excluded.company,
+        description = excluded.description,
+        linkedin = excluded.linkedin,
+        image_url = excluded.image_url,
+        raw_payload = excluded.raw_payload,
+        staged_at = excluded.staged_at
+    `).bind(
+      inStaging ? inStaging.id : crypto.randomUUID(),
+      contact.id, fullName, contact.first_name || '', contact.last_name || '',
+      email, phone, jobTitle, company, contact.description || '', linkedin, imageUrl,
+      JSON.stringify(contact), now
+    ).run();
+    staged++;
   }
 
-  return { total: allContacts.length, inserted, updated, skipped };
+  return { fetched: allContacts.length, staged, skipped, already_imported: alreadyImported };
 }
 
 // ---------------------------------------------------------------------------

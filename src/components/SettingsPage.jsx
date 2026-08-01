@@ -263,7 +263,7 @@ export default function SettingsPage() {
               </p>
               {dexSyncResult && !dexSyncResult.error && (
                 <p className="mt-1 text-xs text-ink2">
-                  {dexSyncResult.inserted} novos, {dexSyncResult.updated} atualizados, {dexSyncResult.skipped} ignorados (de {dexSyncResult.total})
+                  {dexSyncResult.staged} para revisar, {dexSyncResult.already_imported} já importados, {dexSyncResult.skipped} ignorados (de {dexSyncResult.fetched})
                 </p>
               )}
               {dexSyncResult?.error && (

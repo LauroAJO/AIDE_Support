@@ -174,6 +174,7 @@ export default function NetworkingPage() {
   const [proProfile, setProProfile] = useState(() => ({}));
   // DEX CRM sync (owner only) — botão "Sincronizar DEX" no cabeçalho.
   const [dexSyncing, setDexSyncing] = useState(false);
+  const [dexPendingReview, setDexPendingReview] = useState(0);
   const [toast, setToast] = useState('');
   const showToast = (msg) => {
     setToast(msg);
@@ -226,6 +227,12 @@ export default function NetworkingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (user?.role !== 'owner') return;
+    apiFetch('/api/dex/staging/count').then((r) => setDexPendingReview((r && r.pending) || 0)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.role]);
+
   const syncDex = async () => {
     setDexSyncing(true);
     try {
@@ -233,7 +240,8 @@ export default function NetworkingPage() {
       setDexSyncResult(res);
       setDexLastSync(new Date().toISOString());
       await loadAll();
-      showToast(`DEX: ${res.inserted} novos, ${res.updated} atualizados`);
+      apiFetch('/api/dex/staging/count').then((r) => setDexPendingReview((r && r.pending) || 0)).catch(() => {});
+      showToast(`DEX: ${res.staged} novos contatos aguardando revisão`);
     } catch (e) {
       showToast(`Erro ao sincronizar DEX: ${(e && e.message) || e}`, 'error');
     } finally {
@@ -416,6 +424,14 @@ export default function NetworkingPage() {
             >
               <RefreshCw className={`h-3.5 w-3.5 ${dexSyncing ? 'animate-spin' : ''}`} />
               {dexSyncing ? 'Sincronizando...' : '↻ DEX'}
+            </button>
+          )}
+          {user?.role === 'owner' && dexPendingReview > 0 && (
+            <button
+              onClick={() => navigate('/dex/staging')}
+              className="flex items-center gap-1 rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-xs font-medium text-accent hover:bg-accent/20"
+            >
+              {dexPendingReview} contato(s) para revisar → Revisar DEX
             </button>
           )}
           <button

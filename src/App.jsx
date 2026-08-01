@@ -31,6 +31,7 @@ import GmailPage from './components/gmail/GmailPage';
 import HubContainer from './components/hub/HubContainer';
 import AdminPage from './components/admin/AdminPage';
 import BridgeCurationPage from './components/bridge/BridgeCurationPage';
+import DexStagingPage from './components/networking/DexStagingPage';
 import PendingApprovalPage from './components/PendingApprovalPage';
 
 // Permission-aware route gate. Owner bypasses. Anyone else needs a non-'none'
@@ -257,6 +258,7 @@ export default function App() {
           <Route path="/hub" element={<FixedRoute><HubContainer /></FixedRoute>} />
           <Route path="/admin" element={<OwnerRoute><AdminPage /></OwnerRoute>} />
           <Route path="/bridge/staging" element={<OwnerRoute><BridgeCurationPage /></OwnerRoute>} />
+          <Route path="/dex/staging" element={<OwnerRoute><DexStagingPage /></OwnerRoute>} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="*" element={<Navigate to="/tasks" replace />} />

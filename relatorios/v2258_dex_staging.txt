@@ -1,0 +1,123 @@
+================================
+AIDE — RELATÓRIO v2.25.8
+DEX Staging: curadoria antes de importar
+================================
+Data: 2026-08-02
+
+CONTEXTO:
+O sync do DEX (v2.25.7) importava contatos direto em network_people.
+Esta versão introduz uma waiting room (dex_contact_staging) igual ao
+padrão já usado pela bridge do Lifegame (bridge_person_staging): contatos
+do DEX ficam pendentes de revisão em /dex/staging antes de virar registro
+em network_people.
+
+MUDANÇAS:
+- migrations/0047_dex_staging.sql (nova)
+  - CREATE TABLE dex_contact_staging (id, dex_contact_id UNIQUE, full_name,
+    first_name, last_name, email, phone, job_title, company, description,
+    linkedin, image_url, raw_payload, staged_at, reviewed, approved,
+    rejected, imported_person_id FK → network_people ON DELETE SET NULL,
+    imported_at)
+  - idx_dex_staging_reviewed, idx_dex_staging_dex_id
+  - Aplicada localmente (npm run db:migrate) — OK
+
+- _worker.js
+  - Rota dispatch (bloco DEX CRM): + GET /api/dex/staging,
+    GET /api/dex/staging/count, POST /api/dex/staging/approve,
+    POST /api/dex/staging/reject, DELETE /api/dex/staging/clear
+  - syncDexContacts() reescrita: em vez de INSERT/UPDATE em network_people,
+    faz INSERT ... ON CONFLICT(dex_contact_id) DO UPDATE em
+    dex_contact_staging. Por contato do DEX:
+      1. já tem pessoa em network_people (por dex_contact_id OU email)
+         → already_imported++, pula
+      2. já está em staging → upsert (atualiza com dado mais recente do
+         DEX, preserva reviewed/approved/rejected/imported_person_id —
+         não usei INSERT OR REPLACE puro pra não resetar o status de
+         revisão de quem ainda está pendente)
+      3. novo → INSERT em staging, staged++
+      4. sem nome (full_name vazio após join first+last) → skipped++
+    Retorno: { fetched, staged, skipped, already_imported } (troquei
+    { total, inserted, updated, skipped } do v2.25.7)
+  - handleDexStagingList/Count/Approve/Reject/Clear (novo bloco, logo
+    após handleDexSync) — mesmo padrão de handleBridgePeopleStaging*
+  - handleDexStagingApprove: por id, resolve pessoa existente (por
+    dex_contact_id OU email) e só vincula; senão cria em network_people
+    com source='dex', tags='[]'
+
+- src/components/networking/DexStagingPage.jsx (nova)
+  - Página única (sem abas, ao contrário de BridgeCurationPage) em
+    /dex/staging: header, busca (nome/empresa/email), "Selecionar todos",
+    Aprovar/Rejeitar selecionados, Limpar revisados, lista com avatar
+    (Avatar component — usa image_url via prop `avatar`), nome, cargo @
+    empresa, email, ícone LinkedIn linkando pro perfil, botões
+    Aprovar/Rejeitar por linha
+
+- src/App.jsx
+  - import DexStagingPage; rota /dex/staging dentro de <OwnerRoute>
+    (mesmo padrão de /bridge/staging)
+
+- src/components/Layout.jsx
+  - import Users (lucide-react)
+  - state dexPending + fetch GET /api/dex/staging/count no mount
+    (owner only), mesmo efeito que já buscava bridgePending
+  - Item "Revisar DEX" no dropdown de perfil, logo após "Revisar Bridge",
+    com badge de contagem — owner only
+
+- src/components/networking/NetworkingPage.jsx
+  - state dexPendingReview; busca /api/dex/staging/count no mount
+    (owner only) e de novo após cada sync
+  - Toast do sync: "DEX: {res.staged} novos contatos aguardando revisão"
+    (era "{inserted} novos, {updated} atualizados")
+  - Botão persistente no cabeçalho (ao lado de "↻ DEX"), só quando
+    dexPendingReview > 0: "{N} contato(s) para revisar → Revisar DEX",
+    navega pra /dex/staging
+
+- src/components/SettingsPage.jsx
+  - Card "DEX CRM" atualizado: resultado do sync agora mostra
+    "{staged} para revisar, {already_imported} já importados,
+    {skipped} ignorados (de {fetched})" — os campos antigos
+    (inserted/updated/total) não existem mais na resposta da API,
+    então o card quebraria (undefined) se não fosse ajustado junto
+    (fora do escopo original do pedido, mas necessário pra não regredir
+    a página de Settings)
+
+- src/version.js — 2.25.7 → 2.25.8
+
+ROTAS ADICIONADAS:
+GET    /api/dex/staging          → owner only, ?search= em full_name/company/email
+GET    /api/dex/staging/count    → owner only, { pending }
+POST   /api/dex/staging/approve  → owner only, { ids: [...] } → { approved, errors }
+POST   /api/dex/staging/reject   → owner only, { ids: [...] } → { rejected }
+DELETE /api/dex/staging/clear    → owner only, → { deleted }
+
+ROTA ALTERADA:
+POST /api/dex/sync → mesmo contrato de entrada, resposta trocou de
+  { ok, total, inserted, updated, skipped } para
+  { ok, fetched, staged, skipped, already_imported }
+
+VERIFICAÇÃO:
+npm run db:migrate (local): OK — 0047_dex_staging.sql aplicada
+  (26 applied, 21 error/skipped de 47 no total — os "erro/skipped" são
+  ALTER TABLE em colunas já existentes de migrações antigas, esperado
+  e não-fatal, ver comentário em scripts/migrate.ps1)
+npm run build: OK, zero erros (warning de chunk >500kB é pré-existente)
+node --check _worker.js: OK
+
+DEPLOY:
+npm run deploy → sucesso
+  https://775cfede.aide-support.pages.dev (produção, aide-support.pages.dev)
+
+GIT:
+commit 5d0d376 "v2.25.8 — DEX staging: curadoria antes de importar"
+push origin main: OK (8a03160..5d0d376)
+Arquivos não relacionados a esta tarefa (aide_hub_bridge_report.md,
+aide_lifegame_bridge_push_report.md, cleanup_phd.sql) ficaram untracked,
+não foram adicionados ao commit.
+
+MIGRAÇÃO REMOTA (não executada — requer decisão do usuário):
+npx wrangler d1 execute aide-db --remote --file=migrations/0047_dex_staging.sql -y
+
+Alternativa (roda TODAS as migrações em ordem contra o remoto; seguro,
+CREATE TABLE/INDEX usam IF NOT EXISTS e ALTER duplicado é tolerado):
+npm run db:migrate:remote
+================================

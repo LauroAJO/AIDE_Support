@@ -13,3 +13,13 @@ dist/
 .idea/
 .claude/settings.json
 .claude/settings.local.json
+
+# Relatórios de debug/auditoria e scripts SQL pontuais — podem conter
+# credenciais em texto puro (ex.: bridge secret) e não devem ir para o repo.
+# ATENÇÃO: os arquivos de relatorios/ que JÁ estão versionados continuam
+# sendo rastreados — .gitignore só vale para arquivos ainda não rastreados.
+# Para parar de versioná-los: git rm --cached relatorios/<arquivo>.txt
+aide_*_report.md
+cleanup_phd.sql
+relatorios/*.txt
+*.secret

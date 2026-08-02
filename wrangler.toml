@@ -7,6 +7,12 @@ binding = "DB"
 database_name = "aide-db"
 database_id = "71f9338d-8664-4df1-8384-86ba8c256de9"
 
+# Workers AI — usado por POST /api/ai/draft-email (rascunho de outreach,
+# v2.25.10). Sem custo de configuração adicional; se o binding não resolver
+# em runtime, o endpoint cai num template estruturado sem IA.
+[ai]
+binding = "AI"
+
 # KV namespaces (AIDE_TOKENS, AIDE_SYNC) were unbound in v2.0.0 — the worker
 # no longer reads or writes KV. The namespaces themselves still exist in the
 # Cloudflare account and can be re-bound later if needed.

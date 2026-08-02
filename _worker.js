@@ -80,6 +80,10 @@ async function handleAPI(request, env, ctx) {
     return json(publicUser(user));
   }
 
+  // Busca global (header) — unificada em tasks/notes/pessoas/organizações/
+  // eventos/hub. Deve vir cedo no router: é chamada a cada digitação.
+  if (path === '/api/search') return handleGlobalSearch(request, env, user);
+
   if (path === '/api/users') return handleUsers(env);
   // Multi-user admin (owner-only — guard lives inside each handler).
   if (path === '/api/users/all') return handleUsersAll(request, env, user);
@@ -134,11 +138,18 @@ async function handleAPI(request, env, ctx) {
   if (path.match(/^\/api\/network\/people\/[^/]+\/interactions\/[^/]+$/)) {
     return handleContactInteractionItem(request, env, user, path.split('/')[4], path.split('/')[6]);
   }
+  // Contexto de outreach (assistente de rascunho de email) — antes da rota genérica.
+  if (path.match(/^\/api\/network\/people\/[^/]+\/outreach-context$/)) {
+    return handleOutreachContext(request, env, user, path.split('/')[4]);
+  }
   if (path.startsWith('/api/network/people/')) return handleNetworkPersonItem(request, env, user, path.split('/')[4]);
   if (path === '/api/network/institutions') return handleNetworkInstitutions(request, env, user);
   if (path.startsWith('/api/network/institutions/')) return handleNetworkInstitutionItem(request, env, user, path.split('/')[4]);
   if (path === '/api/network/connections') return handleNetworkConnections(request, env, user);
   if (path.startsWith('/api/network/connections/')) return handleNetworkConnectionItem(request, env, user, path.split('/')[4]);
+
+  // Assistente de outreach (rascunho de email via IA) — owner only.
+  if (path === '/api/ai/draft-email' && method === 'POST') return handleDraftEmail(request, env, user);
 
   // DEX CRM (getdex.com) — owner only.
   if (path === '/api/dex/status') return handleDexStatus(request, env, user);
@@ -1189,6 +1200,121 @@ function requirePermission(user, feature, minLevel = 'view') {
   if (userLevel === 'full') return true;
   if (minLevel === 'view') return userLevel !== 'none';
   return levels.indexOf(userLevel) >= levels.indexOf(minLevel);
+}
+
+// ---------------------------------------------------------------------------
+// Busca global (header) — consulta tasks/notes/network_people/
+// market_organizations/career_events/hub_items em paralelo. Cada categoria
+// respeita a MESMA regra de visibilidade do endpoint de listagem
+// correspondente (handleTasksCollection, handleNotes, handleNetworkPeople,
+// isHubReader p/ Mercado/Carreira/Hub — áreas restritas a owner + assistente
+// fixo). Fail-open por categoria: sem permissão = array vazio, nunca 403 —
+// a busca sempre responde, só que "mais vazia" pra quem tem menos acesso.
+// ---------------------------------------------------------------------------
+
+// Escapa os curingas do LIKE (% e _) e o próprio caractere de escape (\) para
+// que um usuário buscando por "50%" ou "under_score" não vire um wildcard.
+function escapeLikeQuery(q) {
+  return String(q).replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+async function handleGlobalSearch(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+
+  const url = new URL(request.url);
+  const rawQuery = (url.searchParams.get('q') || '').trim();
+  const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit'), 10) || 5, 1), 10);
+
+  const empty = { tasks: [], notes: [], people: [], organizations: [], events: [], hub: [], total: 0 };
+  if (rawQuery.length < 2) return json(empty);
+
+  const q = `%${escapeLikeQuery(rawQuery)}%`;
+  const noResults = { results: [] };
+
+  // Mesma regra de handleTasksCollection (GET): view + (view_assigned ou view_all);
+  // assigned_only vê só o que lhe foi atribuído ou que ela mesma criou.
+  const tasksAllowed = requirePermission(user, 'tasks', 'view') &&
+    (canDo(user.granular, 'tasks', 'view_assigned') || canDo(user.granular, 'tasks', 'view_all'));
+  const tasksAssignedOnly = ((user.permissions && user.permissions.tasks) || 'full') === 'assigned_only' ||
+    (user.granular && !canDo(user.granular, 'tasks', 'view_all'));
+
+  // Mesma regra de handleNotes (GET): view_all > view_own.
+  const notesCanViewAll = canDo(user.granular, 'notes', 'view_all');
+  const notesCanViewOwn = canDo(user.granular, 'notes', 'view_own');
+  const notesAllowed = requirePermission(user, 'notes', 'view') && (notesCanViewAll || notesCanViewOwn);
+  const notesOwnOnly = !notesCanViewAll && notesCanViewOwn;
+
+  const peopleAllowed = requirePermission(user, 'networking', 'view');
+  // Mercado/Carreira/Hub: restrito a owner + assistentes fixos (mesma regra de
+  // FixedRoute no frontend e de isHubReader() já usada pelo Hub no backend).
+  const fixedAllowed = isHubReader(user);
+
+  const [tasksRes, notesRes, peopleRes, orgsRes, eventsRes, hubRes] = await Promise.all([
+    tasksAllowed
+      ? env.DB.prepare(
+          `SELECT id, title as label, 'task' as type, status as meta, urgency
+           FROM tasks WHERE title LIKE ? ESCAPE '\\'${tasksAssignedOnly ? ' AND (assigned_to = ? OR created_by = ?)' : ''}
+           ORDER BY urgency DESC LIMIT ?`
+        ).bind(...(tasksAssignedOnly ? [q, user.id, user.id, limit] : [q, limit])).all().catch(() => noResults)
+      : Promise.resolve(noResults),
+
+    notesAllowed
+      ? env.DB.prepare(
+          `SELECT id, title as label, 'note' as type, substr(body, 1, 60) as meta
+           FROM notes WHERE (title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')${notesOwnOnly ? ' AND created_by = ?' : ''}
+           LIMIT ?`
+        ).bind(...(notesOwnOnly ? [q, q, user.id, limit] : [q, q, limit])).all().catch(() => noResults)
+      : Promise.resolve(noResults),
+
+    peopleAllowed
+      ? env.DB.prepare(
+          `SELECT id, name as label, 'person' as type, COALESCE(institution, '') as meta
+           FROM network_people
+           WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\'
+              OR role LIKE ? ESCAPE '\\' OR institution LIKE ? ESCAPE '\\'
+           LIMIT ?`
+        ).bind(q, q, q, q, limit).all().catch(() => noResults)
+      : Promise.resolve(noResults),
+
+    fixedAllowed
+      ? env.DB.prepare(
+          `SELECT id, name as label, 'organization' as type, type as meta
+           FROM market_organizations
+           WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
+           LIMIT ?`
+        ).bind(q, q, limit).all().catch(() => noResults)
+      : Promise.resolve(noResults),
+
+    fixedAllowed
+      ? env.DB.prepare(
+          `SELECT id, name as label, 'event' as type, acronym as meta
+           FROM career_events
+           WHERE name LIKE ? ESCAPE '\\' OR acronym LIKE ? ESCAPE '\\' OR organizer LIKE ? ESCAPE '\\'
+           LIMIT ?`
+        ).bind(q, q, q, limit).all().catch(() => noResults)
+      : Promise.resolve(noResults),
+
+    fixedAllowed
+      ? env.DB.prepare(
+          `SELECT id, title as label, 'hub' as type, project_id as meta, short_id
+           FROM hub_items
+           WHERE title LIKE ? ESCAPE '\\' AND deleted_at IS NULL AND archived_at IS NULL
+           LIMIT ?`
+        ).bind(q, limit).all().catch(() => noResults)
+      : Promise.resolve(noResults),
+  ]);
+
+  const tasks = tasksRes.results || [];
+  const notes = notesRes.results || [];
+  const people = peopleRes.results || [];
+  const organizations = orgsRes.results || [];
+  const events = eventsRes.results || [];
+  const hub = hubRes.results || [];
+
+  return json({
+    tasks, notes, people, organizations, events, hub,
+    total: tasks.length + notes.length + people.length + organizations.length + events.length + hub.length,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -6597,6 +6723,154 @@ async function handleNetworkPersonItem(request, env, user, id) {
     return json({ ok: true });
   }
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// Contexto rico de uma pessoa para o assistente de outreach (rascunho de
+// email) — junta network_people + contact_professional + funções atuais +
+// vínculos institucionais + últimas interações + próximos eventos da área,
+// tudo numa chamada só (v2.25.10).
+async function handleOutreachContext(request, env, user, personId) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  if (!personId) return json({ error: 'ID ausente' }, 400);
+  try {
+    const person = await env.DB.prepare(`
+      SELECT np.*,
+        cp.outreach_status, cp.outreach_channel,
+        cp.relevance_for_phd, cp.relevance_for_job,
+        cp.next_action, cp.next_action_date,
+        cp.acquaintance_context, cp.acquaintance_notes
+      FROM network_people np
+      LEFT JOIN contact_professional cp ON cp.person_id = np.id
+      WHERE np.id = ?
+    `).bind(personId).first();
+
+    if (!person) return json({ error: 'Pessoa não encontrada' }, 404);
+
+    const roles = await env.DB.prepare(`
+      SELECT pr.role, pr.institution_name, mo.name as org_name
+      FROM person_roles pr
+      LEFT JOIN market_organizations mo ON mo.id = pr.institution_id
+      WHERE pr.person_id = ? AND pr.current = 1
+    `).bind(personId).all();
+
+    const orgLinks = await env.DB.prepare(`
+      SELECT col.role_at_org, mo.name as org_name, mo.type as org_type
+      FROM contact_org_links col
+      JOIN market_organizations mo ON mo.id = col.organization_id
+      WHERE col.person_id = ?
+    `).bind(personId).all();
+
+    const interactions = await env.DB.prepare(`
+      SELECT interaction_type, date, summary, outcome
+      FROM contact_interactions
+      WHERE person_id = ?
+      ORDER BY date DESC LIMIT 3
+    `).bind(personId).all();
+
+    const sharedEvents = await env.DB.prepare(`
+      SELECT name, acronym, date_start, type
+      FROM career_events
+      WHERE status NOT IN ('discarded', 'rejected')
+      AND (area = 'hydrogen' OR area = 'energy_systems'
+        OR area = 'process_engineering')
+      AND date_start >= date('now')
+      ORDER BY date_start ASC LIMIT 3
+    `).all();
+
+    return json({
+      person, roles: roles.results,
+      orgLinks: orgLinks.results,
+      recentInteractions: interactions.results,
+      upcomingEvents: sharedEvents.results
+    });
+  } catch (e) {
+    return json({ error: 'Falha ao montar contexto de outreach', detail: String((e && e.message) || e) }, 500);
+  }
+}
+
+// Extrai { subject, body } da resposta do modelo. LLMs pequenos nem sempre
+// seguem o delimitador "---" pedido no prompt (às vezes respondem com
+// preâmbulo tipo "Here's a draft email:" sem o marcador) — por isso o fallback
+// procura "Dear"/"Hi"/"Hello" como início do corpo antes de desistir e devolver
+// o texto inteiro como corpo com um assunto genérico.
+function parseDraftEmail(text, purposeSeed) {
+  const clean = String(text || '').trim();
+  if (clean.includes('---')) {
+    const [subjectPart, ...rest] = clean.split('---');
+    const subject = subjectPart.replace(/SUBJECT:/i, '').trim();
+    const draftBody = rest.join('---').trim();
+    if (subject && draftBody) return { subject, body: draftBody };
+  }
+
+  const subjectMatch = clean.match(/SUBJECT:\s*(.+)/i);
+  const salutationMatch = clean.match(/\b(Dear|Hi|Hello)\b[^\n]*/i);
+  const salutationIdx = salutationMatch ? clean.indexOf(salutationMatch[0]) : -1;
+
+  let subject = subjectMatch ? subjectMatch[1].split('\n')[0].trim() : '';
+  let draftBody = clean;
+
+  if (salutationIdx > 0) {
+    if (!subject) {
+      subject = clean
+        .slice(0, salutationIdx)
+        .replace(/here'?s?\s+(a|an|the)?\s*(possible\s+)?(draft\s+)?email:?/i, '')
+        .replace(/SUBJECT:/i, '')
+        .trim();
+    }
+    draftBody = clean.slice(salutationIdx).trim();
+  }
+
+  if (!subject) subject = `Re: ${purposeSeed || 'Contato'}`;
+  return { subject, body: draftBody };
+}
+
+// Rascunho de email de outreach — via Workers AI quando o binding `env.AI`
+// está disponível; senão cai num template estruturado (sem custo, sem rede).
+async function handleDraftEmail(request, env, user) {
+  if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
+  const body = (await readJson(request)) || {};
+
+  if (env.AI) {
+    try {
+      const prompt = `You are helping write a professional
+outreach email in English.
+
+Person: ${body.personContext || ''}
+Sender: ${body.userContext || ''}
+Purpose: ${body.purpose || ''}
+Connection: ${body.connectionContext || ''}
+Shared context: ${body.eventsContext || ''}
+
+Write a concise, professional email (max 150 words body).
+Reply with ONLY the email — no preamble like "Here is a draft" or
+"Sure, here's an email". Format EXACTLY as follows, with the literal
+line "---" on its own line separating subject from body:
+SUBJECT: [subject line]
+---
+[email body]
+
+Be specific, mention shared context, clear call to action.`;
+
+      // @cf/meta/llama-3.1-8b-instruct (sem sufixo) foi descontinuado em
+      // 2026-05-30 (erro 5028 em produção); a variante -fp8 segue ativa no
+      // catálogo e testada em produção durante o desenvolvimento (v2.25.10).
+      const response = await env.AI.run(
+        '@cf/meta/llama-3.1-8b-instruct-fp8',
+        { messages: [{ role: 'user', content: prompt }], max_tokens: 300 }
+      );
+
+      const text = response.response || '';
+      return json(parseDraftEmail(text, body.purpose));
+    } catch (e) {
+      return json({ error: 'Falha ao gerar rascunho via IA', detail: String((e && e.message) || e) }, 502);
+    }
+  }
+
+  // Fallback: template estruturado (sem IA configurada).
+  return json({
+    subject: `[${body.purpose || 'Contato'}] ${String(body.personContext || '').split(',')[0]}`,
+    body: `Dear [name],\n\nI hope this message finds you well.\n\n[Your message here]\n\nBest regards,\nLauro Oliveira\nEngD Candidate, University of Twente`
+  });
 }
 
 // ---------------------------------------------------------------------------

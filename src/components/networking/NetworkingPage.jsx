@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Network, Plus, Minus, Home, Maximize2, Settings, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
   Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase, ChevronDown, RefreshCw,
-  Table2, Grid3x3, Download, ArrowUp, ArrowDown,
+  Table2, Grid3x3, Download, ArrowUp, ArrowDown, Loader2, Copy, Send, RotateCcw,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -232,6 +232,20 @@ export default function NetworkingPage() {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Deep-link da busca global (?person=<id>): seleciona a pessoa assim que a
+  // lista carregar e limpa o param pra não reabrir num refresh/voltar depois.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const personId = searchParams.get('person');
+    if (!personId || !people.length) return;
+    const found = people.find((p) => p.id === personId);
+    if (found) setSelected({ id: personId, kind: 'person' });
+    const next = new URLSearchParams(searchParams);
+    next.delete('person');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, people]);
 
   useEffect(() => {
     if (user?.role !== 'owner') return;
@@ -675,6 +689,7 @@ export default function NetworkingPage() {
                 kind={selected.kind}
                 people={people}
                 connections={connections}
+                isOwner={user?.role === 'owner'}
                 hasPro={selected.kind === 'person' && proIds.has(selectedItem.id)}
                 outreachStatus={proStatus[selectedItem.id]}
                 proProfile={proProfile[selectedItem.id] || null}
@@ -1179,7 +1194,7 @@ function TagsSection({ tags, onEdit }) {
   );
 }
 
-function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, proProfile, onChangeOutreach, onPatchProfessional, onPatchPerson, onViewMarket, onEdit, onDelete, onReloadConnections }) {
+function DetailPanel({ item, kind, people, connections, isOwner, hasPro, outreachStatus, proProfile, onChangeOutreach, onPatchProfessional, onPatchPerson, onViewMarket, onEdit, onDelete, onReloadConnections }) {
   const isPerson = kind === 'person';
   const linked = useMemo(() => {
     if (!isPerson) return [];
@@ -1425,7 +1440,208 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
             </ul>
           </div>
         )}
+
+        {/* Assistente de outreach (rascunho de email) — owner only, v2.25.10 */}
+        {isPerson && isOwner && <OutreachSection key={item.id} personId={item.id} item={item} />}
       </div>
+    </div>
+  );
+}
+
+// Assistente de outreach (v2.25.10) — coleta propósito + contexto (auto-
+// preenchido a partir de GET /api/network/people/:id/outreach-context na
+// primeira expansão) e gera um rascunho de email via POST /api/ai/draft-email.
+const OUTREACH_PURPOSES = [
+  { key: 'cold', label: 'Apresentação inicial (cold outreach)' },
+  { key: 'followup', label: 'Follow-up após evento' },
+  { key: 'collab', label: 'Colaboração em projeto' },
+  { key: 'phd', label: 'Oportunidade PhD/pesquisa' },
+  { key: 'other', label: 'Outro' },
+];
+const OUTREACH_USER_CONTEXT_DEFAULT =
+  'Lauro Oliveira, EngD candidate at University of Twente, PSE group, developing dynamic simulation tool for H2 plants';
+
+function buildOutreachPersonContext(item, ctx) {
+  const roles = ctx?.roles || [];
+  const current = roles[0];
+  const role = current?.role || item.role || '';
+  const org = current?.org_name || current?.institution_name || item.institution || '';
+  const notes = ctx?.person?.notes || item.notes || '';
+  let text = item.name;
+  text += role ? ` is ${role}` : ' is a contact';
+  text += org ? ` at ${org}` : '';
+  text += notes ? `, working on ${notes}` : '';
+  return `${text}.`;
+}
+function buildOutreachConnectionContext(ctx) {
+  const p = ctx?.person;
+  if (!p) return '';
+  const label = ACQUAINTANCE_META[p.acquaintance_context]?.label || '';
+  return [label, p.acquaintance_notes].filter(Boolean).join(' — ');
+}
+function buildOutreachEventsContext(ctx) {
+  const events = ctx?.upcomingEvents || [];
+  if (!events.length) return '';
+  return events.map((e) => `${e.acronym || e.name} (${fmtDateBR(e.date_start)})`).join(', ');
+}
+
+function OutreachSection({ personId, item }) {
+  const [open, setOpen] = useState(false);
+  const [loadingCtx, setLoadingCtx] = useState(false);
+  const [ctxLoaded, setCtxLoaded] = useState(false);
+  const [purpose, setPurpose] = useState('cold');
+  const [purposeOther, setPurposeOther] = useState('');
+  const [userContext, setUserContext] = useState(OUTREACH_USER_CONTEXT_DEFAULT);
+  const [personContext, setPersonContext] = useState(() => buildOutreachPersonContext(item, null));
+  const [connectionContext, setConnectionContext] = useState('');
+  const [eventsContext, setEventsContext] = useState('');
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState('');
+  const [draft, setDraft] = useState(null);
+
+  const loadContext = async () => {
+    setLoadingCtx(true);
+    try {
+      const ctx = await apiFetch(`/api/network/people/${personId}/outreach-context`);
+      setPersonContext(buildOutreachPersonContext(item, ctx));
+      setConnectionContext(buildOutreachConnectionContext(ctx));
+      setEventsContext(buildOutreachEventsContext(ctx));
+    } catch { /* mantém os defaults locais já preenchidos */ }
+    finally {
+      setLoadingCtx(false);
+      setCtxLoaded(true);
+    }
+  };
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && !ctxLoaded) loadContext();
+  };
+
+  const generate = async () => {
+    setGenerating(true);
+    setGenError('');
+    try {
+      const purposeLabel = purpose === 'other'
+        ? (purposeOther || 'Outro')
+        : OUTREACH_PURPOSES.find((p) => p.key === purpose)?.label;
+      const res = await apiFetch('/api/ai/draft-email', {
+        method: 'POST',
+        body: JSON.stringify({ purpose: purposeLabel, personContext, userContext, connectionContext, eventsContext }),
+      });
+      setDraft(res);
+    } catch (e) {
+      setGenError(String(e.message || e).slice(0, 200));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const copyAll = () => {
+    if (!draft) return;
+    const text = `${draft.subject}\n\n${draft.body}`;
+    navigator.clipboard?.writeText(text).catch(() => {});
+  };
+
+  const gmailHref = draft
+    ? `mailto:${encodeURIComponent(item.email || '')}?subject=${encodeURIComponent(draft.subject || '')}&body=${encodeURIComponent(draft.body || '')}`
+    : '#';
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={toggle}
+        className="flex w-full items-center justify-between gap-2 text-xs font-semibold uppercase text-muted"
+      >
+        <span>✉ Preparar email de contato</span>
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="mt-2 space-y-3 rounded-lg border border-line bg-surface2 p-3">
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase text-muted">1. Propósito</p>
+            <div className="space-y-1.5">
+              {OUTREACH_PURPOSES.map((p) => (
+                <label key={p.key} className="flex items-center gap-2 text-sm text-ink">
+                  <input
+                    type="radio"
+                    name={`outreach-purpose-${personId}`}
+                    checked={purpose === p.key}
+                    onChange={() => setPurpose(p.key)}
+                    className="accent-accent"
+                  />
+                  {p.label}
+                </label>
+              ))}
+              {purpose === 'other' && (
+                <input
+                  value={purposeOther}
+                  onChange={(e) => setPurposeOther(e.target.value)}
+                  placeholder="Descreva o propósito..."
+                  className="input mt-1"
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold uppercase text-muted">
+              2. Contexto {loadingCtx && '(carregando…)'}
+            </p>
+            <label className="block text-[11px] text-ink2">
+              Sobre você:
+              <textarea rows={2} value={userContext} onChange={(e) => setUserContext(e.target.value)} className="input mt-1 resize-y text-xs" />
+            </label>
+            <label className="block text-[11px] text-ink2">
+              Sobre a pessoa:
+              <textarea rows={2} value={personContext} onChange={(e) => setPersonContext(e.target.value)} className="input mt-1 resize-y text-xs" />
+            </label>
+            <label className="block text-[11px] text-ink2">
+              Contexto de conexão:
+              <textarea rows={2} value={connectionContext} onChange={(e) => setConnectionContext(e.target.value)} placeholder="Como vocês se conheceram..." className="input mt-1 resize-y text-xs" />
+            </label>
+            <label className="block text-[11px] text-ink2">
+              Eventos em comum:
+              <textarea rows={2} value={eventsContext} onChange={(e) => setEventsContext(e.target.value)} placeholder="Nenhum evento próximo identificado" className="input mt-1 resize-y text-xs" />
+            </label>
+          </div>
+
+          <button
+            type="button"
+            onClick={generate}
+            disabled={generating}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:opacity-60"
+          >
+            {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+            {generating ? 'Gerando rascunho...' : 'Gerar rascunho'}
+          </button>
+
+          {genError && (
+            <p className="rounded-lg border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-[11px] text-danger">{genError}</p>
+          )}
+
+          {draft && (
+            <div className="rounded-lg border border-indigo-200 bg-white p-3">
+              <p className="text-sm font-bold text-ink">{draft.subject}</p>
+              <p className="mt-2 whitespace-pre-wrap text-sm text-ink2">{draft.body}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" onClick={copyAll} className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2">
+                  <Copy className="h-3.5 w-3.5" /> Copiar tudo
+                </button>
+                <a href={gmailHref} className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2">
+                  <Send className="h-3.5 w-3.5" /> Abrir no Gmail
+                </a>
+                <button type="button" onClick={generate} disabled={generating} className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2 disabled:opacity-60">
+                  <RotateCcw className="h-3.5 w-3.5" /> Regenerar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

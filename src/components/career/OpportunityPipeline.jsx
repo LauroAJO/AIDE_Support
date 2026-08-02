@@ -11,7 +11,8 @@ import ConfirmModal from '../shared/ConfirmModal';
 import {
   StarRating, TrackBadge, OppTypeBadge, parseTags,
   PIPELINE_COLUMNS, TRACK_LABELS, OPP_TYPE_LABELS, OPP_STATUS_LABELS, OPP_STATUS_ORDER,
-  trackColor, deadlineColor, daysUntil, priorityDot, PRIORITY_LABELS,
+  trackColor, deadlineColor, deadlineCountdown, daysUntil, priorityDot, PRIORITY_LABELS,
+  trackForType, parseStatusLog, joinNotesWithLog,
 } from './careerShared';
 
 const TRACK_FILTERS = [
@@ -70,7 +71,10 @@ function columnKeyForStatus(status) {
   return col ? col.key : 'to_organize';
 }
 
-export default function OpportunityPipeline() {
+// `initialOrgId` (vindo de /market → "Nova Oportunidade") abre o editor já com
+// a organização pré-selecionada. `onInitialOrgConsumed` avisa o CareerPage para
+// limpar o state da navegação e não reabrir o editor a cada re-render.
+export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed }) {
   const opps = useStore((s) => s.careerOpportunities);
   const setOpps = useStore((s) => s.setCareerOpportunities);
 
@@ -114,6 +118,19 @@ export default function OpportunityPipeline() {
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Criação rápida a partir de uma organização: abre o editor pré-preenchido
+  // com a org, tipo PhD e a trilha correspondente. Roda uma única vez por
+  // navegação (o CareerPage limpa o state depois via onInitialOrgConsumed).
+  useEffect(() => {
+    if (!initialOrgId) return;
+    setEditor({
+      mode: 'create',
+      form: { ...EMPTY_OPP, organization_id: initialOrgId, type: 'phd', track: trackForType('phd') },
+    });
+    onInitialOrgConsumed && onInitialOrgConsumed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialOrgId]);
 
   const filtered = useMemo(
     () => (trackFilter === 'all' ? opps : opps.filter((o) => o.track === trackFilter)),
@@ -370,10 +387,14 @@ export default function OpportunityPipeline() {
 
 function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onTogglePriority, onDelete, onMove, deleting }) {
   const c = trackColor(opp.track);
-  const days = daysUntil(opp.deadline);
+  const dl = deadlineColor(opp.deadline);
+  const countdown = deadlineCountdown(opp.deadline);
   const extracting = !!opp.extract_knowledge;
   const priority = !!opp.is_priority;
   const currentCol = columnKeyForStatus(opp.status);
+  // Cards em "Extraindo" mantêm o fundo neutro; nos demais, o fundo de urgência
+  // do prazo (bg-red-50 / bg-amber-50) substitui o bg-surface padrão.
+  const cardBg = extracting ? 'bg-surface2' : (dl.bg || 'bg-surface');
   return (
     <div
       draggable="true"
@@ -384,9 +405,7 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
         borderLeft: `4px solid ${extracting ? '#8B5CF6' : c.hex}`,
         opacity: dragging ? 0.5 : (extracting ? 0.6 : 1),
       }}
-      className={`relative cursor-pointer rounded-lg border border-line p-2.5 shadow-sm transition hover:border-accent ${
-        extracting ? 'bg-surface2' : 'bg-surface'
-      }`}
+      className={`relative cursor-pointer rounded-lg border border-line p-2.5 shadow-sm transition hover:border-accent ${cardBg}`}
     >
       {extracting && (
         <span className="absolute -right-1.5 -top-1.5 rounded-full bg-violet-600 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm">
@@ -418,9 +437,14 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
         </div>
       )}
       {opp.deadline && (
-        <div className={`mt-1 flex items-center gap-1 text-[11px] ${deadlineColor(opp.deadline)}`}>
-          <CalendarClock className="h-3 w-3" />
-          {opp.deadline}{days !== null ? ` · ${days < 0 ? `${-days}d atrás` : `${days}d`}` : ''}
+        <div className="mt-1">
+          <div className={`flex items-center gap-1 text-[11px] ${dl.text}`}>
+            <CalendarClock className="h-3 w-3" />
+            {opp.deadline}
+          </div>
+          {countdown && (
+            <div className={`mt-0.5 pl-4 text-[11px] ${countdown.className}`}>{countdown.text}</div>
+          )}
         </div>
       )}
       <div className="mt-1.5 flex items-center justify-between">
@@ -483,12 +507,20 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
   const [notes, setNotes] = useState('');
   const [taskMsg, setTaskMsg] = useState('');
 
+  // `notes` no textarea = só o texto livre; as linhas do histórico de status
+  // ficam guardadas em logLines e são re-anexadas ao salvar (ver saveNotes).
+  const [logLines, setLogLines] = useState([]);
+  const [logEntries, setLogEntries] = useState([]);
+
   const reload = async () => {
     setLoading(true);
     try {
       const d = await apiFetch(`/api/career/opportunities/${id}`);
       setData(d);
-      setNotes(d.notes || '');
+      const parsed = parseStatusLog(d.notes || '');
+      setNotes(parsed.rest);
+      setLogLines(parsed.logLines);
+      setLogEntries(parsed.entries);
     } finally {
       setLoading(false);
     }
@@ -506,8 +538,10 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
   };
 
   const saveNotes = async () => {
-    if (!data || notes === (data.notes || '')) return;
-    await patch({ notes });
+    if (!data) return;
+    const merged = joinNotesWithLog(notes, logLines);
+    if (merged === (data.notes || '')) return;
+    await patch({ notes: merged });
   };
 
   const createTask = async () => {
@@ -573,9 +607,9 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
               </div>
 
               {/* Prazo destacado */}
-              <div className={`rounded-lg border px-3 py-2 text-sm ${data.deadline ? 'border-line' : 'border-dashed border-line'}`}>
+              <div className={`rounded-lg border px-3 py-2 text-sm ${data.deadline ? `border-line ${deadlineColor(data.deadline).bg}` : 'border-dashed border-line'}`}>
                 <span className="text-xs font-semibold uppercase tracking-wide text-muted">Prazo</span>
-                <div className={`mt-0.5 text-base ${deadlineColor(data.deadline)}`}>
+                <div className={`mt-0.5 text-base ${deadlineColor(data.deadline).text}`}>
                   {data.deadline || 'Sem prazo'}{days !== null ? ` · ${days < 0 ? `${-days} dias atrás` : `faltam ${days} dias`}` : ''}
                 </div>
               </div>
@@ -610,6 +644,24 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
               {parseTags(data.tags).length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
                   {parseTags(data.tags).map((t) => <span key={t} className="rounded bg-surface2 px-2 py-0.5 text-xs text-ink2">{t}</span>)}
+                </div>
+              )}
+
+              {/* Histórico de status — extraído das notas (ver parseStatusLog). */}
+              {logEntries.length > 0 && (
+                <div className="rounded-lg border border-line px-3 py-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-muted">Histórico</span>
+                  <ul className="mt-1.5 space-y-1">
+                    {logEntries.map((e, i) => (
+                      <li key={`${e.date}-${i}`} className="flex items-center gap-1.5 text-xs text-ink2">
+                        <span className="text-emerald-600">✓</span>
+                        <span>
+                          {OPP_STATUS_LABELS[e.from] || e.from} → <span className="font-medium text-ink">{OPP_STATUS_LABELS[e.to] || e.to}</span>
+                        </span>
+                        <span className="ml-auto shrink-0 text-muted">{e.date}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </div>
@@ -708,7 +760,13 @@ function OpportunityEditor({ mode, initial, orgs, people, users, onClose, onSave
           <Field label="Título *"><input value={form.title} onChange={(e) => set({ title: e.target.value })} className="input" /></Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Tipo">
-              <select value={form.type} onChange={(e) => set({ type: e.target.value })} className="input">
+              {/* Trocar o tipo auto-seleciona a trilha sugerida; o select de
+                  Trilha ao lado continua editável para sobrescrever. */}
+              <select
+                value={form.type}
+                onChange={(e) => set({ type: e.target.value, track: trackForType(e.target.value) })}
+                className="input"
+              >
                 {Object.entries(OPP_TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
               </select>
             </Field>

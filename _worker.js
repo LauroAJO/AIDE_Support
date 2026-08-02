@@ -8156,6 +8156,17 @@ async function handleMarketImport(request, env, user) {
 
 // ---- Carreira: oportunidades ------------------------------------------------
 
+// Data DD/MM/YYYY (pt-BR) para o histórico de status das oportunidades.
+// Formatada manualmente a partir do epoch em UTC — o runtime do Workers roda
+// sempre em UTC, então isto equivale a toLocaleDateString('pt-BR') sem
+// depender do ICU estar disponível no bundle.
+function logStamp(unixSeconds) {
+  const d = new Date(unixSeconds * 1000);
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${dd}/${mm}/${d.getUTCFullYear()}`;
+}
+
 async function handleCareerOpportunities(request, env, user) {
   if (request.method === 'GET') {
     try {
@@ -8240,9 +8251,11 @@ async function handleCareerOpportunityItem(request, env, user, id) {
     const newStatus = pick('status', existing.status);
     let notes = pick('notes', existing.notes);
     // Mudança de status: registra no histórico (notes) com timestamp.
+    // Formato v2.25.12: [DD/MM/YYYY] Status: antigo → novo. O parser do front
+    // (parseStatusLog em careerShared.jsx) também lê o formato antigo
+    // [YYYY-MM-DD HH:MM] status: ... para não perder o histórico já gravado.
     if (body.status !== undefined && body.status !== existing.status) {
-      const stamp = new Date(now * 1000).toISOString().slice(0, 16).replace('T', ' ');
-      notes = `${notes || ''}\n[${stamp}] status: ${existing.status} → ${newStatus}`.trim();
+      notes = `${notes || ''}\n[${logStamp(now)}] Status: ${existing.status} → ${newStatus}`.trim();
     }
     try {
       await env.DB.prepare(
@@ -8280,6 +8293,15 @@ async function handleCareerOpportunityItem(request, env, user, id) {
     if (body.is_priority !== undefined) { sets.push('is_priority = ?'); args.push(body.is_priority ? 1 : 0); }
     if (body.status !== undefined) { sets.push('status = ?'); args.push(body.status); }
     if (body.notes !== undefined) { sets.push('notes = ?'); args.push(body.notes); }
+    // Mudança de status via PATCH também entra no histórico (mesmo formato do
+    // PUT), senão uma alteração por esta rota sumiria da timeline. Só registra
+    // quando o PATCH não traz `notes` próprio — nesse caso o valor enviado
+    // manda, para não sobrescrever uma edição de notas do usuário.
+    if (body.status !== undefined && body.status !== existing.status && body.notes === undefined) {
+      const logged = `${existing.notes || ''}\n[${logStamp(now)}] Status: ${existing.status} → ${body.status}`.trim();
+      sets.push('notes = ?');
+      args.push(logged);
+    }
     if (sets.length === 0) return json({ error: 'Nenhum campo para atualizar' }, 400);
     sets.push('updated_at = ?');
     args.push(now, id);

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Briefcase, KanbanSquare, FileText, Target } from 'lucide-react';
 import OpportunityPipeline from './OpportunityPipeline';
 import DocumentsView from './DocumentsView';
@@ -12,6 +13,23 @@ const TABS = [
 
 export default function CareerPage() {
   const [tab, setTab] = useState('pipeline');
+
+  // /market → "Nova Oportunidade" navega para cá com { state: { orgId } }.
+  // Até a v2.25.11 esse state era ignorado; agora abre o Pipeline já com o
+  // editor pré-preenchido pela organização de origem.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [initialOrgId, setInitialOrgId] = useState(location.state?.orgId || null);
+
+  useEffect(() => {
+    const orgId = location.state?.orgId;
+    if (!orgId) return;
+    setTab('pipeline');
+    setInitialOrgId(orgId);
+    // Limpa o state da navegação para que um refresh/voltar não reabra o editor.
+    navigate(location.pathname, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state?.orgId]);
 
   return (
     <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
@@ -44,7 +62,12 @@ export default function CareerPage() {
 
       {/* Conteúdo da sub-aba */}
       <div className="min-h-0 flex-1">
-        {tab === 'pipeline' && <OpportunityPipeline />}
+        {tab === 'pipeline' && (
+          <OpportunityPipeline
+            initialOrgId={initialOrgId}
+            onInitialOrgConsumed={() => setInitialOrgId(null)}
+          />
+        )}
         {tab === 'documents' && <DocumentsView />}
         {tab === 'goals' && <GoalsView />}
       </div>

@@ -9,6 +9,30 @@ const EMPTY_DOC = {
   title: '', type: 'cv', version: 'v1', opportunity_id: '', drive_link: '', drive_file_id: '', notes: '',
 };
 
+// Templates de criação rápida (Parte 3). `title(ctx)` monta o título a partir
+// do contexto: n = próxima versão daquele tipo, date = hoje (ISO), year = ano.
+// Os trechos entre colchetes ([org], [tema]) ficam como placeholder para o
+// usuário completar — o campo Título continua editável normalmente.
+// NOTA: "Pitch Spin-off" usa o tipo `spinoff_pitch`, que já existe em
+// DOC_TYPE_LABELS ('Pitch'), e não `other` — assim o documento cai no filtro
+// "Pitch" da barra superior em vez de virar "Outro".
+const DOC_TEMPLATES = [
+  { key: 'cv',                 label: 'CV',                 type: 'cv',                 title: (c) => `CV - Lauro Oliveira - v${c.n}` },
+  { key: 'cover_letter',       label: 'Cover Letter',       type: 'cover_letter',       title: ()  => `Cover Letter - [org] - ${todayISO()}` },
+  { key: 'research_statement', label: 'Research Statement', type: 'research_statement', title: ()  => `Research Statement - ${todayISO()}` },
+  { key: 'phd_proposal',       label: 'PhD Proposal',       type: 'phd_proposal',       title: (c) => `PhD Proposal - [tema] - ${c.year}` },
+  { key: 'spinoff_pitch',      label: 'Pitch Spin-off',     type: 'spinoff_pitch',      title: (c) => `Pitch RHYSE Simulator - v${c.n}` },
+];
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// Próxima versão de um tipo = quantidade já cadastrada + 1.
+function nextVersionFor(docs, type) {
+  return (docs || []).filter((d) => d.type === type).length + 1;
+}
+
 function fmtDate(unix) {
   if (!unix) return '—';
   try {
@@ -105,7 +129,7 @@ export default function DocumentsView() {
       </div>
 
       {editorOpen && (
-        <DocumentEditor opps={opps} onClose={() => setEditorOpen(false)} onSaved={() => { setEditorOpen(false); load(); }} />
+        <DocumentEditor docs={docs} opps={opps} onClose={() => setEditorOpen(false)} onSaved={() => { setEditorOpen(false); load(); }} />
       )}
     </div>
   );
@@ -128,11 +152,19 @@ function Field({ label, children }) {
   );
 }
 
-function DocumentEditor({ opps, onClose, onSaved }) {
+function DocumentEditor({ docs, opps, onClose, onSaved }) {
   const [form, setForm] = useState(EMPTY_DOC);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [template, setTemplate] = useState('');
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  // Aplica um template: preenche tipo, título e versão. Tudo continua editável.
+  const applyTemplate = (t) => {
+    const n = nextVersionFor(docs, t.type);
+    setTemplate(t.key);
+    set({ type: t.type, title: t.title({ n, year: new Date().getFullYear() }), version: `v${n}` });
+  };
 
   const save = async () => {
     if (!form.title.trim()) { setError('Título é obrigatório'); return; }
@@ -159,6 +191,26 @@ function DocumentEditor({ opps, onClose, onSaved }) {
         </div>
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
           {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
+
+          {/* Templates de criação rápida — preenchem tipo/título/versão. */}
+          <div className="rounded-lg border border-line bg-surface2 px-3 py-2.5">
+            <span className="mb-1.5 block text-xs font-medium text-ink2">Usar template:</span>
+            <div className="flex flex-wrap gap-1.5">
+              {DOC_TEMPLATES.map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => applyTemplate(t)}
+                  className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
+                    template === t.key ? 'bg-accent text-white' : 'border border-line bg-surface text-ink2 hover:bg-surface2'
+                  }`}
+                >
+                  📄 {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <Field label="Título *"><input value={form.title} onChange={(e) => set({ title: e.target.value })} className="input" /></Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Tipo">

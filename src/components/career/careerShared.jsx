@@ -44,6 +44,23 @@ export function OppTypeBadge({ type }) {
   return <Badge className="bg-accent/10 text-accent">{OPP_TYPE_LABELS[type] || type || '—'}</Badge>;
 }
 
+// Trilha (track) sugerida a partir do tipo — usada na criação rápida a partir
+// de uma organização/evento e no editor, que auto-seleciona a trilha quando o
+// tipo muda (o usuário ainda pode sobrescrever manualmente).
+export const TYPE_TO_TRACK = {
+  job: 'job',
+  contract: 'job',
+  phd: 'phd',
+  postdoc: 'phd',
+  grant: 'phd',
+  collaboration: 'phd',
+  spinoff_support: 'spinoff',
+};
+
+export function trackForType(type) {
+  return TYPE_TO_TRACK[type] || 'job';
+}
+
 // --- Pipeline: 5 colunas, uma por status do banco.
 // dropStatus = status gravado quando um card é solto na coluna.
 export const PIPELINE_COLUMNS = [
@@ -101,14 +118,36 @@ export function daysUntil(dateStr) {
   return Math.round((t - today.getTime()) / 86400000);
 }
 
-// Classe de cor para o prazo: vermelho < 30 dias, laranja < 60, cinza além disso.
+// Cor do prazo por urgência. Retorna { text, bg }:
+//   text = classe de cor/peso do texto; bg = classe de fundo do card (vazia
+//   quando o prazo não é urgente, para o card manter o fundo padrão).
+// ATENÇÃO: até a v2.25.11 esta função devolvia uma STRING. Agora devolve um
+// objeto — todos os chamadores usam `.text` (e opcionalmente `.bg`). O
+// deadlineColor de eventsShared.jsx é OUTRA função e segue devolvendo string.
+// Usa daysUntil() (não `new Date(deadline)` direto) para continuar aceitando
+// prazos no formato YYYY-MM além de YYYY-MM-DD, e para zerar as horas do dia.
 export function deadlineColor(dateStr) {
   const d = daysUntil(dateStr);
-  if (d === null) return 'text-muted';
-  if (d < 0) return 'text-red-600 font-semibold';
-  if (d < 30) return 'text-red-600 font-semibold';
-  if (d < 60) return 'text-amber-600 font-medium';
-  return 'text-ink2';
+  if (d === null) return { text: 'text-muted', bg: '' };
+  if (d < 0)  return { text: 'text-red-700 font-bold',      bg: 'bg-red-50 border-red-200' };
+  if (d < 7)  return { text: 'text-red-600 font-semibold',  bg: 'bg-red-50' };
+  if (d < 14) return { text: 'text-amber-600 font-medium',  bg: 'bg-amber-50' };
+  if (d < 30) return { text: 'text-amber-500',              bg: '' };
+  if (d < 60) return { text: 'text-ink2',                   bg: '' };
+  return { text: 'text-muted', bg: '' };
+}
+
+// Texto de contagem regressiva exibido abaixo da data no card/modal.
+// null (nada exibido) quando falta mais de 30 dias ou não há prazo.
+export function deadlineCountdown(dateStr) {
+  const d = daysUntil(dateStr);
+  if (d === null || d >= 30) return null;
+  if (d < 0) return { text: `${-d} ${-d === 1 ? 'dia' : 'dias'} atrás`, className: 'text-red-700 font-bold' };
+  if (d === 0) return { text: 'hoje', className: 'text-red-600 font-semibold' };
+  const label = `em ${d} ${d === 1 ? 'dia' : 'dias'}`;
+  if (d < 7) return { text: label, className: 'text-red-600 font-semibold' };
+  if (d < 14) return { text: label, className: 'text-amber-600' };
+  return { text: label, className: 'text-muted' };
 }
 
 // --- Prioridade --------------------------------------------------------------
@@ -123,3 +162,46 @@ export function priorityDot(priority) {
 }
 
 export const PRIORITY_LABELS = { 1: 'Muito baixa', 2: 'Baixa', 3: 'Média', 4: 'Alta', 5: 'Crítica' };
+
+// --- Histórico de status (activity log) --------------------------------------
+// O worker registra cada mudança de status como uma linha em `notes`.
+// Dois formatos convivem no banco:
+//   antigo (≤ v2.25.11): [2026-07-15 14:30] status: to_organize → preparing
+//   novo   (v2.25.12+):  [15/07/2026] Status: to_organize → preparing
+// O parser aceita OS DOIS para que o histórico já gravado continue aparecendo
+// na timeline. Devolve { entries, rest } — `rest` são as notas do usuário sem
+// as linhas de log, para exibir/editar o texto livre separadamente.
+const STATUS_LOG_RE = /^\[([^\]]+)\]\s*status:\s*(\S+)\s*(?:→|->)\s*(\S+)\s*$/i;
+
+// Normaliza a data do log para DD/MM/YYYY (aceita ISO do formato antigo).
+function fmtLogDate(raw) {
+  const s = String(raw).trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+  return s;
+}
+
+// `logLines` devolve as linhas de log EXATAMENTE como estão no banco. O editor
+// de notas mostra só `rest` ao usuário e re-anexa `logLines` ao salvar, para
+// que editar as notas nunca apague o histórico.
+export function parseStatusLog(notes) {
+  const entries = [];
+  const logLines = [];
+  const rest = [];
+  for (const line of String(notes || '').split('\n')) {
+    const m = line.match(STATUS_LOG_RE);
+    if (m) {
+      entries.push({ date: fmtLogDate(m[1]), from: m[2], to: m[3] });
+      logLines.push(line);
+    } else {
+      rest.push(line);
+    }
+  }
+  return { entries, logLines, rest: rest.join('\n').trim() };
+}
+
+// Recompõe o campo `notes` a partir do texto livre editado + o histórico
+// preservado. Usado ao salvar as notas no modal da oportunidade.
+export function joinNotesWithLog(rest, logLines) {
+  return [String(rest || '').trim(), ...(logLines || [])].filter(Boolean).join('\n');
+}

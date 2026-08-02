@@ -673,14 +673,20 @@ function PipelineModal({ event, onClose, onCreated }) {
       const opp = await apiFetch('/api/career/opportunities', {
         method: 'POST',
         body: JSON.stringify({
-          title: event.acronym ? `${event.acronym} — ${event.name}` : event.name,
+          // Pré-preenchimento a partir do evento (v2.25.12).
+          title: `Submeter para ${event.acronym || event.name}`,
           type,
           track: 'phd',
           description: `Evento: ${event.name}`,
           location: [event.city, event.country].filter(Boolean).join(', '),
-          deadline: event.deadline_abstract || '',
+          // Prazo de abstract quando existir; senão, a data de início do evento.
+          deadline: event.deadline_abstract || event.date_start || '',
           url: event.website || '',
-          status: 'identified',
+          notes: [event.name, event.publication_route].filter(Boolean).join(' — '),
+          // 'identified' NÃO é um status válido do pipeline (to_organize |
+          // preparing | applied | in_process | dead) — cards criados assim só
+          // apareciam na 1ª coluna por causa do fallback de columnKeyForStatus.
+          status: 'to_organize',
         }),
       });
       // Vincula o evento à oportunidade criada.

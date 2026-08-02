@@ -4564,19 +4564,26 @@ function validateBridgePushResponse(r, expectedCount) {
   return { valid: true, receivedCount };
 }
 
-async function handleBridgePushTasks(env, config) {
+// Núcleo do push AIDE → Lifegame. Devolve um objeto simples (não um Response)
+// para poder ser chamado tanto pela rota manual (handleBridgePushTasks) quanto
+// pelo cron diário (runDailyNotifications). `cfgIn` é opcional: o cron pode
+// chamar sem config e a função lê a bridge_config sozinha.
+async function pushTasksToLifegame(env, cfgIn = null) {
+  const config = cfgIn || (await getBridgeConfig(env));
   // Erro de configuração com diagnóstico — diz QUAL campo está faltando.
-  if (!config.lifegame_url || !config.bridge_secret) {
-    return json({
+  if (!config || !config.lifegame_url || !config.bridge_secret) {
+    return {
+      ok: false,
       error: 'bridge_not_configured',
+      reason: 'lifegame_url ou bridge_secret ausente na bridge_config',
       missing: {
-        lifegame_url: !config.lifegame_url,
-        bridge_secret: !config.bridge_secret,
+        lifegame_url: !(config && config.lifegame_url),
+        bridge_secret: !(config && config.bridge_secret),
       },
-      lifegame_url_set: !!config.lifegame_url,
-      secret_length: (config.bridge_secret || '').length,
+      lifegame_url_set: !!(config && config.lifegame_url),
+      secret_length: ((config && config.bridge_secret) || '').length,
       hint: 'Configurar em Settings → Bridge — Lifegame na AIDE',
-    }, 400);
+    };
   }
   const { results } = await env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC`).all();
   // Anti-loop de eco: carimba cada tarefa de ORIGEM AIDE com aideTaskId + source
@@ -4617,11 +4624,10 @@ async function handleBridgePushTasks(env, config) {
   if (validation.valid) {
     await env.DB.prepare("UPDATE bridge_config SET last_sync_at=? WHERE id='singleton'")
       .bind(Math.floor(Date.now() / 1000)).run().catch(() => {});
-    return json({ pushed: tasks.length, confirmed: validation.receivedCount, attempts: attempt, errors: [] });
+    return { ok: true, sent: tasks.length, received: validation.receivedCount, attempts: attempt };
   }
-  // Retorna 400 com detalhe completo da rejeição/falha de validação do
-  // Lifegame, para o usuário ver direto na resposta o que aconteceu.
-  return json({
+  return {
+    ok: false,
     error: 'lifegame_push_failed',
     reason: validation.reason,
     status: r.status,
@@ -4632,6 +4638,38 @@ async function handleBridgePushTasks(env, config) {
     task_count: tasks.length,
     attempts: attempt,
     first_task_sample: tasks[0] ? JSON.stringify(tasks[0]).slice(0, 300) : null,
+  };
+}
+
+// POST /api/bridge/push/tasks — botão manual em Settings. Contrato HTTP
+// inalterado; toda a lógica vive agora em pushTasksToLifegame.
+async function handleBridgePushTasks(env, config) {
+  const r = await pushTasksToLifegame(env, config);
+  if (r.ok) {
+    return json({ pushed: r.sent, confirmed: r.received, attempts: r.attempts, errors: [] });
+  }
+  if (r.error === 'bridge_not_configured') {
+    return json({
+      error: r.error,
+      missing: r.missing,
+      lifegame_url_set: r.lifegame_url_set,
+      secret_length: r.secret_length,
+      hint: r.hint,
+    }, 400);
+  }
+  // Retorna 400 com detalhe completo da rejeição/falha de validação do
+  // Lifegame, para o usuário ver direto na resposta o que aconteceu.
+  return json({
+    error: r.error,
+    reason: r.reason,
+    status: r.status,
+    detail: r.detail,
+    url: r.url,
+    secret_length: r.secret_length,
+    body_size: r.body_size,
+    task_count: r.task_count,
+    attempts: r.attempts,
+    first_task_sample: r.first_task_sample,
   }, 400);
 }
 
@@ -5276,6 +5314,33 @@ async function runDailyNotifications(env) {
 
   await evaluateAlertRules(env);
 
+  // --- Push de tarefas AIDE → Lifegame (v2.5.1) ---------------------------
+  // O Pages não suporta [triggers]; quem dispara isto é o Worker satélite
+  // aide-cron ("0 8 * * *") via POST /api/cron/run. Até aqui o push outbound
+  // só corria pelo botão manual em Settings — por isso o último push foi em
+  // 2026-05-26 enquanto os imports inbound continuaram normais.
+  // Não bloqueante: qualquer falha é registada e o resto do cron segue.
+  let bridgePush = null;
+  try {
+    const bridgeCfg = await getBridgeConfig(env);
+    if (bridgeCfg && bridgeCfg.lifegame_url && bridgeCfg.bridge_secret && bridgeCfg.sync_enabled) {
+      const pushed = await pushTasksToLifegame(env, bridgeCfg);
+      bridgePush = pushed.ok
+        ? { ok: true, sent: pushed.sent, received: pushed.received }
+        : { ok: false, error: pushed.error, reason: pushed.reason || null };
+      console.log('[CRON] Bridge push:', pushed.ok
+        ? `sent ${pushed.sent} tasks, lifegame confirmou ${pushed.received}`
+        : `${pushed.error} — ${pushed.reason || ''}`);
+    } else {
+      bridgePush = { ok: false, error: 'skipped', reason: 'sync_enabled=0 ou bridge não configurada' };
+      console.log('[CRON] Bridge push: skipped — sync_enabled=0 ou bridge não configurada');
+    }
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    bridgePush = { ok: false, error: 'exception', reason: msg };
+    console.error('[CRON] Bridge push failed:', msg);
+  }
+
   return {
     dueSoon: (dueSoon.results || []).length,
     overdue: (overdue.results || []).length,
@@ -5284,6 +5349,7 @@ async function runDailyNotifications(env) {
     bridgePending,
     gmailUnread,
     eventDeadlines,
+    bridgePush,
   };
 }
 

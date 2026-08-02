@@ -1,0 +1,161 @@
+================================
+AIDE — RELATÓRIO v2.25.9
+Profile audit, DEX fix, sector weight, visualizações
+================================
+Data: 2026-08-02
+
+AUDIT RESULTS:
+
+Audit 1 — Completude do perfil de contato (DetailPanel):
+  FOUND: nome+badge, "Função atual", Funções e Vínculos (person_roles),
+    email (mailto:), LinkedIn, telefone (tel:), avatar/inicial, status de
+    contato (dot+select), força de conexão (dots), relevância PhD/Emprego/
+    Spin-off (estrelas), como se conheceram, notas de "como se conheceram",
+    potencial de indicação (estrelas+notas), próxima ação+data, histórico
+    de interações, tags (colapsável >6), notas/descrição, conexões
+    pessoa-a-pessoa, "Ver organização no Mercado →"
+  MISSING (corrigido nesta versão):
+    - Indicador de temperatura (🔥🟡🔵⚫): só existia no card da lista,
+      não no DetailPanel → adicionado dot de temperatura ao lado do nome
+    - Badge "DEX" no cabeçalho do DetailPanel: só existia o link
+      "🔗 Ver no DEX" mais abaixo, sem chip visual perto do nome (como o
+      "Sincronizado com Lifegame") → adicionado chip roxo "DEX"
+
+Audit 2 — Fluxo de staging do DEX:
+  DexStagingPage.jsx existe/renderiza, busca GET /api/dex/staging,
+  aprovar/rejeitar funcionam, badge de contagem no dropdown de perfil,
+  rota /dex/staging registrada — tudo OK (v2.25.8).
+  syncDexContacts já estagia corretamente e extrai full_name/email/
+  linkedin/job_title/company — OK. Filtro de nome era fraco (só
+  `!fullName`) → reforçado: descarta nomes vazios, com menos de 2
+  caracteres, ou que batem com /^[\d\s+\-().ext]+$/i (parecem telefone).
+
+DEX name filter fix: aplicado (_worker.js, syncDexContacts).
+
+MIGRAÇÃO 0048: aplicada local (npm run db:migrate) e remota (ver abaixo)
+Remota: APLICADA — ver "INCIDENTE" abaixo (não ficou pendente; precisou
+  ser aplicada em produção no meio do trabalho para corrigir uma regressão)
+
+ARQUIVOS CRIADOS:
+- migrations/0048_sector_weight.sql
+- relatorios/v2259_visualizations.txt (este arquivo)
+
+ARQUIVOS MODIFICADOS:
+- _worker.js
+  - Fix no filtro de nome do DEX sync (syncDexContacts)
+  - shapeNetworkPerson: + sector_weight, sector_weight_notes,
+    sector_weight_sources, sector_weight_updated_at, sector_weight_updated_by
+  - fetchSectorWeightUsers() (novo) + hydratePeople: resolve
+    sector_weight_updated_by → sector_weight_updated_by_name
+  - handleNetworkPersonItem (PUT): aceita sector_weight/notes/sources;
+    auto-seta updated_at/updated_by só quando sector_weight é enviado
+    no body (não "rouba" autoria em PUTs que não tocam o campo)
+  - handleNetworkInteractionCounts (novo) + rota
+    GET /api/network/interactions/counts — contagem/última data de
+    contact_interactions por pessoa, usada pelo mapa (indicador de canal)
+    e pela tabela (coluna "Última interação"); uma query agregada em vez
+    de N chamadas por pessoa
+- src/components/networking/NetworkingPage.jsx (arquivo grande, +~950
+  linhas): fix de temperatura/badge DEX no DetailPanel; SectorWeightSection
+  (editor completo: slider 1-10, textarea justificativa em markdown via
+  MarkdownViewer, fontes clicáveis, "Avaliado em DD/MM por [nome]");
+  pill "⚡ N/10" no card da lista; NetworkMap: color mode toggle
+  (Temperatura/Peso Setorial), filtro por tag, filtro por organização,
+  indicadores de canal (dots LinkedIn/Email/Interação) abaixo do nome,
+  legenda atualizada; view toggle Lista/Mapa/Tabela/Heatmap; NetworkTable
+  (10 colunas, sort por clique, export CSV client-side); SectorHeatmap
+  (organizações × PhD/Emprego/Spin-off/Peso Setorial, gradiente branco→
+  indigo, popover de pessoas ao clicar na célula, empty state com <3 orgs)
+- src/components/events/EventsPage.jsx: DeadlinesTab ganhou toggle
+  Lista/Timeline; EventsTimeline (novo): SVG horizontal 18 meses, linha
+  "Hoje" tracejada vermelha, blocos coloridos por tipo, triângulos de
+  deadline (abstract vermelho / paper laranja), popover ao clicar no
+  bloco, chips de filtro (Todos/Peer-review/Holanda/Fase 1-3/janela
+  6-12-18 meses)
+- src/version.js — 2.25.8 → 2.25.9
+
+DESVIOS DO SPEC ORIGINAL (e por quê):
+- shapeNetworkPerson usa uma whitelist explícita de campos (não
+  `SELECT *` cru) — o spec assumia "SELECT * should cover it", mas
+  precisei adicionar os 5 campos novos manualmente na função de shape
+  E no PUT (a query SELECT * já trazia as colunas, mas a função que
+  formata a resposta JSON descarta qualquer coluna não listada).
+- "Nunca contatado" nas linhas do heatmap/tabela: célula de relevância
+  mostra "—" quando ninguém da organização tem valor >0 para aquele
+  critério (tratei 0 como "não avaliado", já que é o DEFAULT do schema
+  em contact_professional, não uma nota real de 0).
+- Filtro "Holanda" na timeline de eventos: o schema não tem enum
+  fixo para país (campo `country` é texto livre). Implementei checando
+  se contém "netherlands"/"holland"/"holanda"/"nederland" ou é
+  exatamente "NL", seguindo a mesma convenção usada em
+  src/lib/countryDetection.js.
+
+INCIDENTE ENCONTRADO E CORRIGIDO DURANTE O DEPLOY (importante):
+Depois do primeiro deploy, fiz QA manual no navegador (login já ativo
+do usuário) e encontrei DOIS bugs reais, não pegos por build/node --check:
+
+1) Migração 0048 nunca tinha sido aplicada no D1 remoto → TODO PUT
+   /api/network/people/:id (edição de qualquer pessoa, não só peso
+   setorial) passou a retornar 500 "no such column: sector_weight" em
+   produção, porque a query UPDATE referencia as colunas novas
+   incondicionalmente. Ou seja, o deploy quebrou a edição de contatos
+   no Networking até a correção.
+   → Pedi confirmação ao usuário (ação em banco remoto/produção) e,
+   aprovado, rodei:
+   npx wrangler d1 execute aide-db --remote --file=migrations/0048_sector_weight.sql -y
+   Aplicada com sucesso (6 queries, 121 rows written).
+
+2) Mesmo com a migração aplicada, salvar "Peso Setorial" ainda derrubava
+   a página inteira (ErrorBoundary "Algo deu errado"). Decodifiquei o
+   stack minificado com sourcemap (source-map package já em
+   node_modules) e localizei: NetworkingPage.jsx, useMemo `allTags`
+   (`people.forEach(...)`). Causa raiz: `setPeople` é o setter do
+   Zustand (`setNetworkPeople: (networkPeople) => set({ networkPeople })`),
+   que NÃO aceita updater funcional como o `useState` do React. Minha
+   função `patchPerson` chamava `setPeople((list) => list.map(...))` —
+   isso atribuía a PRÓPRIA FUNÇÃO como valor de `networkPeople` no
+   store, e o próximo `people.forEach` quebrava com "a.forEach is not
+   a function".
+   → Fix: `patchPerson` passou a calcular o array primeiro
+   (`setPeople(people.map(...))`, usando o `people` já em escopo) em
+   vez de passar uma função para o setter. Rebuild + redeploy
+   (https://49b003ec.aide-support.pages.dev) + reverificado no
+   navegador: salvar peso setorial funciona sem erro, em Lista, Tabela,
+   Heatmap e Mapa.
+   Dado de teste usado durante a verificação (Alessio Trivella,
+   sector_weight=5, notas="teste") foi revertido para null via API
+   depois do teste — não ficou lixo em produção.
+
+VERIFICAÇÃO:
+npm run build: OK, zero erros (warning de chunk >500kB é pré-existente)
+node --check _worker.js: OK
+QA manual no navegador (produção, https://aide-support.pages.dev):
+  - Networking → Lista: DetailPanel com temperatura+badge DEX, seção
+    "PESO SETORIAL" (editor e display), pill "⚡ N/10" no card — OK
+  - Networking → Tabela: 115 contatos, sort, pill de peso, export CSV
+    visível — OK
+  - Networking → Heatmap: organizações com médias por critério,
+    gradiente de cor, célula "University of Twente / Peso Setorial"
+    refletindo o teste — OK
+  - Networking → Mapa: toggle Temperatura/Peso Setorial, filtros de
+    Tag/Org, legenda com indicadores de canal — OK
+  - Eventos & Venues → Prazos → Timeline: SVG 18 meses, linha "Hoje",
+    blocos por tipo, triângulos de deadline, popover ao clicar,
+    chips de filtro — OK
+  - Console do navegador: sem erros após o hotfix
+
+DEPLOY:
+1º deploy (com o bug do setPeople): https://e7d7ac85.aide-support.pages.dev
+Hotfix deploy (final): https://49b003ec.aide-support.pages.dev
+
+GIT:
+commit 2988574 "v2.25.9 — profile audit, DEX fix, sector weight, map
+  filters, table view, heatmap, events timeline" (inclui o hotfix do
+  patchPerson, já que foi corrigido antes do commit)
+push origin main: OK (b9ef276..2988574)
+
+MIGRAÇÃO REMOTA:
+Já aplicada durante este trabalho (ver INCIDENTE acima). Comando usado,
+para referência/reaplicação em outro ambiente:
+npx wrangler d1 execute aide-db --remote --file=migrations/0048_sector_weight.sql -y
+================================

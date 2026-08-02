@@ -3,9 +3,11 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Network, Plus, Minus, Home, Maximize2, Settings, Pencil, Trash2, Search, Star, X, Mail, Phone, Linkedin,
   Building2, User, Link as LinkIcon, Map as MapIcon, List as ListIcon, Briefcase, ChevronDown, RefreshCw,
+  Table2, Grid3x3, Download, ArrowUp, ArrowDown,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { MarkdownViewer } from '../../lib/markdownRenderer';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ErrorBoundary from '../shared/ErrorBoundary';
 
@@ -175,6 +177,8 @@ export default function NetworkingPage() {
   // DEX CRM sync (owner only) — botão "Sincronizar DEX" no cabeçalho.
   const [dexSyncing, setDexSyncing] = useState(false);
   const [dexPendingReview, setDexPendingReview] = useState(0);
+  // Contagem/data de interações por pessoa — indicador de canal no mapa + coluna na tabela (v2.25.9).
+  const [interactionData, setInteractionData] = useState(() => ({}));
   const [toast, setToast] = useState('');
   const showToast = (msg) => {
     setToast(msg);
@@ -185,7 +189,7 @@ export default function NetworkingPage() {
 
   const loadAll = async () => {
     try {
-      const [routes, st, ar, pr, fr, ts, mc, mo] = await Promise.all([
+      const [routes, st, ar, pr, fr, ts, mc, mo, ic] = await Promise.all([
         apiFetch('/api/network/routes').catch(() => ({ people: [], institutions: [], connections: [], person_roles: [] })),
         apiFetch('/api/bridge/sync-status').catch(() => null),
         apiFetch('/api/areas').catch(() => []),
@@ -194,6 +198,7 @@ export default function NetworkingPage() {
         tasksInStore.length === 0 ? apiFetch('/api/tasks').catch(() => []) : Promise.resolve(tasksInStore),
         apiFetch('/api/market/contacts').catch(() => []),
         apiFetch('/api/market/organizations').catch(() => []),
+        apiFetch('/api/network/interactions/counts').catch(() => ({})),
       ]);
       setPeople(routes.people || []);
       // Consolidação v2.4: "instituições" agora vêm de market_organizations (Mercado)
@@ -202,6 +207,7 @@ export default function NetworkingPage() {
       setConnections(routes.connections || []);
       setPersonRoles(routes.person_roles || []);
       setContactOrgLinks(routes.contactOrgLinks || []);
+      setInteractionData(ic || {});
       setProIds(new Set((mc || []).map((c) => c.person_id)));
       const statusMap = {};
       const profMap = {};
@@ -383,6 +389,23 @@ export default function NetworkingPage() {
     }
   };
 
+  // Patch direto em network_people (ex.: peso setorial) — otimista + PUT,
+  // recarrega do servidor em caso de falha p/ refletir o estado real.
+  // Nota: setPeople é o setter Zustand (não useState) — não aceita updater
+  // funcional, precisa do array já calculado a partir do `people` do closure.
+  const patchPerson = async (personId, patch) => {
+    setPeople(people.map((p) => (p.id === personId ? { ...p, ...patch } : p)));
+    try {
+      const updated = await apiFetch(`/api/network/people/${personId}`, {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      });
+      setPeople(people.map((p) => (p.id === personId ? updated : p)));
+    } catch {
+      loadAll();
+    }
+  };
+
   // Link inverso Mercado → Networking: seleciona a pessoa indicada em
   // state.contactId assim que os dados terminarem de carregar.
   useEffect(() => {
@@ -413,6 +436,12 @@ export default function NetworkingPage() {
             </button>
             <button onClick={() => setView('map')} className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium ${view === 'map' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'}`}>
               <MapIcon className="h-3.5 w-3.5" /> Mapa
+            </button>
+            <button onClick={() => setView('table')} className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium ${view === 'table' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'}`}>
+              <Table2 className="h-3.5 w-3.5" /> Tabela
+            </button>
+            <button onClick={() => setView('heatmap')} className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium ${view === 'heatmap' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'}`}>
+              <Grid3x3 className="h-3.5 w-3.5" /> Heatmap
             </button>
           </div>
           {user?.role === 'owner' && (
@@ -569,6 +598,15 @@ export default function NetworkingPage() {
                           DEX
                         </span>
                       )}
+                      {it._kind === 'person' && it.sector_weight != null && (
+                        <span
+                          className="rounded-full px-1.5 py-0.5 text-[9px] font-bold text-white"
+                          style={{ background: sectorWeightColor(it.sector_weight) }}
+                          title={`Peso setorial: ${it.sector_weight}/10`}
+                        >
+                          ⚡ {it.sector_weight}/10
+                        </span>
+                      )}
                       {it._kind === 'person' && proIds.has(it.id) && (
                         <span className="flex items-center gap-0.5 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-medium text-indigo-700" title="Tem perfil profissional no Mercado">
                           <Briefcase className="h-2.5 w-2.5" /> Mercado
@@ -642,6 +680,7 @@ export default function NetworkingPage() {
                 proProfile={proProfile[selectedItem.id] || null}
                 onChangeOutreach={(s) => changeOutreach(selectedItem.id, s)}
                 onPatchProfessional={(patch) => patchProfessional(selectedItem.id, patch)}
+                onPatchPerson={(patch) => patchPerson(selectedItem.id, patch)}
                 onViewMarket={() => {
                   // A sub-aba de contatos do Mercado não existe mais: vai direto
                   // à página da organização vinculada (contact_professional.organization_id)
@@ -660,7 +699,7 @@ export default function NetworkingPage() {
             )}
           </div>
         </div>
-      ) : (
+      ) : view === 'map' ? (
         <div className="mt-3 min-h-0 flex-1">
           <ErrorBoundary
             fallback={({ reset }) => (
@@ -680,10 +719,30 @@ export default function NetworkingPage() {
               personRoles={Array.isArray(personRoles) ? personRoles : []}
               contactOrgLinks={Array.isArray(contactOrgLinks) ? contactOrgLinks : []}
               proStatus={proStatus}
+              interactionData={interactionData}
               onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
               onViewOrg={(id) => navigate(`/market/org/${id}`)}
             />
           </ErrorBoundary>
+        </div>
+      ) : view === 'table' ? (
+        <div className="mt-3 min-h-0 flex-1">
+          <NetworkTable
+            people={items}
+            interactionData={interactionData}
+            proProfile={proProfile}
+            proStatus={proStatus}
+            onSelect={(id) => { setSelected({ kind: 'person', id }); setView('list'); }}
+          />
+        </div>
+      ) : (
+        <div className="mt-3 min-h-0 flex-1">
+          <SectorHeatmap
+            people={people}
+            institutions={institutions}
+            contactOrgLinks={contactOrgLinks}
+            proProfile={proProfile}
+          />
         </div>
       )}
 
@@ -834,6 +893,155 @@ function ReferralSection({ profile, onPatch }) {
   );
 }
 
+// "Peso setorial" (v2.25.9) — avaliação manual 1-10 de quanta influência a
+// pessoa tem no setor, com justificativa (markdown) + fontes + autoria.
+const SECTOR_WEIGHT_LABELS = [
+  [1, 2, 'Pouca influência'],
+  [3, 4, 'Influência local/restrita'],
+  [5, 6, 'Influência regional/setorial'],
+  [7, 8, 'Influência nacional/europeia'],
+  [9, 10, 'Referência global'],
+];
+function sectorWeightLabel(n) {
+  const hit = SECTOR_WEIGHT_LABELS.find(([lo, hi]) => n >= lo && n <= hi);
+  return hit ? hit[2] : '';
+}
+function sectorWeightColor(n) {
+  if (n >= 9) return '#7C3AED';
+  if (n >= 7) return '#6366F1';
+  if (n >= 5) return '#3B82F6';
+  if (n >= 3) return '#93C5FD';
+  if (n >= 1) return '#DBEAFE';
+  return '#E5E7EB';
+}
+function fmtDDMM(unixSeconds) {
+  if (!unixSeconds) return '';
+  const d = new Date(unixSeconds * 1000);
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+// Fontes: texto livre com links separados por vírgula/quebra de linha —
+// renderiza os que parecem URL como <a>, o resto como texto simples.
+function SourcesList({ sources }) {
+  const parts = String(sources || '').split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1.5">
+      {parts.map((s, i) => (
+        /^https?:\/\//i.test(s) ? (
+          <a key={i} href={s} target="_blank" rel="noreferrer" className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-700 hover:underline">
+            {truncate(s.replace(/^https?:\/\//, ''), 28)}
+          </a>
+        ) : (
+          <span key={i} className="rounded-full bg-surface2 px-2 py-0.5 text-[11px] text-ink2">{s}</span>
+        )
+      ))}
+    </div>
+  );
+}
+function SectorWeightSection({ person, onPatch }) {
+  const [editing, setEditing] = useState(false);
+  const [score, setScore] = useState(person.sector_weight || 5);
+  const [notes, setNotes] = useState(person.sector_weight_notes || '');
+  const [sources, setSources] = useState(person.sector_weight_sources || '');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setEditing(false);
+    setScore(person.sector_weight || 5);
+    setNotes(person.sector_weight_notes || '');
+    setSources(person.sector_weight_sources || '');
+  }, [person.id]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onPatch({ sector_weight: score, sector_weight_notes: notes, sector_weight_sources: sources });
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const cancel = () => {
+    setScore(person.sector_weight || 5);
+    setNotes(person.sector_weight_notes || '');
+    setSources(person.sector_weight_sources || '');
+    setEditing(false);
+  };
+
+  if (!editing && person.sector_weight == null) {
+    return (
+      <div>
+        <p className="mb-1 text-xs font-semibold uppercase text-muted">Peso setorial</p>
+        <button type="button" onClick={() => setEditing(true)} className="text-sm text-muted hover:text-accent hover:underline">
+          + Avaliar peso setorial
+        </button>
+      </div>
+    );
+  }
+
+  if (!editing) {
+    return (
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <p className="text-xs font-semibold uppercase text-muted">Peso setorial</p>
+          <button type="button" onClick={() => setEditing(true)} className="flex items-center gap-1 text-[11px] text-accent hover:underline">
+            <Pencil className="h-3 w-3" /> Editar
+          </button>
+        </div>
+        <span
+          className="inline-flex items-center rounded-lg px-3 py-1 text-lg font-bold text-white"
+          style={{ background: sectorWeightColor(person.sector_weight) }}
+        >
+          {person.sector_weight}/10
+        </span>
+        <p className="mt-1 text-[11px] text-ink2">{sectorWeightLabel(person.sector_weight)}</p>
+        {person.sector_weight_notes && <MarkdownViewer content={person.sector_weight_notes} className="mt-2 text-sm" />}
+        <SourcesList sources={person.sector_weight_sources} />
+        {person.sector_weight_updated_at && (
+          <p className="mt-1.5 text-[11px] text-muted">
+            Avaliado em {fmtDDMM(person.sector_weight_updated_at)}
+            {person.sector_weight_updated_by_name ? ` por ${person.sector_weight_updated_by_name}` : ''}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-line bg-surface2 p-3">
+      <p className="mb-1 text-xs font-semibold uppercase text-muted">Peso setorial</p>
+      <div className="flex items-center gap-3">
+        <input
+          type="range" min="1" max="10" step="1" value={score}
+          onChange={(e) => setScore(Number(e.target.value))}
+          className="flex-1 accent-[#6366f1]"
+        />
+        <span className="w-10 shrink-0 text-center text-sm font-bold text-ink">{score}/10</span>
+      </div>
+      <p className="mt-1 text-[11px] text-ink2">{sectorWeightLabel(score)}</p>
+      <textarea
+        rows={3}
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder="Por que tem esse peso? Ex: Coordena projeto EU €23.5M, publica em journals Q1..."
+        className="input mt-2 resize-y"
+      />
+      <input
+        value={sources}
+        onChange={(e) => setSources(e.target.value)}
+        placeholder="Links: Scopus, ORCID, LinkedIn, EU..."
+        className="input mt-2"
+      />
+      <div className="mt-2 flex justify-end gap-2">
+        <button type="button" onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink2 hover:bg-surface2">Cancelar</button>
+        <button type="button" onClick={save} disabled={saving} className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-60">
+          {saving ? 'Salvando…' : 'Salvar'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // Histórico de interações estruturado — lista + formulário inline + exclusão.
 const EMPTY_INTERACTION = { interaction_type: 'email_sent', date: '', summary: '', outcome: '', next_step: '', next_step_date: '' };
 function InteractionsSection({ personId }) {
@@ -971,7 +1179,7 @@ function TagsSection({ tags, onEdit }) {
   );
 }
 
-function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, proProfile, onChangeOutreach, onPatchProfessional, onViewMarket, onEdit, onDelete, onReloadConnections }) {
+function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, proProfile, onChangeOutreach, onPatchProfessional, onPatchPerson, onViewMarket, onEdit, onDelete, onReloadConnections }) {
   const isPerson = kind === 'person';
   const linked = useMemo(() => {
     if (!isPerson) return [];
@@ -994,10 +1202,22 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
             </div>
             <div>
               <div className="flex items-center gap-2">
+                {isPerson && (
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ background: (TEMP_META[item.temperature] || TEMP_META.never).dot }}
+                    title={`Temperatura: ${(TEMP_META[item.temperature] || TEMP_META.never).label}`}
+                  />
+                )}
                 <h2 className="text-lg font-bold text-ink">{item.name}</h2>
                 <span className="rounded-full bg-surface2 px-2 py-0.5 text-[10px] font-medium text-ink2">
                   {isPerson ? 'Pessoa' : (INSTITUTION_TYPES.find(([t]) => t === item.type)?.[1] || 'Instituição')}
                 </span>
+                {isPerson && item.dex_contact_id && (
+                  <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[9px] font-medium text-purple-600" title="Importado do DEX CRM">
+                    DEX
+                  </span>
+                )}
               </div>
               {!isPerson && (
                 <p className="text-xs text-ink2">{[item.area].filter(Boolean).join(' · ')}</p>
@@ -1077,6 +1297,9 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
             )}
           </div>
         )}
+
+        {/* Peso setorial — avaliação manual de influência no setor (v2.25.9) */}
+        {isPerson && <SectorWeightSection person={item} onPatch={onPatchPerson} />}
 
         {/* Como se conheceram (Prompt G) — só p/ pessoas com perfil no Mercado */}
         {isPerson && hasPro && (
@@ -1215,7 +1438,7 @@ function DetailPanel({ item, kind, people, connections, hasPro, outreachStatus, 
 const PAN_STEP = 40; // deslocamento por tecla de seta (unidades de viewBox)
 // Converte os raios normalizados dos sliders (0..2) em unidades de viewBox.
 const RBASE = 460;
-function NetworkMap({ people, institutions, connections, personRoles, contactOrgLinks = [], proStatus = {}, onSelect, onViewOrg }) {
+function NetworkMap({ people, institutions, connections, personRoles, contactOrgLinks = [], proStatus = {}, interactionData = {}, onSelect, onViewOrg }) {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
   const [size, setSize] = useState({ w: 900, h: 600 });
@@ -1232,6 +1455,29 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
   const [showSettings, setShowSettings] = useState(false);
   const [outerRadius, setOuterRadius] = useState(0.55); // anel externo (pessoas)
   const [innerRadius, setInnerRadius] = useState(0.30);  // anel interno (organizações)
+  // v2.25.9 — modo de cor, filtro por tag e filtro por organização.
+  const [colorMode, setColorMode] = useState('temperature'); // 'temperature' | 'sector'
+  const [tagFilter, setTagFilter] = useState('');
+  const [orgFilter, setOrgFilter] = useState('');
+
+  const allTags = useMemo(() => {
+    const s = new Set();
+    (Array.isArray(people) ? people : []).forEach((p) => (p.tags || []).forEach((t) => s.add(t)));
+    return [...s].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [people]);
+
+  // Pessoas vinculadas à organização selecionada (person_roles + contact_org_links).
+  const orgPeopleIds = useMemo(() => {
+    if (!orgFilter) return null;
+    const s = new Set();
+    (Array.isArray(personRoles) ? personRoles : []).forEach((r) => {
+      if (r && r.person_id && r.institution_id === orgFilter) s.add(r.person_id);
+    });
+    (Array.isArray(contactOrgLinks) ? contactOrgLinks : []).forEach((r) => {
+      if (r && r.person_id && r.organization_id === orgFilter) s.add(r.person_id);
+    });
+    return s;
+  }, [orgFilter, personRoles, contactOrgLinks]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -1359,6 +1605,15 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
   const isDimmed = (id) => selId && selId !== id && !connectsTo(selId, id, conns, safeRoles);
   // Aresta destacada quando toca o nó selecionado.
   const isSelEdge = (aId, bId) => selId && (aId === selId || bId === selId);
+  // v2.25.9 — dimming por filtro de tag/organização (independente da seleção).
+  const isTagFiltered = (person) => tagFilter && !(person.tags || []).includes(tagFilter);
+  const isOrgFiltered = (personId) => orgPeopleIds && !orgPeopleIds.has(personId);
+  // Cor do nó de pessoa conforme o modo escolhido (temperatura ou peso setorial).
+  const personNodeColor = (n) => (
+    colorMode === 'sector'
+      ? sectorWeightColor(n.sector_weight)
+      : (TEMP_META[n.temperature] || TEMP_META.never).dot
+  );
 
   // Zoom com a roda do mouse — listener nativo não-passivo p/ permitir preventDefault.
   useEffect(() => {
@@ -1599,25 +1854,42 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
         {/* Person circles — nome COMPLETO em 2 linhas abaixo do nó (v2.5.5) */}
         {personNodes.map((n) => {
           const stroke = personStrengthColor(n.connection_strength || 0);
-          const dim = isDimmed(n.id);
+          const filterDim = isTagFiltered(n) || isOrgFiltered(n.id);
+          const selDim = isDimmed(n.id);
+          const dim = filterDim || selDim;
+          const opacity = filterDim ? 0.15 : (selDim ? 0.3 : 1);
           const sel = selId === n.id;
           const labelOpacity = dim ? 0.25 : Math.max(0.5, Math.min(1, (n.connection_strength || 0) / 10 + 0.3));
           const nameParts = String(n.name || '').split(' ').filter(Boolean);
           const half = Math.ceil(nameParts.length / 2);
           const line1 = nameParts.slice(0, half).join(' ');
           const line2 = nameParts.slice(half).join(' ');
+          // v2.25.9 — indicadores de canal (pontinhos 4px abaixo do nome).
+          const channelDots = [];
+          if (n.linkedin) channelDots.push('#3B82F6'); // azul — LinkedIn
+          if (n.email) channelDots.push('#6B7280'); // cinza — Email
+          if ((interactionData[n.id]?.count || 0) > 0) channelDots.push('#22C55E'); // verde — interação registrada
+          const dotsY = n.radius + 12 + (line2 ? 13 : 0) + 10;
+          const dotsStartX = -((channelDots.length - 1) * 6) / 2;
           return (
             <g key={`p-${n.id}`} style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); pickNode('person', n.id); }}>
               <circle
-                cx={n.x} cy={n.y} r={n.radius} fill="#6366f1"
+                cx={n.x} cy={n.y} r={n.radius} fill={personNodeColor(n)}
                 stroke={sel ? '#6366f1' : stroke} strokeWidth={sel ? 3 : 2.5}
-                opacity={dim ? 0.3 : 1}
+                opacity={opacity}
                 style={sel ? { filter: 'drop-shadow(0 0 6px #6366f1)' } : undefined}
               />
               <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize="9" opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
                 <tspan x={n.x} dy={n.radius + 12}>{line1}</tspan>
                 {line2 && <tspan x={n.x} dy={13}>{line2}</tspan>}
               </text>
+              {channelDots.length > 0 && (
+                <g opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
+                  {channelDots.map((c, i) => (
+                    <circle key={i} cx={n.x + dotsStartX + i * 6} cy={n.y + dotsY} r={2} fill={c} />
+                  ))}
+                </g>
+              )}
             </g>
           );
         })}
@@ -1629,6 +1901,40 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           )}
         </g>
       </svg>
+
+      {/* Controles de cor + filtros (canto superior esquerdo, v2.25.9) */}
+      <div className="absolute left-3 top-3 flex flex-col items-start gap-2">
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-white p-1 shadow-soft">
+          <span className="px-1.5 text-[10px] font-medium text-muted">Colorir:</span>
+          <button
+            type="button" onClick={() => setColorMode('temperature')}
+            className={`rounded-md px-2 py-1 text-[11px] font-medium ${colorMode === 'temperature' ? 'bg-indigo-600 text-white' : 'text-ink2 hover:bg-surface2'}`}
+          >
+            Temperatura
+          </button>
+          <button
+            type="button" onClick={() => setColorMode('sector')}
+            className={`rounded-md px-2 py-1 text-[11px] font-medium ${colorMode === 'sector' ? 'bg-indigo-600 text-white' : 'text-ink2 hover:bg-surface2'}`}
+          >
+            Peso Setorial
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-line bg-white p-1.5 shadow-soft">
+          <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} className="rounded-md border border-line bg-white px-1.5 py-1 text-[11px] text-ink2">
+            <option value="">Tag: Todas</option>
+            {allTags.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select value={orgFilter} onChange={(e) => setOrgFilter(e.target.value)} className="rounded-md border border-line bg-white px-1.5 py-1 text-[11px] text-ink2">
+            <option value="">Org: Todas</option>
+            {(Array.isArray(institutions) ? institutions : []).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+          </select>
+          {(tagFilter || orgFilter) && (
+            <button type="button" onClick={() => { setTagFilter(''); setOrgFilter(''); }} className="text-[11px] text-accent hover:underline">
+              Limpar
+            </button>
+          )}
+        </div>
+      </div>
 
       {/* Controles de zoom + Ajustes (canto superior direito) */}
       <div className="absolute right-3 top-3 flex flex-col items-end gap-2">
@@ -1784,6 +2090,12 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
             </span>
           ))}
         </div>
+        {/* Indicadores de canal (pontinhos abaixo do nome) — v2.25.9 */}
+        <div className="mt-2 flex flex-wrap gap-x-2 gap-y-0.5">
+          <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-[#3B82F6]" />LinkedIn</span>
+          <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-[#6B7280]" />Email</span>
+          <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-[#22C55E]" />Interação registrada</span>
+        </div>
         {/* Projetos (market_projects) não aparecem no mapa: ligam-se só a orgs
             via organization_id, sem relação direta com pessoas. Enhancement
             futuro exigiria novas tabelas de relacionamento. */}
@@ -1793,6 +2105,307 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+// --- Tabela (v2.25.9) --------------------------------------------------------
+
+function fmtDateBRFromISO(iso) {
+  if (!iso) return 'Nunca';
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso));
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : 'Nunca';
+}
+
+function currentRoleOrg(p) {
+  const current = p.roles && p.roles.length > 0 ? (p.roles.find((r) => r.current) || p.roles[0]) : null;
+  if (current) return { role: current.role || '', org: current.institution_name || '' };
+  return { role: p.role || '', org: p.institution || '' };
+}
+
+// Escapa um valor pra célula CSV (aspas duplas + separador ; caso contenha vírgula/quebra/aspas).
+function csvCell(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+const TABLE_COLUMNS = [
+  { key: 'name', label: 'Nome' },
+  { key: 'role', label: 'Cargo' },
+  { key: 'org', label: 'Organização' },
+  { key: 'temperature', label: 'Temp.' },
+  { key: 'sector_weight', label: 'Peso ⚡' },
+  { key: 'phd', label: 'PhD ★' },
+  { key: 'job', label: 'Emprego ★' },
+  { key: 'linkedin', label: 'LinkedIn' },
+  { key: 'email', label: 'Email' },
+  { key: 'last_interaction', label: 'Última interação' },
+];
+
+function NetworkTable({ people, interactionData, proProfile, proStatus, onSelect }) {
+  const [sortKey, setSortKey] = useState('name');
+  const [sortDir, setSortDir] = useState('asc');
+
+  const rows = useMemo(() => {
+    return (Array.isArray(people) ? people : []).map((p) => {
+      const { role, org } = currentRoleOrg(p);
+      const inter = interactionData?.[p.id] || null;
+      return {
+        id: p.id,
+        name: p.name || '',
+        role, org,
+        temperature: p.temperature || 'never',
+        sector_weight: p.sector_weight != null ? p.sector_weight : null,
+        phd: Number(proProfile?.[p.id]?.relevance_for_phd) || 0,
+        job: Number(proProfile?.[p.id]?.relevance_for_job) || 0,
+        linkedin: p.linkedin || '',
+        email: p.email || '',
+        outreach_status: proStatus?.[p.id] || '',
+        last_interaction: inter?.last_date || '',
+      };
+    });
+  }, [people, interactionData, proProfile, proStatus]);
+
+  const sorted = useMemo(() => {
+    const list = [...rows];
+    const dir = sortDir === 'asc' ? 1 : -1;
+    list.sort((a, b) => {
+      const va = a[sortKey];
+      const vb = b[sortKey];
+      if (typeof va === 'number' || typeof vb === 'number') return ((Number(va) || 0) - (Number(vb) || 0)) * dir;
+      return String(va || '').localeCompare(String(vb || ''), 'pt-BR') * dir;
+    });
+    return list;
+  }, [rows, sortKey, sortDir]);
+
+  const toggleSort = (key) => {
+    if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir('asc'); }
+  };
+
+  const exportCsv = () => {
+    const header = ['nome', 'cargo', 'org', 'email', 'linkedin', 'temperatura', 'sector_weight', 'relevancia_phd', 'relevancia_emprego', 'outreach_status', 'ultima_interacao'];
+    const lines = [header.join(',')];
+    sorted.forEach((r) => {
+      lines.push([
+        r.name, r.role, r.org, r.email, r.linkedin,
+        (TEMP_META[r.temperature] || TEMP_META.never).label,
+        r.sector_weight != null ? r.sector_weight : '',
+        r.phd, r.job, r.outreach_status, r.last_interaction,
+      ].map(csvCell).join(','));
+    });
+    const blob = new Blob([`﻿${lines.join('\n')}`], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    a.href = url;
+    a.download = `contatos_networking_${iso}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="flex h-full flex-col rounded-xl border border-line bg-surface">
+      <div className="flex items-center justify-between border-b border-line px-3 py-2">
+        <p className="text-xs text-muted">{sorted.length} contato(s)</p>
+        <button
+          type="button" onClick={exportCsv}
+          className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2"
+        >
+          <Download className="h-3.5 w-3.5" /> Exportar CSV
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <table className="w-full min-w-[820px] border-collapse text-left text-xs">
+          <thead className="sticky top-0 z-10 bg-surface2">
+            <tr>
+              {TABLE_COLUMNS.map((c) => (
+                <th
+                  key={c.key}
+                  onClick={() => toggleSort(c.key)}
+                  className="cursor-pointer select-none whitespace-nowrap px-3 py-2 font-semibold text-ink2 hover:text-ink"
+                >
+                  <span className="flex items-center gap-1">
+                    {c.label}
+                    {sortKey === c.key && (sortDir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+                  </span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((r, i) => (
+              <tr
+                key={r.id}
+                onClick={() => onSelect(r.id)}
+                className={`cursor-pointer border-b border-line hover:bg-accent/5 ${i % 2 === 1 ? 'bg-surface2/40' : ''}`}
+              >
+                <td className="whitespace-nowrap px-3 py-2 font-medium text-ink">{r.name}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-ink2">{r.role || '—'}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-ink2">{r.org || '—'}</td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  <span className="flex items-center gap-1">
+                    <span className="h-2 w-2 rounded-full" style={{ background: (TEMP_META[r.temperature] || TEMP_META.never).dot }} />
+                    {(TEMP_META[r.temperature] || TEMP_META.never).label}
+                  </span>
+                </td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {r.sector_weight != null ? (
+                    <span className="rounded-full px-1.5 py-0.5 text-[10px] font-bold text-white" style={{ background: sectorWeightColor(r.sector_weight) }}>
+                      {r.sector_weight}/10
+                    </span>
+                  ) : '—'}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-amber-500">{r.phd > 0 ? '★'.repeat(r.phd) : '—'}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-amber-500">{r.job > 0 ? '★'.repeat(r.job) : '—'}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-center">{r.linkedin ? <span className="text-green-600">✓</span> : <span className="text-muted">—</span>}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-center">{r.email ? <span className="text-green-600">✓</span> : <span className="text-muted">—</span>}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-ink2">{fmtDateBRFromISO(r.last_interaction)}</td>
+              </tr>
+            ))}
+            {sorted.length === 0 && (
+              <tr><td colSpan={TABLE_COLUMNS.length} className="px-3 py-10 text-center text-muted">Nenhum contato encontrado.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// --- Heatmap (v2.25.9) -------------------------------------------------------
+
+const HEATMAP_CRITERIA = [
+  { key: 'phd', label: 'PhD' },
+  { key: 'job', label: 'Emprego' },
+  { key: 'spinoff', label: 'Spin-off' },
+  { key: 'sector_weight', label: 'Peso Setorial' },
+];
+
+function heatmapColor(v) {
+  if (v == null) return '#FFFFFF';
+  if (v >= 5) return '#4338CA';
+  if (v >= 4) return '#6366F1';
+  if (v >= 3) return '#818CF8';
+  if (v >= 2) return '#C7D2FE';
+  if (v >= 1) return '#EEF2FF';
+  return '#FFFFFF';
+}
+
+function SectorHeatmap({ people, institutions, contactOrgLinks, proProfile }) {
+  const [popover, setPopover] = useState(null); // { orgId, key } | null
+
+  const orgRows = useMemo(() => {
+    const peopleById = {};
+    (Array.isArray(people) ? people : []).forEach((p) => { peopleById[p.id] = p; });
+    const linksByOrg = {};
+    (Array.isArray(contactOrgLinks) ? contactOrgLinks : []).forEach((l) => {
+      if (!l || !l.organization_id || !l.person_id) return;
+      (linksByOrg[l.organization_id] ||= new Set()).add(l.person_id);
+    });
+    return (Array.isArray(institutions) ? institutions : [])
+      .map((org) => {
+        const personIds = [...(linksByOrg[org.id] || [])];
+        if (personIds.length === 0) return null;
+        const cells = {};
+        HEATMAP_CRITERIA.forEach(({ key }) => {
+          const values = personIds
+            .map((pid) => {
+              if (key === 'sector_weight') return peopleById[pid]?.sector_weight;
+              const prof = proProfile?.[pid];
+              if (!prof) return null;
+              const raw = key === 'phd' ? prof.relevance_for_phd : key === 'job' ? prof.relevance_for_job : prof.relevance_for_spinoff;
+              return raw > 0 ? raw : null;
+            })
+            .filter((v) => v != null);
+          cells[key] = values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+          cells[`${key}_people`] = personIds
+            .filter((pid) => {
+              const v = key === 'sector_weight'
+                ? peopleById[pid]?.sector_weight
+                : (proProfile?.[pid] ? (key === 'phd' ? proProfile[pid].relevance_for_phd : key === 'job' ? proProfile[pid].relevance_for_job : proProfile[pid].relevance_for_spinoff) : null);
+              return v != null && v > 0;
+            })
+            .map((pid) => ({ id: pid, name: peopleById[pid]?.name || '?', value: key === 'sector_weight' ? peopleById[pid]?.sector_weight : (proProfile?.[pid] ? (key === 'phd' ? proProfile[pid].relevance_for_phd : key === 'job' ? proProfile[pid].relevance_for_job : proProfile[pid].relevance_for_spinoff) : null) }));
+        });
+        return { org, personCount: personIds.length, cells };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.personCount - a.personCount);
+  }, [people, institutions, contactOrgLinks, proProfile]);
+
+  if (orgRows.length < 3) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-surface text-center text-sm text-muted">
+        <Grid3x3 className="h-8 w-8 text-muted" />
+        Adicione relevâncias aos contatos para ver o heatmap
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative h-full overflow-auto rounded-xl border border-line bg-surface p-3">
+      <table className="w-full min-w-[520px] border-collapse text-left text-xs">
+        <thead>
+          <tr>
+            <th className="px-2 py-2 font-semibold text-ink2">Organização</th>
+            {HEATMAP_CRITERIA.map((c) => <th key={c.key} className="px-2 py-2 text-center font-semibold text-ink2">{c.label}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {orgRows.map(({ org, personCount, cells }) => (
+            <tr key={org.id} className="border-t border-line">
+              <td className="px-2 py-2 font-medium text-ink">
+                {org.name}
+                <span className="ml-1.5 text-[10px] text-muted">({personCount})</span>
+              </td>
+              {HEATMAP_CRITERIA.map((c) => {
+                const v = cells[c.key];
+                return (
+                  <td key={c.key} className="px-2 py-1 text-center">
+                    <button
+                      type="button"
+                      onClick={() => (cells[`${c.key}_people`]?.length ? setPopover({ orgId: org.id, key: c.key }) : null)}
+                      className="mx-auto flex h-9 w-16 items-center justify-center rounded-md text-sm font-semibold"
+                      style={{ background: heatmapColor(v), color: v != null && v >= 3 ? '#fff' : '#3D3A34' }}
+                      title={cells[`${c.key}_people`]?.length ? `${cells[`${c.key}_people`].length} pessoa(s)` : 'Sem dados'}
+                    >
+                      {v != null ? v.toFixed(1) : '—'}
+                    </button>
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {popover && (() => {
+        const row = orgRows.find((r) => r.org.id === popover.orgId);
+        const list = row?.cells?.[`${popover.key}_people`] || [];
+        const critLabel = HEATMAP_CRITERIA.find((c) => c.key === popover.key)?.label || '';
+        return (
+          <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4" onClick={() => setPopover(null)}>
+            <div className="w-full max-w-sm rounded-lg border border-line bg-white p-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-semibold text-ink">{row?.org?.name} — {critLabel}</p>
+                <button type="button" onClick={() => setPopover(null)} className="text-muted hover:text-ink"><X className="h-4 w-4" /></button>
+              </div>
+              <ul className="max-h-60 space-y-1 overflow-y-auto">
+                {list.map((p) => (
+                  <li key={p.id} className="flex items-center justify-between rounded-md bg-surface2 px-2 py-1 text-xs">
+                    <span className="text-ink">{p.name}</span>
+                    <span className="font-semibold text-accent">{p.value}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

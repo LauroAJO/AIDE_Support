@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   CalendarDays, Plus, Upload, X, Loader2, ExternalLink, MapPin, Building2,
   CalendarClock, Globe, DollarSign, Flag, Trash2, Link2, ArrowRight, BookOpen,
-  ChevronDown, ChevronRight, Search, Unlink,
+  ChevronDown, ChevronRight, Search, Unlink, List as ListIcon, GanttChartSquare,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -1119,6 +1119,7 @@ function DeadlinesTab() {
   const [kind, setKind] = useState('abstract'); // abstract | paper | event
   const [peerOnly, setPeerOnly] = useState(false);
   const [area, setArea] = useState('all');
+  const [subView, setSubView] = useState('lista'); // lista | timeline (v2.25.9)
 
   useEffect(() => {
     apiFetch('/api/events')
@@ -1146,46 +1147,70 @@ function DeadlinesTab() {
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-base font-bold text-ink">Próximos 90 dias</h2>
-        <div className="flex gap-1 rounded-lg border border-line bg-surface p-1">
-          {[{ k: 'abstract', l: 'Abstracts' }, { k: 'paper', l: 'Full Papers' }, { k: 'event', l: 'Datas dos Eventos' }].map((o) => (
+        <h2 className="text-base font-bold text-ink">{subView === 'lista' ? 'Próximos 90 dias' : 'Linha do tempo'}</h2>
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1 rounded-lg border border-line bg-surface p-1">
             <button
-              key={o.k}
-              type="button"
-              onClick={() => setKind(o.k)}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${kind === o.k ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'}`}
+              type="button" onClick={() => setSubView('lista')}
+              className={`flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition ${subView === 'lista' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'}`}
             >
-              {o.l}
+              <ListIcon className="h-3.5 w-3.5" /> Lista
             </button>
-          ))}
+            <button
+              type="button" onClick={() => setSubView('timeline')}
+              className={`flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition ${subView === 'timeline' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'}`}
+            >
+              <GanttChartSquare className="h-3.5 w-3.5" /> Timeline
+            </button>
+          </div>
+          {subView === 'lista' && (
+            <div className="flex gap-1 rounded-lg border border-line bg-surface p-1">
+              {[{ k: 'abstract', l: 'Abstracts' }, { k: 'paper', l: 'Full Papers' }, { k: 'event', l: 'Datas dos Eventos' }].map((o) => (
+                <button
+                  key={o.k}
+                  type="button"
+                  onClick={() => setKind(o.k)}
+                  className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${kind === o.k ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'}`}
+                >
+                  {o.l}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-1.5 text-xs text-ink2">
-          <input type="checkbox" checked={peerOnly} onChange={(e) => setPeerOnly(e.target.checked)} className="accent-accent" /> Apenas peer-review
-        </label>
-        <select value={area} onChange={(e) => setArea(e.target.value)} className="input w-auto text-xs">
-          <option value="all">Todas as áreas</option>
-          {Object.entries(AREA_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
-      </div>
+      {subView === 'lista' ? (
+        <>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-ink2">
+              <input type="checkbox" checked={peerOnly} onChange={(e) => setPeerOnly(e.target.checked)} className="accent-accent" /> Apenas peer-review
+            </label>
+            <select value={area} onChange={(e) => setArea(e.target.value)} className="input w-auto text-xs">
+              <option value="all">Todas as áreas</option>
+              {Object.entries(AREA_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {items.length === 0 ? (
-          <div className="flex h-full min-h-[200px] items-center justify-center rounded-xl border border-dashed border-line text-sm text-muted">
-            Nenhum prazo nos próximos 90 dias
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {items.length === 0 ? (
+              <div className="flex h-full min-h-[200px] items-center justify-center rounded-xl border border-dashed border-line text-sm text-muted">
+                Nenhum prazo nos próximos 90 dias
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {items.map((e) => <DeadlineTimelineItem key={`${e.id}-${kind}`} event={e} onStatus={(s) => {
+                  apiFetch(`/api/events/${e.id}`, { method: 'PUT', body: JSON.stringify({ status: s }) })
+                    .then(() => setEvents((prev) => prev.map((x) => (x.id === e.id ? { ...x, status: s } : x))))
+                    .catch(() => {});
+                }} />)}
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="space-y-2">
-            {items.map((e) => <DeadlineTimelineItem key={`${e.id}-${kind}`} event={e} onStatus={(s) => {
-              apiFetch(`/api/events/${e.id}`, { method: 'PUT', body: JSON.stringify({ status: s }) })
-                .then(() => setEvents((prev) => prev.map((x) => (x.id === e.id ? { ...x, status: s } : x))))
-                .catch(() => {});
-            }} />)}
-          </div>
-        )}
-      </div>
+        </>
+      ) : (
+        <EventsTimeline events={events} />
+      )}
     </div>
   );
 }
@@ -1214,6 +1239,238 @@ function DeadlineTimelineItem({ event, onStatus }) {
       </select>
     </div>
   );
+}
+
+// ===========================================================================
+// TAB: Prazos → sub-view Timeline (SVG horizontal, v2.25.9)
+// ===========================================================================
+
+const TIMELINE_TYPE_COLORS = {
+  conference_academic: '#6366F1',
+  conference_commercial: '#F59E0B',
+  conference_hybrid: '#8B5CF6',
+  networking_informal: '#22C55E',
+  networking_formal: '#22C55E',
+  workshop: '#3B82F6',
+  summer_school: '#14B8A6',
+};
+
+const TIMELINE_FILTER_CHIPS = [
+  { key: 'all', label: 'Todos' },
+  { key: 'peer', label: 'Peer-review' },
+  { key: 'holanda', label: 'Holanda' },
+  { key: 'phase1', label: 'Fase 1' },
+  { key: 'phase2', label: 'Fase 2' },
+  { key: 'phase3', label: 'Fase 3' },
+];
+const TIMELINE_WINDOWS = [
+  { key: 6, label: 'Próximos 6 meses' },
+  { key: 12, label: 'Próximos 12 meses' },
+  { key: 18, label: '18 meses' },
+];
+const TIMELINE_MESES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+const PX_PER_DAY = 7;
+const ROW_HEIGHT = 44;
+const HEADER_HEIGHT = 32;
+
+function isHolandaCountry(country) {
+  const s = String(country || '').trim().toLowerCase();
+  if (!s) return false;
+  return s === 'nl' || ['netherlands', 'holland', 'holanda', 'nederland'].some((t) => s.includes(t));
+}
+
+function parseYMD(dateStr) {
+  if (!dateStr) return null;
+  const s = dateStr.length === 7 ? `${dateStr}-01` : dateStr;
+  const t = Date.parse(`${s}T00:00:00`);
+  return Number.isNaN(t) ? null : new Date(t);
+}
+
+function EventsTimeline({ events }) {
+  const [activeChips, setActiveChips] = useState(() => new Set()); // subset of peer/holanda/phase1-3
+  const [windowMonths, setWindowMonths] = useState(18);
+  const [selected, setSelected] = useState(null);
+
+  const today = useMemo(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }, []);
+  const rangeEnd = useMemo(() => {
+    const d = new Date(today);
+    d.setMonth(d.getMonth() + windowMonths);
+    return d;
+  }, [today, windowMonths]);
+
+  const toggleChip = (key) => {
+    if (key === 'all') { setActiveChips(new Set()); return; }
+    setActiveChips((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const xForDate = (d) => Math.round(((d.getTime() - today.getTime()) / 86400000) * PX_PER_DAY);
+  const totalDays = Math.round((rangeEnd.getTime() - today.getTime()) / 86400000);
+  const totalWidth = Math.max(600, totalDays * PX_PER_DAY);
+
+  const rows = useMemo(() => {
+    const phaseKeys = ['phase1', 'phase2', 'phase3'].filter((k) => activeChips.has(k));
+    return (Array.isArray(events) ? events : [])
+      .filter((e) => {
+        if (activeChips.has('peer') && !e.peer_review) return false;
+        if (activeChips.has('holanda') && !isHolandaCountry(e.country)) return false;
+        if (phaseKeys.length > 0 && !phaseKeys.includes(`phase${e.strategic_phase}`)) return false;
+        return true;
+      })
+      .map((e) => {
+        const ds = parseYMD(e.date_start);
+        const de = parseYMD(e.date_end) || ds;
+        const da = parseYMD(e.deadline_abstract);
+        const dp = parseYMD(e.deadline_paper);
+        const anchor = ds || da || dp;
+        if (!anchor) return null;
+        // Inclui o evento se QUALQUER data relevante cair na janela visível.
+        const dates = [ds, de, da, dp].filter(Boolean);
+        const inWindow = dates.some((d) => d >= today && d <= rangeEnd) || (ds && de && ds <= rangeEnd && de >= today);
+        if (!inWindow) return null;
+        return { event: e, ds, de, da, dp, anchor };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.anchor - b.anchor);
+  }, [events, activeChips, today, rangeEnd]);
+
+  const monthTicks = useMemo(() => {
+    const ticks = [];
+    const cur = new Date(today.getFullYear(), today.getMonth(), 1);
+    while (cur <= rangeEnd) {
+      ticks.push({ date: new Date(cur), x: xForDate(cur) });
+      cur.setMonth(cur.getMonth() + 1);
+    }
+    return ticks;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [today, rangeEnd]);
+
+  const chartHeight = HEADER_HEIGHT + Math.max(1, rows.length) * ROW_HEIGHT + 12;
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex flex-wrap gap-1.5">
+        {TIMELINE_FILTER_CHIPS.map((c) => {
+          const active = c.key === 'all' ? activeChips.size === 0 : activeChips.has(c.key);
+          return (
+            <button
+              key={c.key}
+              type="button"
+              onClick={() => toggleChip(c.key)}
+              className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition ${active ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'}`}
+            >
+              {c.label}
+            </button>
+          );
+        })}
+        <span className="mx-1 w-px self-stretch bg-line" />
+        {TIMELINE_WINDOWS.map((w) => (
+          <button
+            key={w.key}
+            type="button"
+            onClick={() => setWindowMonths(w.key)}
+            className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition ${windowMonths === w.key ? 'bg-indigo-600 text-white' : 'bg-surface2 text-ink2 hover:text-ink'}`}
+          >
+            {w.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-line bg-surface">
+        {rows.length === 0 ? (
+          <div className="flex h-full min-h-[200px] items-center justify-center text-sm text-muted">
+            Nenhum evento/prazo na janela selecionada
+          </div>
+        ) : (
+          <svg width={totalWidth} height={chartHeight} style={{ display: 'block' }}>
+            {/* Grade + rótulos de mês */}
+            {monthTicks.map((t, i) => (
+              <g key={i}>
+                <line x1={t.x} y1={0} x2={t.x} y2={chartHeight} stroke="#F3F0EB" strokeWidth="1" />
+                <text x={t.x + 4} y={16} fontSize="10" fill="#9E9890">
+                  {TIMELINE_MESES[t.date.getMonth()]} {t.date.getFullYear()}
+                </text>
+              </g>
+            ))}
+            {/* Linha "Hoje" */}
+            <line x1={xForDate(today)} y1={0} x2={xForDate(today)} y2={chartHeight} stroke="#EF4444" strokeWidth="1.5" strokeDasharray="4 3" />
+            <text x={xForDate(today) + 4} y={28} fontSize="10" fontWeight="700" fill="#EF4444">Hoje</text>
+
+            {rows.map(({ event, ds, de, da, dp }, i) => {
+              const y0 = HEADER_HEIGHT + i * ROW_HEIGHT;
+              const blockY = y0 + 16;
+              const color = TIMELINE_TYPE_COLORS[event.type] || '#9CA3AF';
+              const bx = ds ? xForDate(ds) : (da ? xForDate(da) : xForDate(dp));
+              const bw = ds ? Math.max(12, (Math.round(((de || ds).getTime() - ds.getTime()) / 86400000) + 1) * PX_PER_DAY) : 12;
+              const label = truncateStr(event.acronym || event.name, 18);
+              return (
+                <g key={event.id} style={{ cursor: 'pointer' }} onClick={() => setSelected(event)}>
+                  {da && (
+                    <polygon
+                      points={`${xForDate(da)},${blockY - 6} ${xForDate(da) - 4},${blockY - 14} ${xForDate(da) + 4},${blockY - 14}`}
+                      fill="#EF4444"
+                    >
+                      <title>Deadline abstract: {fmtBR(event.deadline_abstract)}</title>
+                    </polygon>
+                  )}
+                  {dp && (
+                    <polygon
+                      points={`${xForDate(dp) + 10},${blockY - 6} ${xForDate(dp) + 6},${blockY - 14} ${xForDate(dp) + 14},${blockY - 14}`}
+                      fill="#F97316"
+                    >
+                      <title>Deadline full paper: {fmtBR(event.deadline_paper)}</title>
+                    </polygon>
+                  )}
+                  <rect x={bx} y={blockY} width={bw} height={24} rx={4} fill={color} opacity={0.9}>
+                    <title>
+                      {event.name} ({fmtDateRange(event.date_start, event.date_end)}) — {EVENT_STATUS_LABELS[event.status]}
+                    </title>
+                  </rect>
+                  <text x={bx + 5} y={blockY + 16} fontSize="10" fontWeight="600" fill="#FFFFFF" style={{ pointerEvents: 'none' }}>
+                    {label}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+        )}
+      </div>
+
+      {selected && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4" onClick={() => setSelected(null)}>
+          <div className="w-full max-w-sm rounded-lg border border-line bg-white p-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold text-ink">{selected.name}</p>
+                {selected.acronym && <p className="text-xs text-muted">{selected.acronym}</p>}
+              </div>
+              <button type="button" onClick={() => setSelected(null)} className="text-muted hover:text-ink"><X className="h-4 w-4" /></button>
+            </div>
+            <p className="text-xs text-ink2">{fmtDateRange(selected.date_start, selected.date_end)}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <EventTypeBadge type={selected.type} />
+              <EventStatusBadge status={selected.status} />
+              {selected.peer_review && <Badge className="bg-green-100 text-green-700">✓ Peer-review</Badge>}
+            </div>
+            {(selected.deadline_abstract || selected.deadline_paper) && (
+              <div className="mt-2 space-y-0.5 text-xs text-ink2">
+                {selected.deadline_abstract && <p>📝 Abstract: {fmtBR(selected.deadline_abstract)}</p>}
+                {selected.deadline_paper && <p>📄 Full paper: {fmtBR(selected.deadline_paper)}</p>}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function truncateStr(str, n) {
+  if (!str) return '';
+  return str.length > n ? `${str.slice(0, n - 1)}…` : str;
 }
 
 // ===========================================================================

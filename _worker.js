@@ -125,6 +125,8 @@ async function handleAPI(request, env, ctx) {
   // Networking
   if (path === '/api/network/routes') return handleNetworkRoutes(request, env, user);
   if (path === '/api/network/people') return handleNetworkPeople(request, env, user);
+  // Contagem de interações por pessoa (mapa/tabela) — antes da rota genérica.
+  if (path === '/api/network/interactions/counts') return handleNetworkInteractionCounts(request, env, user);
   // Interações de contato (contact_interactions) — antes da rota genérica de pessoa.
   if (path.match(/^\/api\/network\/people\/[^/]+\/interactions$/)) {
     return handleContactInteractions(request, env, user, path.split('/')[4]);
@@ -6462,6 +6464,11 @@ function shapeNetworkPerson(row) {
     tags,
     lifegame_person_id: row.lifegame_person_id || '',
     dex_contact_id: row.dex_contact_id || '',
+    sector_weight: row.sector_weight != null ? row.sector_weight : null,
+    sector_weight_notes: row.sector_weight_notes || '',
+    sector_weight_sources: row.sector_weight_sources || '',
+    sector_weight_updated_at: row.sector_weight_updated_at || null,
+    sector_weight_updated_by: row.sector_weight_updated_by || null,
     created_at: row.created_at,
     updated_at: row.updated_at
   };
@@ -6551,10 +6558,16 @@ async function handleNetworkPersonItem(request, env, user, id) {
     const now = Math.floor(Date.now() / 1000);
     const pick = (key, fallback) => (body[key] !== undefined ? body[key] : fallback);
     const derivedRole = currentRoleFromList(body.roles);
+    // sector_weight (1-10) só toca updated_at/updated_by quando o próprio
+    // sector_weight é enviado no body — evita "roubar" a autoria em PUTs que
+    // mexem só em outros campos (ex.: editar tags não deve trocar quem avaliou).
+    const sectorWeightChanged = body.sector_weight !== undefined;
     await env.DB.prepare(
       `UPDATE network_people SET name=?, type=?, institution=?, role=?, area_of_work=?,
          email=?, phone=?, linkedin=?, notes=?, connection_to_lauro=?, connection_strength=?,
-         tags=?, lifegame_person_id=?, dex_contact_id=?, updated_at=? WHERE id=?`
+         tags=?, lifegame_person_id=?, dex_contact_id=?,
+         sector_weight=?, sector_weight_notes=?, sector_weight_sources=?,
+         sector_weight_updated_at=?, sector_weight_updated_by=?, updated_at=? WHERE id=?`
     ).bind(
       pick('name', existing.name), pick('type', existing.type), pick('institution', existing.institution),
       derivedRole || pick('role', existing.role), pick('area_of_work', existing.area_of_work),
@@ -6564,6 +6577,11 @@ async function handleNetworkPersonItem(request, env, user, id) {
       body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
       pick('lifegame_person_id', existing.lifegame_person_id),
       pick('dex_contact_id', existing.dex_contact_id),
+      sectorWeightChanged ? (body.sector_weight != null ? Number(body.sector_weight) : null) : existing.sector_weight,
+      pick('sector_weight_notes', existing.sector_weight_notes),
+      pick('sector_weight_sources', existing.sector_weight_sources),
+      sectorWeightChanged ? now : existing.sector_weight_updated_at,
+      sectorWeightChanged ? user.id : existing.sector_weight_updated_by,
       now, id
     ).run();
     if (Array.isArray(body.roles)) await persistPersonRoles(env, id, body.roles);
@@ -6781,9 +6799,12 @@ async function syncDexContacts(env) {
   const now = Math.floor(Date.now() / 1000);
 
   for (const contact of allContacts) {
-    const fullName = contact.full_name
-      || [contact.first_name, contact.last_name].filter(Boolean).join(' ');
-    if (!fullName) { skipped++; continue; }
+    const fullName = (contact.full_name
+      || [contact.first_name, contact.last_name].filter(Boolean).join(' ')).trim();
+    // Descarta nomes vazios, curtos demais ou que são só dígitos/telefone
+    // (contatos "sujos" do DEX, ex.: número salvo sem nome).
+    const looksLikePhone = /^[\d\s+\-().ext]+$/i.test(fullName);
+    if (!fullName || fullName.length < 2 || looksLikePhone) { skipped++; continue; }
 
     const email = contact.emails?.[0]?.address || '';
     const phone = contact.phone_numbers?.[0]?.number || '';
@@ -6917,6 +6938,25 @@ async function handleContactInteractionItem(request, env, user, personId, intId)
   await env.DB.prepare('DELETE FROM contact_interactions WHERE id = ? AND person_id = ?')
     .bind(intId, personId).run().catch(() => {});
   return json({ ok: true });
+}
+
+// Contagem de interações por pessoa + data da mais recente — usado pelo mapa
+// (indicador de canal) e pela tabela (coluna "Última interação"). Uma única
+// query agregada em vez de N chamadas por pessoa.
+async function handleNetworkInteractionCounts(request, env, user) {
+  if (!requirePermission(user, 'networking', 'view')) return json({});
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT person_id, COUNT(*) AS n, MAX(date) AS last_date FROM contact_interactions GROUP BY person_id'
+    ).all();
+    const map = {};
+    for (const r of results || []) {
+      map[r.person_id] = { count: r.n || 0, last_date: r.last_date || '' };
+    }
+    return json(map);
+  } catch {
+    return json({});
+  }
 }
 
 // Temperatura por pessoa a partir da última interação (hot/warm/cold/never).
@@ -8977,16 +9017,33 @@ async function fetchConnectionsForPeople(env, peopleIds) {
   return m;
 }
 
+// Resolve sector_weight_updated_by (user id) → nome, para exibir "Avaliado
+// em DD/MM por [nome]" no DetailPanel sem o front precisar de outra chamada.
+async function fetchSectorWeightUsers(env, userIds) {
+  const ids = [...new Set((userIds || []).filter(Boolean))];
+  if (!ids.length) return {};
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    const { results } = await env.DB.prepare(
+      `SELECT id, name, email FROM users WHERE id IN (${placeholders})`
+    ).bind(...ids).all();
+    const map = {};
+    for (const r of results || []) map[r.id] = r.name || r.email || '';
+    return map;
+  } catch { return {}; }
+}
+
 // Hydrate the existing shapeNetworkPerson with roles/entity_links/connections.
 // Falls back to the bare shape if any auxiliary table is missing.
 async function hydratePeople(env, rows) {
   const people = rows.map(shapeNetworkPerson);
   const ids = people.map((p) => p.id);
-  const [rolesByPerson, linksMap, connsByPerson, tempByPerson] = await Promise.all([
+  const [rolesByPerson, linksMap, connsByPerson, tempByPerson, sectorUserNames] = await Promise.all([
     fetchRolesForPeople(env, ids),
     fetchEntityLinksFor(env, ids, []),
     fetchConnectionsForPeople(env, ids),
-    fetchTemperatures(env, ids)
+    fetchTemperatures(env, ids),
+    fetchSectorWeightUsers(env, people.map((p) => p.sector_weight_updated_by))
   ]);
   return people.map((p) => ({
     ...p,
@@ -8994,7 +9051,8 @@ async function hydratePeople(env, rows) {
     entity_links: linksMap.byPerson[p.id] || [],
     connections: connsByPerson[p.id] || [],
     // Temperatura do contato pela última interação; 'never' se nenhuma.
-    temperature: tempByPerson[p.id] || 'never'
+    temperature: tempByPerson[p.id] || 'never',
+    sector_weight_updated_by_name: sectorUserNames[p.sector_weight_updated_by] || ''
   }));
 }
 

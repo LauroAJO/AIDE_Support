@@ -10,7 +10,6 @@ import {
   Bell,
   CreditCard,
   LayoutDashboard,
-  Search,
   Video,
   Network as NetworkIcon,
   MessageSquare,
@@ -37,6 +36,7 @@ import Avatar from './shared/Avatar';
 import TimerIndicator from './timer/TimerIndicator';
 import TimerCheckMonitor from './timer/TimerCheckMonitor';
 import NotificationBell from './notifications/NotificationBell';
+import GlobalSearch from './search/GlobalSearch';
 
 // Nav único e ordenado (sidebar + bottom nav). `feature` = permissão (owner vê
 // tudo); `fixed: true` = só owner + assistente fixo. `group` agrupa visualmente
@@ -182,17 +182,7 @@ export default function Layout({ children }) {
           className="absolute left-1/2 hidden -translate-x-1/2 md:flex"
           style={{ width: 320, maxWidth: '40vw' }}
         >
-          <div className="relative w-full">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-            <input
-              type="text"
-              placeholder="Buscar tarefas, notas, projetos..."
-              className="h-9 w-full rounded-lg border border-line bg-surface2 pl-9 pr-12 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:shadow-[0_0_0_3px_rgba(99,102,241,0.12)]"
-            />
-            <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded bg-line px-1.5 py-0.5 text-[11px] text-muted">
-              ⌘K
-            </span>
-          </div>
+          <GlobalSearch />
         </div>
 
         {/* RIGHT — bell, avatar/name, sair */}

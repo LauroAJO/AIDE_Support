@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   CalendarDays, Plus, Upload, X, Loader2, ExternalLink, MapPin, Building2,
   CalendarClock, Globe, DollarSign, Flag, Trash2, Link2, ArrowRight, BookOpen,
@@ -103,6 +103,19 @@ function EventsTab() {
     apiFetch('/api/venues').then((r) => setVenues(r || [])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Deep-link da busca global (?event=<id>): seleciona o evento assim que a
+  // lista carregar e limpa o param pra não reabrir num refresh/voltar depois.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const eventId = searchParams.get('event');
+    if (!eventId || !events.length) return;
+    if (events.some((e) => e.id === eventId)) setSelectedId(eventId);
+    const next = new URLSearchParams(searchParams);
+    next.delete('event');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, events]);
 
   const filtered = useMemo(() => {
     const q = (filter.search || '').trim().toLowerCase();

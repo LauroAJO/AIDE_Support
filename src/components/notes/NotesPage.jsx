@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Plus, Pin, PinOff, Trash2, ArrowLeft, Search } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -56,6 +57,20 @@ export default function NotesPage() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Deep-link da busca global (?note=<id>): seleciona a nota assim que a
+  // lista carregar e limpa o param pra não reabrir num refresh/voltar depois.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const noteId = searchParams.get('note');
+    if (!noteId || !notes.length) return;
+    const found = notes.find((n) => n.id === noteId);
+    if (found) setSelectedNote(found);
+    const next = new URLSearchParams(searchParams);
+    next.delete('note');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, notes]);
 
   useEffect(() => {
     if (!selectedNote) {

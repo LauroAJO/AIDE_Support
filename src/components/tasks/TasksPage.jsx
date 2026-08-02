@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch, Briefcase, Repeat } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -113,6 +114,20 @@ export default function TasksPage() {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Deep-link da busca global (?task=<id>): seleciona a tarefa assim que a
+  // lista carregar e limpa o param pra não reabrir num refresh/voltar depois.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const taskId = searchParams.get('task');
+    if (!taskId || !tasks.length) return;
+    const found = tasks.find((t) => t.id === taskId);
+    if (found) setSelectedTask(found);
+    const next = new URLSearchParams(searchParams);
+    next.delete('task');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, tasks]);
 
   const otherUser = users.find((u) => u.id !== user?.id);
   const otherName = otherUser?.name ? otherUser.name.split(' ')[0] : 'Alice';

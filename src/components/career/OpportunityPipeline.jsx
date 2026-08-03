@@ -8,6 +8,12 @@ import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import Avatar from '../shared/Avatar';
 import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 import {
   StarRating, TrackBadge, OppTypeBadge, parseTags,
   PIPELINE_COLUMNS, TRACK_LABELS, OPP_TYPE_LABELS, OPP_STATUS_LABELS, OPP_STATUS_ORDER,
@@ -564,9 +570,16 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
   const days = data ? daysUntil(data.deadline) : null;
   const c = data ? trackColor(data.track) : trackColor('all');
 
+  // As notas salvam no blur; se o modal fechar antes disso o texto se perdia.
+  // Agora fechar com nota pendente pede confirmação (v2.25.13).
+  const notesDirty = !!data && notes !== parseStatusLog(data.notes || '').rest;
+  const guard = useUnsavedGuard({ isDirty: notesDirty, onClose });
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div className="max-h-[90vh] w-full max-w-[680px] overflow-y-auto rounded-xl bg-surface p-5 shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.13). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+      <div className="max-h-[90vh] w-full max-w-[680px] overflow-y-auto rounded-xl bg-surface p-5 shadow-soft">
         {loading || !data ? <LoadingSpinner label="Carregando..." /> : (
           <>
             <div className="mb-3 flex items-start justify-between gap-3" style={{ borderLeft: `4px solid ${c.hex}`, paddingLeft: 12 }}>
@@ -577,7 +590,7 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
                   <TrackBadge track={data.track} />
                 </div>
               </div>
-              <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+              <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
             </div>
 
             <div className="space-y-4">
@@ -670,12 +683,24 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
               {taskMsg && <span className="mr-auto text-xs text-emerald-600">{taskMsg}</span>}
               <button type="button" onClick={() => onEditFull(data)} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Editar completo</button>
               <button type="button" onClick={createTask} className="flex items-center gap-1 rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2"><CheckSquare className="h-4 w-4" /> Criar Tarefa</button>
-              <button type="button" onClick={onClose} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90">Fechar</button>
+              <button type="button" onClick={guard.requestClose} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90">Fechar</button>
             </div>
           </>
         )}
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message="A nota editada ainda não foi salva. Deseja descartá-la?"
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 
@@ -718,11 +743,26 @@ function Field({ label, children }) {
 }
 
 function OpportunityEditor({ mode, initial, orgs, people, users, onClose, onSaved }) {
-  const [form, setForm] = useState(initial);
-  const [tagsText, setTagsText] = useState((initial.tags || []).join(', '));
+  // Rascunho (v2.25.13): formulário + tags num único objeto persistido; os
+  // setters locais preservam a assinatura antiga.
+  const pristine = useMemo(() => ({
+    form: initial, tagsText: (initial.tags || []).join(', '),
+  }), [initial]);
+  const {
+    value: draft, setValue: setDraft, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`opportunity-${initial.id || 'new'}`, pristine);
+  const form = draft.form;
+  const tagsText = draft.tagsText;
+  const setForm = (next) =>
+    setDraft((d) => ({ ...d, form: typeof next === 'function' ? next(d.form) : next }));
+  const setTagsText = (v) => setDraft((d) => ({ ...d, tagsText: v }));
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const save = async () => {
     if (!form.title.trim()) { setError('Título é obrigatório'); return; }
@@ -741,6 +781,7 @@ function OpportunityEditor({ mode, initial, orgs, people, users, onClose, onSave
       const saved = mode === 'create'
         ? await apiFetch('/api/career/opportunities', { method: 'POST', body: JSON.stringify(payload) })
         : await apiFetch(`/api/career/opportunities/${form.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved(saved.id);
     } catch (e) {
       setError(String(e.message || e));
@@ -749,13 +790,16 @@ function OpportunityEditor({ mode, initial, orgs, people, users, onClose, onSave
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.13) — clicar fora não fecha mais o editor. */}
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">{mode === 'create' ? 'Nova oportunidade' : 'Editar oportunidade'}</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
           <Field label="Título *"><input value={form.title} onChange={(e) => set({ title: e.target.value })} className="input" /></Field>
           <div className="grid grid-cols-2 gap-3">
@@ -821,12 +865,24 @@ function OpportunityEditor({ mode, initial, orgs, people, users, onClose, onSave
           <Field label="Notas"><textarea value={form.notes || ''} onChange={(e) => set({ notes: e.target.value })} className="input min-h-[60px]" /></Field>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+          <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
           <button type="button" onClick={save} disabled={saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
             {saving && <Loader2 className="h-4 w-4 animate-spin" />} Salvar
           </button>
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

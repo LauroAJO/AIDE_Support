@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus, Search, X, Pencil, ExternalLink, Linkedin, UserPlus, Briefcase, MapPin, Loader2, Users, ArrowRight,
@@ -7,6 +7,13 @@ import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import Avatar from '../shared/Avatar';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 import {
   StarRating, OrgTypeBadge, OrgStatusBadge, ORG_TYPE_LABELS, ORG_STATUS_LABELS, OUTREACH_LABELS, parseTags,
 } from './marketShared';
@@ -452,18 +459,49 @@ function Field({ label, children }) {
 export function OrgEditor({ mode, initial, onClose, onSaved }) {
   const allProjects = useStore((s) => s.marketProjects);
   const setMarketProjects = useStore((s) => s.setMarketProjects);
-  const [form, setForm] = useState(initial);
-  const [tagsText, setTagsText] = useState((initial.tags || []).join(', '));
-  const [linkedProjectIds, setLinkedProjectIds] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  // Rascunho (v2.25.13): os três pedaços do formulário viajam juntos num só
+  // objeto persistido, e os setters locais abaixo preservam a assinatura
+  // antiga — nenhum call site precisou mudar.
+  const pristine = useMemo(() => ({
+    form: initial,
+    tagsText: (initial.tags || []).join(', '),
+    linkedProjectIds: [],
+  }), [initial]);
+  const {
+    value: draft, setValue: setDraft, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`org-${initial.id || 'new'}`, pristine);
+
+  const form = draft.form;
+  const tagsText = draft.tagsText;
+  const linkedProjectIds = draft.linkedProjectIds;
+  const setForm = (next) =>
+    setDraft((d) => ({ ...d, form: typeof next === 'function' ? next(d.form) : next }));
+  const setTagsText = (v) => setDraft((d) => ({ ...d, tagsText: v }));
+  const setLinkedProjectIds = (next) =>
+    setDraft((d) => ({
+      ...d,
+      linkedProjectIds: typeof next === 'function' ? next(d.linkedProjectIds) : next,
+    }));
+
+  // Baseline do "sujo": começa igual ao pristine e é reajustada quando o
+  // fetch abaixo preenche os projetos vinculados vindos do servidor — senão
+  // toda edição abriria já "suja" e pediria confirmação para fechar sem que o
+  // usuário tivesse mudado nada.
+  const baselineRef = useRef(pristine);
 
   // Carrega projetos para o seletor de "projetos vinculados".
   useEffect(() => {
     apiFetch('/api/market/projects').then((rows) => {
       setMarketProjects(rows || []);
       if (mode === 'edit' && initial.id) {
-        setLinkedProjectIds((rows || []).filter((p) => p.organization_id === initial.id).map((p) => p.id));
+        const ids = (rows || []).filter((p) => p.organization_id === initial.id).map((p) => p.id);
+        baselineRef.current = { ...baselineRef.current, linkedProjectIds: ids };
+        // Com rascunho restaurado, a seleção salva pelo usuário vence a do
+        // servidor — senão o fetch sobrescreveria o que ele tinha marcado.
+        if (!hasDraft) setLinkedProjectIds(ids);
       }
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -472,6 +510,9 @@ export function OrgEditor({ mode, initial, onClose, onSaved }) {
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
   const toggleProject = (id) =>
     setLinkedProjectIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(baselineRef.current);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const save = async () => {
     if (!form.name.trim()) { setError('Nome é obrigatório'); return; }
@@ -503,6 +544,7 @@ export function OrgEditor({ mode, initial, onClose, onSaved }) {
       for (const p of changes) {
         await apiFetch(`/api/market/projects/${p.id}`, { method: 'PUT', body: JSON.stringify(p) });
       }
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved(orgId);
     } catch (e) {
       setError(String(e.message || e));
@@ -511,13 +553,16 @@ export function OrgEditor({ mode, initial, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.13) — clicar fora não fecha mais o editor. */}
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">{mode === 'create' ? 'Nova organização' : 'Editar organização'}</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
           <Field label="Nome *"><input value={form.name} onChange={(e) => set({ name: e.target.value })} className="input" /></Field>
           <div className="grid grid-cols-2 gap-3">
@@ -564,13 +609,25 @@ export function OrgEditor({ mode, initial, onClose, onSaved }) {
           </div>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+          <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
           <button type="button" onClick={save} disabled={saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
             {saving && <Loader2 className="h-4 w-4 animate-spin" />} Salvar
           </button>
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 
@@ -581,6 +638,11 @@ function AddContactModal({ orgId, onClose, onLinked }) {
   const [role, setRole] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  // Sem rascunho: são dois campos (contato + cargo) que só fazem sentido
+  // dentro deste fluxo de vínculo. Ganha só a proteção contra fechamento
+  // acidental (v2.25.13).
+  const guard = useUnsavedGuard({ isDirty: !!personId || !!role.trim(), onClose });
 
   useEffect(() => {
     apiFetch('/api/network/people').then((rows) => setPeople(rows || [])).catch(() => setPeople([]));
@@ -603,11 +665,13 @@ function AddContactModal({ orgId, onClose, onLinked }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-xl bg-surface p-5 shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.13). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+      <div className="w-full max-w-md rounded-xl bg-surface p-5 shadow-soft">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-base font-bold text-ink">Adicionar contato</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
         {error && <div className="mb-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
         <div className="space-y-3">
@@ -620,12 +684,24 @@ function AddContactModal({ orgId, onClose, onLinked }) {
           <Field label="Cargo na organização"><input value={role} onChange={(e) => setRole(e.target.value)} className="input" /></Field>
         </div>
         <div className="mt-4 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+          <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
           <button type="button" onClick={link} disabled={saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
             {saving && <Loader2 className="h-4 w-4 animate-spin" />} Vincular
           </button>
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

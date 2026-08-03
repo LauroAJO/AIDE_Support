@@ -9,6 +9,13 @@ import Avatar from '../shared/Avatar';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
 import MarkdownEditor from '../shared/MarkdownEditor';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 import { stripMarkdown } from '../../lib/markdownRenderer';
 import { OrgEditor } from './OrganizationsView';
 import {
@@ -475,6 +482,13 @@ function LinkContactModal({ orgId, existingPersonIds, onClose, onLinked }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  // Sem rascunho: é um seletor de vínculo, não um cadastro completo. Ganha só
+  // a proteção contra fechamento acidental (v2.25.13).
+  const guard = useUnsavedGuard({
+    isDirty: !!selected || !!newName.trim() || !!role.trim(),
+    onClose,
+  });
+
   useEffect(() => {
     apiFetch('/api/network/people').then((rows) => setPeople(rows || [])).catch(() => setPeople([]));
   }, []);
@@ -526,11 +540,13 @@ function LinkContactModal({ orgId, existingPersonIds, onClose, onLinked }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.13). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl border border-line bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h3 className="text-base font-bold text-ink">Vincular contato</h3>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
 
         {mode === 'search' ? (
@@ -607,7 +623,7 @@ function LinkContactModal({ orgId, existingPersonIds, onClose, onLinked }) {
             className="input mb-2"
           />
           <div className="flex justify-end gap-2">
-            <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+            <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
             {mode === 'search' ? (
               <button type="button" onClick={link} disabled={saving || !selected} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
                 {saving && <Loader2 className="h-4 w-4 animate-spin" />} Vincular
@@ -621,6 +637,18 @@ function LinkContactModal({ orgId, existingPersonIds, onClose, onLinked }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 
@@ -690,14 +718,23 @@ function ProjectsTab({ org, onReload }) {
   );
 }
 
+const EMPTY_MARKET_PROJECT = {
+  name: '', acronym: '', type: 'research', status: 'active', description: '',
+  start_date: '', end_date: '', relevance_score: 3,
+};
+
 function NewProjectModal({ orgId, orgName, onClose, onCreated }) {
-  const [form, setForm] = useState({
-    name: '', acronym: '', type: 'research', status: 'active', description: '',
-    start_date: '', end_date: '', relevance_score: 3,
-  });
+  // Rascunho por organização (v2.25.13) — cadastro completo o bastante para
+  // doer se perder no meio.
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`market-project-${orgId || 'new'}`, EMPTY_MARKET_PROJECT);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(EMPTY_MARKET_PROJECT);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const save = async () => {
     if (!form.name.trim()) { setError('Nome é obrigatório'); return; }
@@ -708,6 +745,7 @@ function NewProjectModal({ orgId, orgName, onClose, onCreated }) {
         method: 'POST',
         body: JSON.stringify({ ...form, organization_id: orgId }),
       });
+      clearDraft();
       onCreated();
     } catch (e) {
       setError(String(e.message || e));
@@ -716,13 +754,16 @@ function NewProjectModal({ orgId, orgName, onClose, onCreated }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-2xl border border-line bg-surface p-5 shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.13). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-line bg-surface p-5 shadow-soft">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-base font-bold text-ink">Nova iniciativa</h3>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
         <p className="mb-3 text-xs text-muted">Coordenadora: <span className="font-medium text-ink2">{orgName}</span></p>
+        {hasDraft && <DraftBanner onDiscard={discardDraft} />}
         {error && <div className="mb-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
         <div className="space-y-3">
           <input value={form.name} onChange={(e) => set({ name: e.target.value })} placeholder="Nome *" className="input" />
@@ -736,13 +777,25 @@ function NewProjectModal({ orgId, orgName, onClose, onCreated }) {
           <textarea value={form.description} onChange={(e) => set({ description: e.target.value })} placeholder="Descrição" className="input min-h-[70px]" />
         </div>
         <div className="mt-4 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+          <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
           <button type="button" onClick={save} disabled={saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
             {saving && <Loader2 className="h-4 w-4 animate-spin" />} Criar
           </button>
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 

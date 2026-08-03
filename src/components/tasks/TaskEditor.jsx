@@ -6,6 +6,13 @@ import { STATUSES, STATUS_LABELS, calcScore, scoreColor } from '../../lib/tasks'
 import Avatar from '../shared/Avatar';
 import MentionText from './MentionText';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 const EMPTY = {
   title: '',
@@ -72,7 +79,13 @@ function Slider({ label, value, onChange }) {
 export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, initialStatus }) {
   const currentUser = useStore((s) => s.user);
   const isEdit = !!task;
-  const [form, setForm] = useState(() => fromTask(task, initialStatus));
+  // Rascunho: o formulário inteiro vive no localStorage enquanto não é salvo
+  // (v2.25.13). `setForm` continua com a mesma assinatura do useState, então
+  // todos os `set({...})` abaixo seguem inalterados.
+  const pristine = useMemo(() => fromTask(task, initialStatus), [task, initialStatus]);
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`task-${task?.id || 'new'}`, pristine);
   const areas = useStore((s) => s.areas);
   const projects = useStore((s) => s.projects);
   const fronts = useStore((s) => s.fronts);
@@ -119,6 +132,19 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
 
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
   const score = calcScore(form.urgency, form.importance);
+
+  // "Sujo" = formulário difere do estado inicial OU há texto pendente em algum
+  // dos campos auxiliares (tag/subtarefa/comentário digitados mas não
+  // adicionados). Um rascunho restaurado já nasce sujo — e deve mesmo.
+  const isDirty = (
+    JSON.stringify(form) !== JSON.stringify(pristine)
+    || !!tagInput.trim() || !!subInput.trim() || !!commentInput.trim()
+  );
+  // `enabled: !showDrivePicker` — com o seletor do Drive aberto por cima, o
+  // Escape pertence a ele, não a este editor.
+  const guard = useUnsavedGuard({
+    isDirty, onClose, onDiscard: discardDraft, enabled: !showDrivePicker,
+  });
 
   const mentionCandidates = mentionQuery
     ? users.filter((u) => (u.name || u.email || '').toLowerCase().includes(mentionQuery.toLowerCase()))
@@ -239,6 +265,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
       const saved = isEdit
         ? await apiFetch(`/api/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify(payload) })
         : await apiFetch('/api/tasks', { method: 'POST', body: JSON.stringify(payload) });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved(saved);
     } catch {
       setError('Falha ao salvar a tarefa.');
@@ -252,6 +279,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
     setSaving(true);
     try {
       await apiFetch(`/api/tasks/${task.id}`, { method: 'DELETE' });
+      clearDraft();
       onDeleted(task.id);
     } catch {
       setError('Falha ao excluir.');
@@ -261,11 +289,11 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
 
   return (
     <>
-    <div className="fixed inset-0 z-30 flex justify-end bg-black/20" onClick={onClose}>
-      <div
-        className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-md"
-        onClick={(e) => e.stopPropagation()}
-      >
+    {/* Backdrop SEM onClick (v2.25.13): clicar fora não fecha mais o editor —
+        era a principal causa de perda de dados. Só o X, o Escape (com
+        confirmação quando há alterações) e Salvar fecham. */}
+    <div className="fixed inset-0 z-30 flex justify-end bg-black/20">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-md">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">
@@ -273,7 +301,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
           </h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={guard.requestClose}
             className="rounded-md p-1 text-ink2 transition hover:bg-surface2 hover:text-ink"
           >
             <X className="h-5 w-5" />
@@ -282,6 +310,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
 
         {/* Body */}
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && (
             <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
               {error}
@@ -651,6 +680,17 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
     {showDrivePicker && (
       <DrivePicker onClose={() => setShowDrivePicker(false)} onPick={addAttachment} />
     )}
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
     </>
   );
 }
@@ -685,12 +725,18 @@ function DrivePicker({ onClose, onPick }) {
     }
   };
 
+  // Escape fecha o picker (busca no Drive não é dado do usuário a preservar);
+  // o clique no backdrop, não (v2.25.13) — fechava o picker por engano no meio
+  // de uma busca.
+  useEffect(() => {
+    const onKeyDown = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div
-        className="flex max-h-[80vh] w-full max-w-md flex-col rounded-xl bg-surface shadow-soft"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4">
+      <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-xl bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h3 className="text-base font-bold text-ink">Anexar do Drive</h3>
           <button type="button" onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">

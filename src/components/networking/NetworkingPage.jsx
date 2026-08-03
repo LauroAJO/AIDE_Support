@@ -10,6 +10,13 @@ import { apiFetch } from '../../lib/api';
 import { MarkdownViewer } from '../../lib/markdownRenderer';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ErrorBoundary from '../shared/ErrorBoundary';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 const INSTITUTION_TYPES = [
   ['company', 'Empresa'],
@@ -2655,25 +2662,53 @@ function connectsTo(focusId, otherId, connections, personRoles) {
 function NetworkEditor({ editor, institutions, people, connections, areas, projects, fronts, tasks, onClose, onSaved }) {
   const { kind, mode, payload } = editor;
   const isPerson = kind === 'person';
-  const [form, setForm] = useState(() => ({
-    ...payload,
-    roles: payload.roles && payload.roles.length > 0
-      ? payload.roles
-      : (isPerson ? [{ role: payload.role || '', institution_id: '', institution_name: payload.institution || '', start_date: '', end_date: '', current: true }] : []),
-    entity_links: payload.entity_links || [],
-  }));
-  const [tagInput, setTagInput] = useState((payload.tags || []).join(', '));
+
+  // Rascunho (v2.25.13): formulário + tags + conexões pendentes viajam juntos
+  // num objeto só, persistido em `aide-draft-person-<id|new>` (ou
+  // `-institution-`). Os setters abaixo mantêm exatamente a assinatura antiga,
+  // então nenhum dos ~20 `setForm({ ...form, campo })` precisou mudar.
+  const pristine = useMemo(() => ({
+    form: {
+      ...payload,
+      roles: payload.roles && payload.roles.length > 0
+        ? payload.roles
+        : (isPerson ? [{ role: payload.role || '', institution_id: '', institution_name: payload.institution || '', start_date: '', end_date: '', current: true }] : []),
+      entity_links: payload.entity_links || [],
+    },
+    tagInput: (payload.tags || []).join(', '),
+    pendingConnections: [],
+  }), [payload, isPerson]);
+
+  const {
+    value: draft, setValue: setDraft, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`${isPerson ? 'person' : 'institution'}-${payload.id || 'new'}`, pristine);
+
+  const form = draft.form;
+  const tagInput = draft.tagInput;
+  const pendingConnections = draft.pendingConnections;   // [{ target, type }]
+  const setForm = (next) =>
+    setDraft((d) => ({ ...d, form: typeof next === 'function' ? next(d.form) : next }));
+  const setTagInput = (v) => setDraft((d) => ({ ...d, tagInput: v }));
+  const setPendingConnections = (next) =>
+    setDraft((d) => ({
+      ...d,
+      pendingConnections: typeof next === 'function' ? next(d.pendingConnections) : next,
+    }));
+
   // Conexões pessoa-a-pessoa: as já salvas (edição) removem na hora via DELETE;
   // as novas ficam pendentes até "Salvar" (a pessoa pode ainda nem ter id, no
   // modo criação) e são enviadas uma a uma via POST /api/network/connections.
+  // `existingConns` é estado do servidor — fica FORA do rascunho de propósito.
   const [existingConns, setExistingConns] = useState(() => (
     isPerson && mode === 'edit'
       ? (connections || []).filter((c) => c.person_a_id === payload.id || c.person_b_id === payload.id)
       : []
   ));
-  const [pendingConnections, setPendingConnections] = useState([]); // [{ target, type }]
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const otherPersonName = (c) => {
     const otherId = c.person_a_id === payload.id ? c.person_b_id : c.person_a_id;
@@ -2754,6 +2789,7 @@ function NetworkEditor({ editor, institutions, people, connections, areas, proje
           });
         }
       }
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved();
     } catch (e) {
       setError(String((e && e.message) || e).slice(0, 200));
@@ -2763,16 +2799,19 @@ function NetworkEditor({ editor, institutions, people, connections, areas, proje
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.13) — clicar fora não fecha mais o editor. */}
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="flex items-center gap-2 text-base font-bold text-ink">
             {isPerson ? <User className="h-4 w-4 text-accent" /> : <Building2 className="h-4 w-4 text-accent" />}
             {titles[kind]}
           </h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
 
           <Field label="Nome">
@@ -2990,9 +3029,28 @@ function NetworkEditor({ editor, institutions, people, connections, areas, proje
           <button onClick={save} disabled={busy} className="flex-1 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60">
             {busy ? 'Salvando...' : 'Salvar'}
           </button>
+          <button
+            type="button"
+            onClick={guard.requestClose}
+            className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2"
+          >
+            Cancelar
+          </button>
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 

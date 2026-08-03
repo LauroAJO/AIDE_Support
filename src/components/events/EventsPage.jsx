@@ -8,6 +8,13 @@ import {
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 import {
   StarRating, Badge, parseTags,
   EVENT_TYPE_LABELS, EVENT_TYPE_FILTERS, EventTypeBadge,
@@ -619,6 +626,8 @@ function LinkVenueModal({ eventId, venues, existing, onClose, onLinked }) {
   const [linkType, setLinkType] = useState('proceedings');
   const [saving, setSaving] = useState(false);
   const available = venues.filter((v) => !existing.includes(v.id));
+  // Sem rascunho: dois selects. Só a proteção contra fechamento acidental.
+  const guard = useUnsavedGuard({ isDirty: !!venueId, onClose });
 
   const save = async () => {
     if (!venueId) return;
@@ -635,7 +644,8 @@ function LinkVenueModal({ eventId, venues, existing, onClose, onLinked }) {
   };
 
   return (
-    <ModalShell title="Vincular venue" onClose={onClose} maxWidth={440}>
+    <>
+    <ModalShell title="Vincular venue" onClose={guard.requestClose} maxWidth={440}>
       <div className="space-y-3">
         <Field label="Venue">
           <select value={venueId} onChange={(e) => setVenueId(e.target.value)} className="input">
@@ -650,12 +660,24 @@ function LinkVenueModal({ eventId, venues, existing, onClose, onLinked }) {
         </Field>
       </div>
       <div className="mt-4 flex justify-end gap-2">
-        <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+        <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
         <button type="button" onClick={save} disabled={!venueId || saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
           {saving && <Loader2 className="h-4 w-4 animate-spin" />} Vincular
         </button>
       </div>
     </ModalShell>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 
@@ -665,6 +687,9 @@ function PipelineModal({ event, onClose, onCreated }) {
   const [type, setType] = useState('collaboration');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // Só um par de botões de tipo, sem texto livre: nada a preservar. A guarda
+  // entra apenas para dar o Escape (o clique fora já não fecha mais).
+  const guard = useUnsavedGuard({ isDirty: false, onClose });
 
   const create = async () => {
     setSaving(true);
@@ -699,7 +724,7 @@ function PipelineModal({ event, onClose, onCreated }) {
   };
 
   return (
-    <ModalShell title="Adicionar ao Pipeline de Carreira" onClose={onClose} maxWidth={460}>
+    <ModalShell title="Adicionar ao Pipeline de Carreira" onClose={guard.requestClose} maxWidth={460}>
       <p className="text-sm text-ink2">
         Cria uma oportunidade de carreira vinculada a <span className="font-semibold">{event.acronym || event.name}</span>.
       </p>
@@ -722,7 +747,7 @@ function PipelineModal({ event, onClose, onCreated }) {
       </div>
       {error && <div className="mt-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
       <div className="mt-4 flex justify-end gap-2">
-        <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+        <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
         <button type="button" onClick={create} disabled={saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
           {saving && <Loader2 className="h-4 w-4 animate-spin" />} Criar oportunidade
         </button>
@@ -734,11 +759,25 @@ function PipelineModal({ event, onClose, onCreated }) {
 // ---- Editor completo de evento (drawer) -------------------------------------
 
 function EventEditor({ mode, initial, onClose, onSaved }) {
-  const [form, setForm] = useState(initial);
-  const [tagsText, setTagsText] = useState((initial.tags || []).join(', '));
+  // Rascunho (v2.25.13) — formulário + tags num objeto só.
+  const pristine = useMemo(() => ({
+    form: initial, tagsText: (initial.tags || []).join(', '),
+  }), [initial]);
+  const {
+    value: draft, setValue: setDraft, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`event-${initial.id || 'new'}`, pristine);
+  const form = draft.form;
+  const tagsText = draft.tagsText;
+  const setForm = (next) =>
+    setDraft((d) => ({ ...d, form: typeof next === 'function' ? next(d.form) : next }));
+  const setTagsText = (v) => setDraft((d) => ({ ...d, tagsText: v }));
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const save = async () => {
     if (!form.name.trim()) { setError('Nome é obrigatório'); return; }
@@ -755,6 +794,7 @@ function EventEditor({ mode, initial, onClose, onSaved }) {
       const saved = mode === 'create'
         ? await apiFetch('/api/events', { method: 'POST', body: JSON.stringify(payload) })
         : await apiFetch(`/api/events/${form.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved(saved.id);
     } catch (e) {
       setError(String(e.message || e));
@@ -763,7 +803,9 @@ function EventEditor({ mode, initial, onClose, onSaved }) {
   };
 
   return (
-    <DrawerShell title={mode === 'create' ? 'Novo evento' : 'Editar evento'} onClose={onClose}>
+    <>
+    <DrawerShell title={mode === 'create' ? 'Novo evento' : 'Editar evento'} onClose={guard.requestClose}>
+      {hasDraft && <DraftBanner onDiscard={discardDraft} />}
       {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
       <div className="grid grid-cols-3 gap-3">
         <div className="col-span-2"><Field label="Nome *"><input value={form.name} onChange={(e) => set({ name: e.target.value })} className="input" /></Field></div>
@@ -835,8 +877,20 @@ function EventEditor({ mode, initial, onClose, onSaved }) {
       </div>
       <Field label="Tags (separadas por vírgula)"><input value={tagsText} onChange={(e) => setTagsText(e.target.value)} className="input" /></Field>
       <Field label="Notas"><textarea value={form.notes} onChange={(e) => set({ notes: e.target.value })} className="input min-h-[70px]" /></Field>
-      <DrawerFooter onClose={onClose} onSave={save} saving={saving} />
+      <DrawerFooter onClose={guard.requestClose} onSave={save} saving={saving} />
     </DrawerShell>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 
@@ -1054,11 +1108,25 @@ function VenueDetail({ id, onChanged, onEditFull, onDeleted }) {
 }
 
 function VenueEditor({ mode, initial, onClose, onSaved }) {
-  const [form, setForm] = useState(initial);
-  const [tagsText, setTagsText] = useState((initial.tags || []).join(', '));
+  // Rascunho (v2.25.13) — mesmo padrão do EventEditor.
+  const pristine = useMemo(() => ({
+    form: initial, tagsText: (initial.tags || []).join(', '),
+  }), [initial]);
+  const {
+    value: draft, setValue: setDraft, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`venue-${initial.id || 'new'}`, pristine);
+  const form = draft.form;
+  const tagsText = draft.tagsText;
+  const setForm = (next) =>
+    setDraft((d) => ({ ...d, form: typeof next === 'function' ? next(d.form) : next }));
+  const setTagsText = (v) => setDraft((d) => ({ ...d, tagsText: v }));
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const save = async () => {
     if (!form.name.trim()) { setError('Nome é obrigatório'); return; }
@@ -1074,6 +1142,7 @@ function VenueEditor({ mode, initial, onClose, onSaved }) {
       const saved = mode === 'create'
         ? await apiFetch('/api/venues', { method: 'POST', body: JSON.stringify(payload) })
         : await apiFetch(`/api/venues/${form.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved(saved.id);
     } catch (e) {
       setError(String(e.message || e));
@@ -1082,7 +1151,9 @@ function VenueEditor({ mode, initial, onClose, onSaved }) {
   };
 
   return (
-    <DrawerShell title={mode === 'create' ? 'Novo venue' : 'Editar venue'} onClose={onClose}>
+    <>
+    <DrawerShell title={mode === 'create' ? 'Novo venue' : 'Editar venue'} onClose={guard.requestClose}>
+      {hasDraft && <DraftBanner onDiscard={discardDraft} />}
       {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
       <div className="grid grid-cols-3 gap-3">
         <div className="col-span-2"><Field label="Nome *"><input value={form.name} onChange={(e) => set({ name: e.target.value })} className="input" /></Field></div>
@@ -1123,8 +1194,20 @@ function VenueEditor({ mode, initial, onClose, onSaved }) {
       </div>
       <Field label="Tags (separadas por vírgula)"><input value={tagsText} onChange={(e) => setTagsText(e.target.value)} className="input" /></Field>
       <Field label="Notas"><textarea value={form.notes} onChange={(e) => set({ notes: e.target.value })} className="input min-h-[70px]" /></Field>
-      <DrawerFooter onClose={onClose} onSave={save} saving={saving} />
+      <DrawerFooter onClose={guard.requestClose} onSave={save} saving={saving} />
     </DrawerShell>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 
@@ -1531,12 +1614,22 @@ const IMPORT_EXAMPLE = `{
 }`;
 
 function ImportModal({ onClose, onImported }) {
-  const [text, setText] = useState('');
+  // O JSON colado aqui costuma ser grande e vir de outra ferramenta — perder
+  // isso por um clique fora era especialmente caro. Rascunho + guarda
+  // (v2.25.13).
+  const {
+    value: text, setValue: setText, clearDraft, discardDraft, hasDraft,
+  } = useDraft('event-import', '');
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState('');
   const [showHint, setShowHint] = useState(false);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
+
+  // Depois de importado não há mais nada a preservar — fecha direto.
+  const guard = useUnsavedGuard({
+    isDirty: !result && !!text.trim(), onClose, onDiscard: discardDraft,
+  });
 
   const validate = () => {
     setError('');
@@ -1560,6 +1653,7 @@ function ImportModal({ onClose, onImported }) {
     try {
       const res = await apiFetch('/api/events/import', { method: 'POST', body: JSON.stringify(preview.parsed) });
       setResult(res);
+      clearDraft();          // importado: o JSON já foi para o servidor
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -1568,7 +1662,9 @@ function ImportModal({ onClose, onImported }) {
   };
 
   return (
-    <ModalShell title="Importar Eventos e Venues" onClose={onClose} maxWidth={720}>
+    <>
+    <ModalShell title="Importar Eventos e Venues" onClose={guard.requestClose} maxWidth={720}>
+      {hasDraft && <DraftBanner onDiscard={discardDraft} label="JSON em rascunho recuperado" />}
       <p className="text-sm text-muted">Cole o JSON de importação abaixo</p>
 
       <button type="button" onClick={() => setShowHint((v) => !v)} className="mt-2 flex items-center gap-1 text-xs text-accent hover:underline">
@@ -1622,7 +1718,7 @@ function ImportModal({ onClose, onImported }) {
       )}
 
       <div className="mt-4 flex justify-end gap-2">
-        <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">
+        <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">
           {result ? 'Fechar' : 'Cancelar'}
         </button>
         {result ? (
@@ -1636,6 +1732,18 @@ function ImportModal({ onClose, onImported }) {
         )}
       </div>
     </ModalShell>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message="O JSON colado ainda não foi importado. Deseja descartá-lo?"
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 
@@ -1652,10 +1760,15 @@ function Field({ label, children }) {
   );
 }
 
+// Backdrop SEM onClick nos dois shells (v2.25.13): como são compartilhados
+// por ImportModal, LinkVenueModal, PipelineModal, EventEditor e VenueEditor,
+// remover o fechamento por clique fora aqui conserta os cinco de uma vez.
+// `onClose` recebido já é a versão protegida (useUnsavedGuard.requestClose)
+// quando o modal tem dados a preservar.
 function ModalShell({ title, onClose, maxWidth = 560, children }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div className="max-h-[90vh] w-full overflow-y-auto rounded-xl bg-surface p-5 shadow-soft" style={{ maxWidth }} onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+      <div className="max-h-[90vh] w-full overflow-y-auto rounded-xl bg-surface p-5 shadow-soft" style={{ maxWidth }}>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-base font-bold text-ink">{title}</h2>
           <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
@@ -1668,8 +1781,8 @@ function ModalShell({ title, onClose, maxWidth = 560, children }) {
 
 function DrawerShell({ title, onClose, children }) {
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">{title}</h2>
           <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>

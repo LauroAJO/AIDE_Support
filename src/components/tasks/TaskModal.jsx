@@ -5,6 +5,13 @@ import { apiFetch } from '../../lib/api';
 import Avatar from '../shared/Avatar';
 import MentionText from './MentionText';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 import { MarkdownViewer } from '../../lib/markdownRenderer';
 import { scoreColor, STATUS_LABELS, STATUS_COLORS, formatDate, isOverdue, WEEKDAY_CHIPS } from '../../lib/tasks';
 
@@ -222,7 +229,17 @@ function ParentTaskNote({ parentTaskId, onOpenTask }) {
 // uses the existing TaskEditor slide-in (opened via onEdit).
 export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, onOpenTask }) {
   const currentUser = useStore((s) => s.user);
-  const [comment, setComment] = useState('');
+  // O modal é read-only + ações rápidas que persistem na hora; o ÚNICO texto
+  // que se perdia ao fechar era o comentário em digitação — por isso ele tem
+  // rascunho próprio. Chave separada da do TaskEditor de propósito: aquela
+  // guarda o formulário inteiro (objeto), esta guarda só o comentário
+  // (string) — mesma chave para formatos diferentes corromperia a restauração.
+  const {
+    value: comment, setValue: setComment, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`task-comment-${task?.id || 'new'}`, '');
+  const guard = useUnsavedGuard({
+    isDirty: !!comment.trim(), onClose, onDiscard: discardDraft,
+  });
 
   if (!task) return null;
   const subs = task.subtasks || [];
@@ -243,10 +260,12 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
     ];
     onPersist(task, { comments: next });
     setComment('');
+    clearDraft();          // comentário enviado: rascunho não serve mais
   };
 
   const complete = () => {
     onPersist(task, { status: 'done' });
+    clearDraft();
     onClose();
   };
   const remove = async () => {
@@ -260,6 +279,7 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
       const res = await apiFetch(`/api/tasks/${task.id}`, { method: 'DELETE' });
       // eslint-disable-next-line no-console
       console.log('[TaskModal] DELETE respondeu OK', res);
+      clearDraft();
       onDelete(task.id);
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -277,11 +297,10 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 sm:p-4" onClick={onClose}>
-      <div
-        className="flex h-full w-full flex-col overflow-y-auto bg-surface sm:h-auto sm:max-h-[85vh] sm:max-w-[680px] sm:rounded-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <>
+    {/* Backdrop SEM onClick (v2.25.13): clicar fora não fecha mais o modal. */}
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 sm:p-4">
+      <div className="flex h-full w-full flex-col overflow-y-auto bg-surface sm:h-auto sm:max-h-[85vh] sm:max-w-[680px] sm:rounded-2xl">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 border-b border-line p-5">
           <div className="min-w-0">
@@ -307,12 +326,13 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
               </button>
             </div>
           </div>
-          <button onClick={onClose} className="shrink-0 rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+          <button onClick={guard.requestClose} className="shrink-0 rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
             <X className="h-5 w-5" />
           </button>
         </div>
 
         <div className="flex-1 space-y-4 p-5">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} label="Comentário em rascunho recuperado" />}
           {/* Meta */}
           <div className="flex flex-wrap items-center gap-3 text-xs">
             {task.assignedUser && (
@@ -445,5 +465,17 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message="Há um comentário não enviado. Deseja descartá-lo?"
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

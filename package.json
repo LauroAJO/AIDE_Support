@@ -7,7 +7,7 @@
     "dev": "vite",
     "worker": "wrangler pages dev dist --d1=DB:aide-db",
     "dev:full": "concurrently \"npm run dev\" \"npm run worker\"",
-    "build": "vite build && node scripts/postbuild.mjs",
+    "build": "vite build && node scripts/postbuild.mjs && node --check dist/_worker.js",
     "deploy": "npm run build && wrangler pages deploy dist",
     "db:migrate": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/migrate.ps1",
     "db:migrate:remote": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/migrate.ps1 -Remote"

@@ -116,6 +116,28 @@ export default function AdminPage() {
     }
   };
 
+  // Troca o papel de um usuário JÁ ATIVO (v2.25.18). Antes, o papel só podia
+  // ser definido no momento da aprovação — trocar o preset em "Permissões" não
+  // mexia em users.role, e a diferença passava despercebida: as áreas travadas
+  // por papel (Mercado, Carreira, Eventos, Hub) continuavam escondidas para
+  // quem já tinha ganhado o preset "Fixo". Editar aqui mantém os dois em sincronia.
+  const changeRole = async (target, newRole) => {
+    if (!newRole || newRole === target.role) return;
+    const userType = newRole === 'assistant_fixed' ? 'fixed' : 'external';
+    setBusyId(target.id);
+    try {
+      await apiFetch(`/api/users/${target.id}/role`, {
+        method: 'PUT',
+        body: JSON.stringify({ role: newRole, user_type: userType }),
+      });
+      await refresh();
+    } catch (e) {
+      alert(`Falha ao alterar papel: ${String((e && e.message) || e).slice(0, 200)}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   // Reactivate uses /api/users/:id/approve, which sets status='active' and
   // (re)binds the default preset. Sessions remain wiped — the user must
   // sign back in via Google.
@@ -242,7 +264,24 @@ export default function AdminPage() {
                     <td className="px-3 py-2"><Avatar user={u} size={32} /></td>
                     <td className="px-3 py-2 text-ink">{u.display_name || u.name || '—'}</td>
                     <td className="px-3 py-2 text-ink2">{u.email}</td>
-                    <td className="px-3 py-2 text-ink2">{ROLE_LABEL[u.role] || u.role}</td>
+                    <td className="px-3 py-2 text-ink2">
+                      {/* O owner não entra no seletor: existe só um, e rebaixá-lo
+                          por engano tirava o acesso à própria Administração. */}
+                      {u.role === 'owner' ? (
+                        ROLE_LABEL.owner
+                      ) : (
+                        <select
+                          value={u.role}
+                          disabled={busyId === u.id}
+                          onChange={(e) => changeRole(u, e.target.value)}
+                          title="Define o acesso às áreas restritas (Mercado, Carreira, Eventos, Hub)"
+                          className="rounded-md border border-line bg-surface px-2 py-1 text-xs text-ink disabled:opacity-50"
+                        >
+                          <option value="assistant_fixed">{ROLE_LABEL.assistant_fixed}</option>
+                          <option value="assistant_external">{ROLE_LABEL.assistant_external}</option>
+                        </select>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-ink2">{PRESET_LABEL[u.preset_id] || (u.preset_id ? u.preset_id : '—')}</td>
                     <td className="px-3 py-2 text-ink2">{formatLastSeen(u.last_seen_at)}</td>
                     <td className="px-3 py-2">
@@ -271,6 +310,11 @@ export default function AdminPage() {
             </tbody>
           </table>
         </div>
+        <p className="text-[11px] text-muted">
+          <strong>Tipo</strong> e <strong>Preset</strong> são independentes. O preset controla as
+          permissões por funcionalidade (Tarefas, Notas, Drive...); o tipo libera as áreas restritas
+          a fixos — Mercado, Carreira, Eventos e Hub. Trocar um não troca o outro.
+        </p>
       </section>
 
       {/* SECTION 3 — Archived users (collapsible) */}

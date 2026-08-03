@@ -6350,9 +6350,49 @@ async function handleMeetingStop(request, env, user) {
     return json({ error: 'O timer ativo não é uma reunião' }, 400);
   }
   // 1) Para o tempo DESTE usuário (comportamento original).
+  //
+  // A entrada de tempo É o registro de pagamento — o valor sai de
+  // duration_seconds × hourly_rate no relatório de Pagamentos. Fechar sem taxa
+  // gerava reunião contabilizada a R$ 0: acontece quando a taxa da assistente
+  // foi definida DEPOIS do início da reunião, porque o start copia a taxa
+  // vigente naquele instante. Aqui a taxa é preenchida se ainda estiver zerada,
+  // igual ao que stopActiveEntry() já fazia para timers comuns. Uma taxa já
+  // gravada (>0) é preservada — reunião antiga não muda de valor.
+  const duration = now - active.started_at;
+  let rate = active.hourly_rate || 0;
+  if (!rate) {
+    try {
+      const av = await env.DB.prepare(
+        'SELECT hourly_rate_brl, hourly_rate FROM availability WHERE user_id = ?'
+      ).bind(user.id).first();
+      rate = (av && (av.hourly_rate_brl || av.hourly_rate)) || 0;
+    } catch { /* tabela ausente — mantém 0 */ }
+  }
   await env.DB.prepare(
-    'UPDATE time_entries SET ended_at = ?, duration_seconds = ? WHERE id = ?'
-  ).bind(now, now - active.started_at, active.id).run();
+    'UPDATE time_entries SET ended_at = ?, duration_seconds = ?, hourly_rate = ? WHERE id = ?'
+  ).bind(now, duration, rate, active.id).run();
+
+  // 1b) Avisa o owner que a assistente saiu, com o tempo registrado (v2.25.18).
+  // Só para assistentes (o owner não precisa de aviso sobre si mesmo) e só a
+  // partir de 1 minuto, para não notificar clique errado. Best-effort: falha
+  // aqui não pode impedir o encerramento da reunião.
+  if (user.role !== 'owner' && duration > 60) {
+    try {
+      const { ownerId } = await getRoleUsers(env);
+      if (ownerId && ownerId !== user.id) {
+        const durationMin = Math.round(duration / 60);
+        await env.DB.prepare(
+          `INSERT INTO notifications
+             (id, from_user_id, to_user_id, type, title, body, task_id, note_id, read, created_at)
+           VALUES (?,?,?,'meeting_ended','Reunião encerrada',?,?,NULL,0,?)`
+        ).bind(
+          crypto.randomUUID(), user.id, ownerId,
+          `${user.name || user.email} saiu da reunião após ${durationMin} minutos`,
+          active.task_id || null, now
+        ).run();
+      }
+    } catch { /* notificação é acessório */ }
+  }
 
   // 2) Sobrou alguém? A checagem roda DEPOIS do update acima, então o próprio
   //    usuário já não conta.
@@ -8494,10 +8534,46 @@ async function handleCareerOpportunities(request, env, user) {
     } catch (e) {
       return json({ error: 'Falha ao criar oportunidade', detail: String(e) }, 500);
     }
+    // Vaga vinda do Hub (v2.25.18): abre uma tarefa de preenchimento. Só dispara
+    // quando há hub_short_id — oportunidade criada à mão no Pipeline, a partir de
+    // um evento ou de um email já nasce preenchida e não precisa da tarefa.
+    if (body.hub_short_id) {
+      await createHubCareerTask(env, user, { id, title: body.title, url: body.url });
+    }
     const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
     return json(shapeOpportunity(row), 201);
   }
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// Tarefa de preenchimento para uma vaga recém-enviada do Hub para a Carreira.
+// assigned_to fica NULL de propósito: aparece em Tarefas sem dono, e qualquer
+// assistente pode pegar. Best-effort — se a tarefa falhar, a oportunidade já foi
+// criada e não deve ser desfeita por causa disso.
+async function createHubCareerTask(env, user, opportunity) {
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(
+      `INSERT INTO tasks
+        (id, title, description, assigned_to, created_by, urgency, importance, energy,
+         status, tags, comments, subtasks, time_entries, favorited, drive_attachments,
+         source, opportunity_id, created_at, updated_at)
+       VALUES (?,?,?,NULL,?,6,7,5,'todo','[]','[]','[]','[]',0,'[]','hub_career',?,?,?)`
+    ).bind(
+      crypto.randomUUID(),
+      `Preencher card: ${opportunity.title}`,
+      'Vaga enviada do Hub para o Pipeline de Carreira.\n\n'
+        + 'Preencher informações do card: empresa, prazo, requisitos, próximos passos.'
+        + (opportunity.url ? `\n\nVaga original: ${opportunity.url}` : ''),
+      user.id,
+      opportunity.id,
+      now,
+      now
+    ).run();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function handleCareerOpportunityItem(request, env, user, id) {

@@ -300,7 +300,7 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
       setAdded((m) => ({ ...m, [item.id]: 'done' }));
       setItems((prev) => prev.filter((it) => it.id !== item.id));
       if (selected && selected.id === item.id) setSelected(null);
-      showToast('Vaga adicionada à Carreira e arquivada no Hub');
+      showToast('✅ Vaga enviada para Carreira — tarefa criada para preenchimento');
     } catch (e) {
       setAdded((m) => { const n = { ...m }; delete n[item.id]; return n; });
       showToast(`Falha ao adicionar: ${String(e.message || e).slice(0, 80)}`);

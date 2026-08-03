@@ -6,6 +6,13 @@ import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { canDo } from '../../lib/can';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 const DEFAULT_COLOR = '#6366f1';
 const PRESET_COLORS = [
@@ -318,9 +325,15 @@ function IconButton({ onClick, icon, danger, small }) {
 
 function EditorModal({ editor, areas, projects, onClose, onSaved }) {
   const { kind, mode, payload } = editor;
-  const [form, setForm] = useState(payload);
+  // Rascunho por entidade (v2.25.16).
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`${kind}-${payload?.id || 'new'}`, payload);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(payload);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const titles = {
     area: mode === 'create' ? 'Nova Área' : 'Editar Área',
@@ -338,6 +351,7 @@ function EditorModal({ editor, areas, projects, onClose, onSaved }) {
       const path = mode === 'edit' ? `${base}/${form.id}` : base;
       const method = mode === 'edit' ? 'PUT' : 'POST';
       await apiFetch(path, { method, body: JSON.stringify(form) });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved();
     } catch (e) {
       setError(String((e && e.message) || e).slice(0, 200));
@@ -347,13 +361,16 @@ function EditorModal({ editor, areas, projects, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">{titles[kind]}</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-4 w-4" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-4 w-4" /></button>
         </div>
         <div className="space-y-3 px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-ink2">Nome</span>
@@ -428,7 +445,7 @@ function EditorModal({ editor, areas, projects, onClose, onSaved }) {
           </div>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button onClick={onClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
+          <button onClick={guard.requestClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
             Cancelar
           </button>
           <button
@@ -441,5 +458,17 @@ function EditorModal({ editor, areas, projects, onClose, onSaved }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

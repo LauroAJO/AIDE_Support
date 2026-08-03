@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { getToken } from '../../lib/auth';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 
 const ENDPOINT_BASE = {
   note: '/api/notes',
@@ -291,6 +292,9 @@ function DrivePickerModal({ onClose, onPick }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Seletor read-only: o Escape fecha direto; o clique fora não fecha mais
+  // (v2.25.16) — fechava o picker no meio de uma busca.
+  const guard = useUnsavedGuard({ isDirty: false, onClose });
 
   const search = async () => {
     setLoading(true);
@@ -307,13 +311,13 @@ function DrivePickerModal({ onClose, onPick }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl border border-line bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h3 className="flex items-center gap-2 text-base font-bold text-ink">
             <LinkIcon className="h-4 w-4 text-accent" /> Vincular do Drive
           </h3>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2">
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2">
             <X className="h-4 w-4" />
           </button>
         </div>

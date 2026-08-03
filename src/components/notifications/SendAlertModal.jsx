@@ -1,6 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 function todayISO() {
   const d = new Date();
@@ -8,15 +15,29 @@ function todayISO() {
 }
 
 export default function SendAlertModal({ otherUser, onClose, onSent }) {
-  const [title, setTitle] = useState('');
-  const [message, setMessage] = useState('');
-  const [taskId, setTaskId] = useState('');
+  // Rascunho por destinatário (v2.25.16).
+  const pristine = useMemo(() => ({
+    title: '', message: '', taskId: '', mode: 'now', date: todayISO(), time: '09:00',
+  }), []);
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`alert-send-${otherUser?.id || 'none'}`, pristine);
+
+  const { title, message, taskId, mode, date, time } = form;
+  const setField = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  const setTitle = setField('title');
+  const setMessage = setField('message');
+  const setTaskId = setField('taskId');
+  const setMode = setField('mode');
+  const setDate = setField('date');
+  const setTime = setField('time');
+
   const [tasks, setTasks] = useState([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
-  const [mode, setMode] = useState('now'); // 'now' | 'schedule'
-  const [date, setDate] = useState(todayISO());
-  const [time, setTime] = useState('09:00');
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   useEffect(() => {
     apiFetch('/api/tasks')
@@ -53,6 +74,7 @@ export default function SendAlertModal({ otherUser, onClose, onSent }) {
             send_at: sendAt.toISOString(),
           }),
         });
+        clearDraft();          // enviado: o rascunho não serve mais
         onSent(`Aviso agendado para ${date.split('-').reverse().join('/')} às ${time}`);
       } else {
         await apiFetch('/api/notifications', {
@@ -65,6 +87,7 @@ export default function SendAlertModal({ otherUser, onClose, onSent }) {
             task_id: taskId || null,
           }),
         });
+        clearDraft();
         onSent();
       }
     } catch {
@@ -74,15 +97,18 @@ export default function SendAlertModal({ otherUser, onClose, onSent }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">Enviar aviso</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
             <X className="h-5 w-5" />
           </button>
         </div>
         <div className="space-y-3 px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && (
             <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>
           )}
@@ -136,7 +162,7 @@ export default function SendAlertModal({ otherUser, onClose, onSent }) {
           )}
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button onClick={onClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
+          <button onClick={guard.requestClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
             Cancelar
           </button>
           <button
@@ -149,5 +175,17 @@ export default function SendAlertModal({ otherUser, onClose, onSent }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

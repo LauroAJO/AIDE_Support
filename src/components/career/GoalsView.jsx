@@ -3,6 +3,13 @@ import { Plus, X, Loader2, Check, RotateCcw, AlertTriangle } from 'lucide-react'
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 import { TRACK_LABELS, trackColor, daysUntil, PRIORITY_LABELS } from './careerShared';
 
 // Lembrete crítico fixo por trilha (hardcoded conforme spec da Etapa 5).
@@ -146,11 +153,19 @@ function Field({ label, children }) {
   );
 }
 
+const EMPTY_GOAL = { title: '', description: '', target_date: '', priority: 3, notes: '' };
+
 function GoalEditor({ track, onClose, onSaved }) {
-  const [form, setForm] = useState({ title: '', description: '', target_date: '', priority: 3, notes: '' });
+  // Rascunho por trilha (v2.25.16).
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`goal-${track}`, EMPTY_GOAL);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(EMPTY_GOAL);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const save = async () => {
     if (!form.title.trim()) { setError('Título é obrigatório'); return; }
@@ -161,6 +176,7 @@ function GoalEditor({ track, onClose, onSaved }) {
         method: 'POST',
         body: JSON.stringify({ ...form, track, priority: Number(form.priority) || 3 }),
       });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved();
     } catch (e) {
       setError(String(e.message || e));
@@ -169,12 +185,15 @@ function GoalEditor({ track, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-xl bg-surface p-5 shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+      <div className="w-full max-w-md rounded-xl bg-surface p-5 shadow-soft">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-base font-bold text-ink">Nova meta — {TRACK_LABELS[track]}</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
+        {hasDraft && <DraftBanner onDiscard={discardDraft} />}
         {error && <div className="mb-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
         <div className="space-y-3">
           <Field label="Título *"><input value={form.title} onChange={(e) => set({ title: e.target.value })} className="input" /></Field>
@@ -188,12 +207,24 @@ function GoalEditor({ track, onClose, onSaved }) {
           <Field label="Notas"><textarea value={form.notes} onChange={(e) => set({ notes: e.target.value })} className="input min-h-[50px]" /></Field>
         </div>
         <div className="mt-4 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+          <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
           <button type="button" onClick={save} disabled={saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
             {saving && <Loader2 className="h-4 w-4 animate-spin" />} Salvar
           </button>
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

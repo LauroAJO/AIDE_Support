@@ -4,6 +4,13 @@ import {
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 const DEFAULT_COLOR = '#6366f1';
 
@@ -512,9 +519,17 @@ function InlineInput({ placeholder, value, onChange, onSubmit, onCancel }) {
 
 function HierarchyEditor({ editor, areas, projects, onClose, onSaved }) {
   const { kind, payload } = editor;
-  const [form, setForm] = useState(payload);
+  // Rascunho por entidade (v2.25.16). Chave com prefixo `tree-` para não
+  // colidir com o editor equivalente de AreasPage, que edita as MESMAS
+  // entidades a partir de outra tela.
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`tree-${kind}-${payload?.id || 'new'}`, payload);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(payload);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const titles = { area: 'Editar Área', project: 'Editar Projeto', front: 'Editar Frente' };
 
@@ -524,6 +539,7 @@ function HierarchyEditor({ editor, areas, projects, onClose, onSaved }) {
     try {
       const base = kind === 'area' ? '/api/areas' : kind === 'project' ? '/api/projects' : '/api/fronts';
       await apiFetch(`${base}/${form.id}`, { method: 'PUT', body: JSON.stringify(form) });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved();
     } catch (e) {
       setError(String((e && e.message) || e).slice(0, 200));
@@ -539,6 +555,7 @@ function HierarchyEditor({ editor, areas, projects, onClose, onSaved }) {
     try {
       const base = kind === 'area' ? '/api/areas' : kind === 'project' ? '/api/projects' : '/api/fronts';
       await apiFetch(`${base}/${form.id}`, { method: 'DELETE' });
+      clearDraft();
       onSaved();
     } catch (e) {
       setError(String((e && e.message) || e).slice(0, 200));
@@ -548,13 +565,16 @@ function HierarchyEditor({ editor, areas, projects, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">{titles[kind]}</h2>
-          <button onClick={onClose} className="text-ink2 hover:text-ink">×</button>
+          <button onClick={guard.requestClose} className="text-ink2 hover:text-ink">×</button>
         </div>
         <div className="space-y-3 px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-ink2">Nome</span>
@@ -587,7 +607,7 @@ function HierarchyEditor({ editor, areas, projects, onClose, onSaved }) {
             Excluir
           </button>
           <div className="flex gap-2">
-            <button onClick={onClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+            <button onClick={guard.requestClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
             <button onClick={save} disabled={busy} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60">
               {busy ? 'Salvando...' : 'Salvar'}
             </button>
@@ -595,5 +615,17 @@ function HierarchyEditor({ editor, areas, projects, onClose, onSaved }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

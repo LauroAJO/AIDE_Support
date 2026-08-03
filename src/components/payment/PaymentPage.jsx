@@ -6,6 +6,13 @@ import { canDo } from '../../lib/can';
 import { formatEuro, formatBrl } from '../../lib/time';
 import Avatar from '../shared/Avatar';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 function monthLabel(month) {
   const [y, m] = month.split('-');
@@ -71,6 +78,12 @@ export default function PaymentPage() {
   const [tabUserId, setTabUserId] = useState(null);  // null=default(Alice), 'all'=merged, or specific id
   const [allEntries, setAllEntries] = useState([]);  // populated only on the 'all' tab
   const [editRate, setEditRate] = useState(null); // { taskId, type, value }
+  // Popup de taxa: dois campos já preenchidos a partir da linha, sem rascunho
+  // (o estado vive aqui, no pai, e não há baseline para comparar). Ganha só a
+  // remoção do clique-fora + Escape para fechar (v2.25.16).
+  const rateGuard = useUnsavedGuard({
+    isDirty: false, onClose: () => setEditRate(null), enabled: !!editRate,
+  });
   const [editEntry, setEditEntry] = useState(null); // time_entry payload
   const [showManual, setShowManual] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -553,8 +566,8 @@ export default function PaymentPage() {
       </div>
 
       {editRate && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={() => setEditRate(null)}>
-          <div className="w-full max-w-xs rounded-xl border border-line bg-surface p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4">
+          <div className="w-full max-w-xs rounded-xl border border-line bg-surface p-4">
             <h3 className="mb-3 text-sm font-bold text-ink">Editar taxa da tarefa</h3>
             <label className="mb-2 block">
               <span className="mb-1 block text-xs text-ink2">Tipo</span>
@@ -569,7 +582,7 @@ export default function PaymentPage() {
               <input type="number" min="0" step="0.5" value={editRate.value} onChange={(e) => setEditRate({ ...editRate, value: e.target.value })} className="input" />
             </label>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setEditRate(null)} className="rounded-lg border border-line px-3 py-1.5 text-sm text-ink2">Cancelar</button>
+              <button onClick={rateGuard.requestClose} className="rounded-lg border border-line px-3 py-1.5 text-sm text-ink2">Cancelar</button>
               <button onClick={saveRate} className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white">Salvar</button>
             </div>
           </div>
@@ -646,9 +659,15 @@ function calcDurationSeconds(date, startTime, endDate, endTime) {
 }
 
 function EntryEditModal({ entry, defaultRate, onClose, onSaved }) {
-  const [form, setForm] = useState(entry);
+  // Rascunho por entrada (v2.25.16).
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`payment-entry-${entry?.id || 'new'}`, entry);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(entry);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const duration = calcDurationSeconds(form.date, form.time, form.endDate, form.endTime);
 
@@ -669,6 +688,7 @@ function EntryEditModal({ entry, defaultRate, onClose, onSaved }) {
           notes: form.notes,
         }),
       });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved();
     } catch (e) {
       setError(String((e && e.message) || e) || 'Erro ao salvar.');
@@ -678,15 +698,18 @@ function EntryEditModal({ entry, defaultRate, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">Editar entrada</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
             <X className="h-4 w-4" />
           </button>
         </div>
         <div className="space-y-3 px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && (
             <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>
           )}
@@ -734,7 +757,7 @@ function EntryEditModal({ entry, defaultRate, onClose, onSaved }) {
           </label>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button onClick={onClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
+          <button onClick={guard.requestClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
             Cancelar
           </button>
           <button
@@ -747,6 +770,18 @@ function EntryEditModal({ entry, defaultRate, onClose, onSaved }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 
@@ -757,15 +792,31 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
   const projects = useStore((s) => s.projects);
   const setProjects = useStore((s) => s.setProjects);
   const fronts = useStore((s) => s.fronts);
-  const [search, setSearch] = useState('');
-  const [taskId, setTaskId] = useState('');
-  const [date, setDate] = useState(todayStr());
-  const [startTime, setStartTime] = useState('09:00');
-  const [endTime, setEndTime] = useState('10:00');
-  const [rate, setRate] = useState(defaultRate || 0);
-  const [notes, setNotes] = useState('');
+  // Rascunho (v2.25.16): os campos do lançamento manual num objeto só; os
+  // setters abaixo preservam a assinatura antiga, então o JSX não mudou.
+  const pristine = useMemo(() => ({
+    search: '', taskId: '', date: todayStr(),
+    startTime: '09:00', endTime: '10:00', rate: defaultRate || 0, notes: '',
+  }), [defaultRate]);
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft('payment-manual', pristine);
+
+  const { search, taskId, date, startTime, endTime, rate, notes } = form;
+  const setField = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  const setSearch = setField('search');
+  const setTaskId = setField('taskId');
+  const setDate = setField('date');
+  const setStartTime = setField('startTime');
+  const setEndTime = setField('endTime');
+  const setRate = setField('rate');
+  const setNotes = setField('notes');
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   // Inline new-task creation
   const [createMode, setCreateMode] = useState(false);
@@ -852,6 +903,7 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
           manual: true,
         }),
       });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved();
     } catch (e) {
       setError(String((e && e.message) || e) || 'Erro ao salvar.');
@@ -861,15 +913,18 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-line bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">Adicionar tempo manualmente</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
             <X className="h-4 w-4" />
           </button>
         </div>
         <div className="space-y-3 px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && (
             <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>
           )}
@@ -1005,7 +1060,7 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
           </label>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button onClick={onClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
+          <button onClick={guard.requestClose} className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2">
             Cancelar
           </button>
           <button
@@ -1018,6 +1073,18 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 

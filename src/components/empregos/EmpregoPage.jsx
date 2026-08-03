@@ -10,6 +10,7 @@ import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
 import EditItemModal from '../shared/EditItemModal';
 import LinkTaskModal from '../shared/LinkTaskModal';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 import { countryMeta, detectCountry } from '../../lib/countryDetection';
 
 // project_id no hub_items que agrupa as vagas de emprego curadas.
@@ -625,17 +626,22 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
         />
       )}
 
-      <EditItemModal
-        item={editingItem}
-        onClose={() => setEditingItem(null)}
-        onSaved={handleSaved}
-      />
+      {/* Montagem condicional (v2.25.16) — ver comentário em VagasPhDPage. */}
+      {editingItem && (
+        <EditItemModal
+          item={editingItem}
+          onClose={() => setEditingItem(null)}
+          onSaved={handleSaved}
+        />
+      )}
 
-      <LinkTaskModal
-        item={linkingItem}
-        onClose={() => setLinkingItem(null)}
-        onLinked={handleLinked}
-      />
+      {linkingItem && (
+        <LinkTaskModal
+          item={linkingItem}
+          onClose={() => setLinkingItem(null)}
+          onLinked={handleLinked}
+        />
+      )}
 
       <ConfirmModal
         open={!!confirmItem}
@@ -831,9 +837,11 @@ function DetailModal({ item, onClose, onAdd, state, onDelete, onEdit, deleting }
   const topicos = Array.isArray(item.topicos) ? item.topicos : [];
   const title = effectiveTitle(item);
   const resumo = effectiveResumo(item);
+  // Painel somente-leitura: Escape fecha, clique fora não (v2.25.16).
+  const guard = useUnsavedGuard({ isDirty: false, onClose });
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg">
         <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
           <h2 className="flex items-center gap-1.5 text-base font-bold text-ink">
             {title}
@@ -861,7 +869,7 @@ function DetailModal({ item, onClose, onAdd, state, onDelete, onEdit, deleting }
                 {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
               </button>
             )}
-            <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+            <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
           </div>
         </div>
 

@@ -3,6 +3,13 @@ import { Plus, X, ExternalLink, Loader2, FileText } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 import { DocTypeBadge, DOC_TYPE_LABELS, DOC_TYPE_FILTERS } from './careerShared';
 
 const EMPTY_DOC = {
@@ -153,11 +160,17 @@ function Field({ label, children }) {
 }
 
 function DocumentEditor({ docs, opps, onClose, onSaved }) {
-  const [form, setForm] = useState(EMPTY_DOC);
+  // Rascunho (v2.25.16).
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft('career-doc-new', EMPTY_DOC);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [template, setTemplate] = useState('');
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(EMPTY_DOC);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   // Aplica um template: preenche tipo, título e versão. Tudo continua editável.
   const applyTemplate = (t) => {
@@ -175,6 +188,7 @@ function DocumentEditor({ docs, opps, onClose, onSaved }) {
         method: 'POST',
         body: JSON.stringify({ ...form, opportunity_id: form.opportunity_id || null }),
       });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved();
     } catch (e) {
       setError(String(e.message || e));
@@ -183,13 +197,16 @@ function DocumentEditor({ docs, opps, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-md" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-md">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">Novo documento</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
 
           {/* Templates de criação rápida — preenchem tipo/título/versão. */}
@@ -230,12 +247,24 @@ function DocumentEditor({ docs, opps, onClose, onSaved }) {
           <Field label="Notas"><textarea value={form.notes} onChange={(e) => set({ notes: e.target.value })} className="input min-h-[70px]" /></Field>
         </div>
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+          <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
           <button type="button" onClick={save} disabled={saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
             {saving && <Loader2 className="h-4 w-4 animate-spin" />} Salvar
           </button>
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

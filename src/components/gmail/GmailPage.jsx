@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Mail, RefreshCw, Star, Search, Loader2, X, Plus, Inbox, AlertCircle,
@@ -7,6 +7,13 @@ import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { getToken } from '../../lib/auth';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 // A conta Gmail é única e compartilhada (lcestech.consulting@gmail.com). Todos os
 // usuários autenticados leem; só o owner conecta (OAuth). Não há resposta pelo
@@ -501,17 +508,25 @@ function EmailReader({ email, onStar, onPipeline, onMarkRead }) {
 function PipelineModal({ email, onClose }) {
   const navigate = useNavigate();
   const [orgs, setOrgs] = useState([]);
-  const [form, setForm] = useState({
+  // Rascunho por e-mail (v2.25.16).
+  const pristine = useMemo(() => ({
     title: email.subject || '',
     type: 'phd',
     track: 'phd',
     organization: '',
     notes: email.snippet || '',
-  });
+  }), [email]);
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`gmail-pipeline-${email.id || email.gmail_id || 'new'}`, pristine);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  // Depois de criada a oportunidade não há mais nada a preservar.
+  const isDirty = !done && JSON.stringify(form) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   useEffect(() => {
     apiFetch('/api/market/organizations').then((r) => setOrgs(r || [])).catch(() => {});
@@ -540,6 +555,7 @@ function PipelineModal({ email, onClose }) {
           notes,
         }),
       });
+      clearDraft();          // criada a oportunidade: o rascunho não serve mais
       setDone(true);
     } catch (e) {
       setError(String(e.message || e));
@@ -549,12 +565,15 @@ function PipelineModal({ email, onClose }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div className="w-full max-w-md rounded-xl bg-surface p-5 shadow-soft" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+      <div className="w-full max-w-md rounded-xl bg-surface p-5 shadow-soft">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-base font-bold text-ink">Adicionar ao Pipeline</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
+        {!done && hasDraft && <DraftBanner onDiscard={discardDraft} />}
 
         {done ? (
           <div className="space-y-4 py-2 text-center">
@@ -605,7 +624,7 @@ function PipelineModal({ email, onClose }) {
               </label>
             </div>
             <div className="mt-4 flex justify-end gap-2">
-              <button type="button" onClick={onClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
+              <button type="button" onClick={guard.requestClose} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Cancelar</button>
               <button type="button" onClick={save} disabled={saving} className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
                 {saving && <Loader2 className="h-4 w-4 animate-spin" />} Criar Oportunidade
               </button>
@@ -614,5 +633,17 @@ function PipelineModal({ email, onClose }) {
         )}
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

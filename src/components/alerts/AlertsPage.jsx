@@ -1,8 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, Pencil, Trash2, Play, X, Info } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 const TRIGGERS = [
   ['task_overdue', 'Tarefa em atraso', 'Dias de atraso'],
@@ -191,7 +198,8 @@ function Badge({ children, tone }) {
 
 function RuleEditor({ rule, tasks, projects, onClose, onSaved, onTestResult }) {
   const isEdit = !!rule;
-  const [form, setForm] = useState(() => ({
+  // Rascunho por regra (v2.25.16).
+  const pristine = useMemo(() => ({
     name: rule?.name || '',
     description: rule?.description || '',
     trigger_type: rule?.trigger_type || 'task_overdue',
@@ -203,10 +211,16 @@ function RuleEditor({ rule, tasks, projects, onClose, onSaved, onTestResult }) {
     task_id: rule?.task_id || '',
     project_id: rule?.project_id || '',
     runTime: utcHourToLocalTime(rule?.run_hour ?? 8),
-  }));
+  }), [rule]);
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`alert-rule-${rule?.id || 'new'}`, pristine);
   const [saving, setSaving] = useState(false);
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
   const isCustomDay = form.trigger_type === 'custom_day';
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const buildPayload = () => ({
     name: form.name.trim(),
@@ -227,6 +241,7 @@ function RuleEditor({ rule, tasks, projects, onClose, onSaved, onTestResult }) {
     try {
       if (isEdit) await apiFetch(`/api/alerts/rules/${rule.id}`, { method: 'PUT', body: JSON.stringify(buildPayload()) });
       else await apiFetch('/api/alerts/rules', { method: 'POST', body: JSON.stringify(buildPayload()) });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved();
     } finally {
       setSaving(false);
@@ -249,17 +264,21 @@ function RuleEditor({ rule, tasks, projects, onClose, onSaved, onTestResult }) {
   const remove = async () => {
     if (!isEdit || !window.confirm('Excluir esta regra?')) return;
     await apiFetch(`/api/alerts/rules/${rule.id}`, { method: 'DELETE' });
+    clearDraft();
     onSaved();
   };
 
   return (
-    <div className="fixed inset-0 z-30 flex justify-end bg-black/20" onClick={onClose}>
-      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-md" onClick={(e) => e.stopPropagation()}>
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-30 flex justify-end bg-black/20">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-md">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">{isEdit ? 'Editar regra' : 'Nova regra'}</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink"><X className="h-5 w-5" /></button>
         </div>
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           <Field label="Nome"><input value={form.name} onChange={(e) => set({ name: e.target.value })} className="input" /></Field>
           <Field label="Descrição"><input value={form.description} onChange={(e) => set({ description: e.target.value })} className="input" /></Field>
           <Field label="Tipo de gatilho">
@@ -341,6 +360,18 @@ function RuleEditor({ rule, tasks, projects, onClose, onSaved, onTestResult }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }
 

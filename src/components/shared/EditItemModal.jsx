@@ -1,6 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { X, Loader2 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import ConfirmModal from './ConfirmModal';
+import { DraftBanner } from './DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 // Opções canônicas de país/área para o campo manual (independentes da
 // detecção automática por texto usada nos cards). Um select em branco
@@ -32,23 +39,38 @@ const AREA_OPTIONS = [
 // o item já atualizado pelo backend após um PATCH bem-sucedido — a página que
 // usa o modal decide o que fazer (atualizar lista, toast, fechar).
 export default function EditItemModal({ item, onClose, onSaved }) {
-  const [country, setCountry] = useState('');
-  const [area, setArea] = useState('');
-  const [title, setTitle] = useState('');
-  const [resumo, setResumo] = useState('');
-  const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    if (!item) return;
-    setCountry(item.country || '');
-    setArea(item.area || '');
-    setTitle(item.title_override || item.title || '');
-    setResumo(item.resumo_override || item.resumo || '');
-    setNotes(item.user_notes || '');
-    setError('');
-  }, [item]);
+  // Rascunho por item (v2.25.16): os 5 campos viram um objeto só, persistido
+  // em `aide-draft-hub-item-<id>`. Os setters abaixo preservam a assinatura
+  // antiga, então o JSX não mudou. O modal é montado condicionalmente pelas
+  // páginas (Vagas/Empregos), então cada abertura reinicia com o item certo —
+  // por isso o useEffect que copiava de `item` saiu: ele sobrescreveria o
+  // rascunho recuperado logo no mount.
+  const pristine = useMemo(() => ({
+    country: item?.country || '',
+    area: item?.area || '',
+    title: item?.title_override || item?.title || '',
+    resumo: item?.resumo_override || item?.resumo || '',
+    notes: item?.user_notes || '',
+  }), [item]);
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`hub-item-${item?.id || 'new'}`, pristine);
+
+  const { country, area, title, resumo, notes } = form;
+  const setField = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  const setCountry = setField('country');
+  const setArea = setField('area');
+  const setTitle = setField('title');
+  const setResumo = setField('resumo');
+  const setNotes = setField('notes');
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({
+    isDirty, onClose, onDiscard: discardDraft, enabled: !!item,
+  });
 
   if (!item) return null;
 
@@ -67,6 +89,7 @@ export default function EditItemModal({ item, onClose, onSaved }) {
         method: 'PATCH',
         body: JSON.stringify(payload),
       });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved(updated);
     } catch (e) {
       setError(String(e.message || e));
@@ -76,16 +99,15 @@ export default function EditItemModal({ item, onClose, onSaved }) {
   };
 
   return (
-    <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div
-        className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-xl bg-surface shadow-soft"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <>
+    {/* Backdrop SEM onClick (v2.25.16): clicar fora não fecha mais. */}
+    <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-xl bg-surface shadow-soft">
         <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">Editar item</h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={guard.requestClose}
             className="rounded-md p-1 text-ink2 hover:bg-surface2"
           >
             <X className="h-5 w-5" />
@@ -93,6 +115,7 @@ export default function EditItemModal({ item, onClose, onSaved }) {
         </div>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           <div className="grid grid-cols-2 gap-3">
             <label className="flex flex-col gap-1 text-xs font-medium text-ink2">
               País
@@ -159,7 +182,7 @@ export default function EditItemModal({ item, onClose, onSaved }) {
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={guard.requestClose}
             disabled={saving}
             className="rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2 disabled:opacity-50"
           >
@@ -177,5 +200,17 @@ export default function EditItemModal({ item, onClose, onSaved }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

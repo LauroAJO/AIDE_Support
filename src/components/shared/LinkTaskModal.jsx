@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { X, Search, Loader2, ClipboardList } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 
 // Modal "Vincular à Tarefa" — usado pelos cards de vaga (VagasPhDPage,
 // EmpregoPage) para anexar a referência de uma vaga (#short_id + título +
@@ -13,6 +14,10 @@ export default function LinkTaskModal({ item, onClose, onLinked }) {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [linkingId, setLinkingId] = useState(null);
+  // Seletor read-only: nada a preservar, então o Escape fecha direto. O clique
+  // fora não fecha mais (v2.25.16). `enabled` evita que a guarda ocupe a pilha
+  // do Escape quando o modal está fechado (item = null).
+  const guard = useUnsavedGuard({ isDirty: false, onClose, enabled: !!item });
 
   useEffect(() => {
     if (!item) return;
@@ -48,16 +53,13 @@ export default function LinkTaskModal({ item, onClose, onLinked }) {
   };
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div
-        className="flex h-[70vh] w-full max-w-md flex-col rounded-xl bg-surface shadow-soft"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4">
+      <div className="flex h-[70vh] w-full max-w-md flex-col rounded-xl bg-surface shadow-soft">
         <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
           <h3 className="flex items-center gap-1.5 text-base font-bold text-ink">
             <ClipboardList className="h-4 w-4 text-accent" /> Vincular à Tarefa
           </h3>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
 
         <div className="border-b border-line px-4 py-3">

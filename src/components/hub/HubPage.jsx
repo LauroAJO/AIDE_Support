@@ -7,6 +7,7 @@ import { useStore } from '../../store';
 import { MarkdownViewer } from '../../lib/markdownRenderer';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import ConfirmModal from '../shared/ConfirmModal';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 
 // Projetos monitorados pelo Hub. "todos" só existe como filtro.
 const PROJECTS = [
@@ -409,12 +410,14 @@ function Row({ label, children }) {
 
 function DetailModal({ item, onClose }) {
   const topicos = Array.isArray(item.topicos) ? item.topicos : [];
+  // Painel somente-leitura: Escape fecha, clique fora não (v2.25.16).
+  const guard = useUnsavedGuard({ isDirty: false, onClose });
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
-      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30">
+      <div className="flex h-full w-full flex-col bg-surface shadow-soft sm:max-w-lg">
         <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">{item.title}</h2>
-          <button onClick={onClose} className="shrink-0 rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
+          <button onClick={guard.requestClose} className="shrink-0 rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>
         </div>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">

@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import ConfirmModal from '../shared/ConfirmModal';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 // Granular feature → actions mapped to spec labels (PT-BR).
 const FEATURE_GROUPS = [
@@ -121,6 +126,12 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
   const [presetMap, setPresetMap] = useState({});
   const [current, setCurrent] = useState({});
   const [openSections, setOpenSections] = useState(() => new Set(['tasks']));
+  // Baseline do "sujo": o mapa resolvido como veio do servidor. As caixas só
+  // são gravadas ao clicar "Salvar permissões", então fechar com alterações
+  // pendentes perdia tudo. Sem rascunho em localStorage: permissão é dado
+  // sensível de outro usuário e ressuscitá-la numa sessão futura seria pior
+  // que perdê-la (v2.25.16).
+  const [baseline, setBaseline] = useState({});
 
   useEffect(() => {
     let cancelled = false;
@@ -132,7 +143,9 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
         if (cancelled) return;
         setPresetId(data?.preset || 'preset_external');
         setPresetMap(listToMap(data?.presetPerms));
-        setCurrent(data?.resolved || listToMap(data?.presetPerms));
+        const resolved = data?.resolved || listToMap(data?.presetPerms);
+        setCurrent(resolved);
+        setBaseline(resolved);
       } catch (e) {
         if (!cancelled) setError(String((e && e.message) || e).slice(0, 200));
       } finally {
@@ -149,6 +162,9 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
     const id = setTimeout(() => setToast(null), 4000);
     return () => clearTimeout(id);
   }, [toast]);
+
+  const isDirty = !loading && JSON.stringify(current) !== JSON.stringify(baseline);
+  const guard = useUnsavedGuard({ isDirty, onClose });
 
   const toggle = (feature, action) => {
     const key = `${feature}.${action}`;
@@ -260,19 +276,16 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-soft"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <>
+    {/* Backdrop SEM onClick (v2.25.16): as caixas de permissão só são
+        gravadas em "Salvar permissões" — clicar fora perdia tudo. */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-soft">
         <div className="flex shrink-0 items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">
             {user.display_name || user.name || user.email} — Permissões
           </h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -396,7 +409,7 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
           </button>
           <div className="flex gap-2">
             <button
-              onClick={onClose}
+              onClick={guard.requestClose}
               className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2"
             >
               Cancelar
@@ -412,5 +425,17 @@ export default function PermissionsModal({ user, onClose, onSaved }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

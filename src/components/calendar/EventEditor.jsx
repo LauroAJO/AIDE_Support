@@ -1,8 +1,15 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { X, Trash2 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { localToISO, isoToLocalInput } from '../../lib/calendar';
 import { addDaysISO } from '../../lib/week';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 function initialInputs(event, initialDate) {
   if (event && event.startDatetime) {
@@ -29,17 +36,39 @@ export default function EventEditor({
   onDeleted,
 }) {
   const isEdit = !!(event && event.googleEventId);
-  const inputs = initialInputs(event, initialDate);
 
-  const [title, setTitle] = useState(event?.title || '');
-  const [description, setDescription] = useState(event?.description || '');
-  const [allDay, setAllDay] = useState(!!event?.allDay);
-  const [location, setLocation] = useState(event?.location || '');
+  // Rascunho (v2.25.16): os campos do evento num objeto só. Os setters abaixo
+  // mantêm a assinatura antiga, então o JSX ficou inalterado.
+  const pristine = useMemo(() => {
+    const inputs = initialInputs(event, initialDate);
+    return {
+      title: event?.title || '',
+      description: event?.description || '',
+      allDay: !!event?.allDay,
+      location: event?.location || '',
+      startInput: inputs.start,
+      endInput: inputs.end,
+    };
+  }, [event, initialDate]);
+  const {
+    value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
+  } = useDraft(`calendar-event-${event?.googleEventId || 'new'}`, pristine);
+
+  const { title, description, allDay, location, startInput, endInput } = form;
+  const setField = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  const setTitle = setField('title');
+  const setDescription = setField('description');
+  const setAllDay = setField('allDay');
+  const setLocation = setField('location');
+  const setStartInput = setField('startInput');
+  const setEndInput = setField('endInput');
+
   const [calendarId] = useState(event?.calendarId || defaultCalendarId || 'primary');
-  const [startInput, setStartInput] = useState(inputs.start);
-  const [endInput, setEndInput] = useState(inputs.end);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  const isDirty = JSON.stringify(form) !== JSON.stringify(pristine);
+  const guard = useUnsavedGuard({ isDirty, onClose, onDiscard: discardDraft });
 
   const calLabel = calendars.find((c) => c.id === calendarId)?.summary || 'Agenda principal';
 
@@ -75,6 +104,7 @@ export default function EventEditor({
             method: 'POST',
             body: JSON.stringify(payload),
           });
+      clearDraft();          // salvo no servidor: o rascunho não serve mais
       onSaved(saved);
     } catch {
       setError('Falha ao salvar o evento.');
@@ -91,6 +121,7 @@ export default function EventEditor({
         `/api/calendar/events/${event.googleEventId}?calendarId=${encodeURIComponent(calendarId)}`,
         { method: 'DELETE' }
       );
+      clearDraft();
       onDeleted(event.googleEventId);
     } catch {
       setError('Falha ao excluir.');
@@ -99,19 +130,19 @@ export default function EventEditor({
   };
 
   return (
-    <div className="fixed inset-0 z-30 flex justify-end bg-black/20" onClick={onClose}>
-      <div
-        className="flex h-full w-full max-w-md flex-col bg-surface shadow-soft"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-30 flex justify-end bg-black/20">
+      <div className="flex h-full w-full max-w-md flex-col bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">{isEdit ? 'Editar evento' : 'Novo evento'}</h2>
-          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+          <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
             <X className="h-5 w-5" />
           </button>
         </div>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && (
             <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
               {error}
@@ -184,5 +215,17 @@ export default function EventEditor({
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message={DISCARD_MESSAGE}
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

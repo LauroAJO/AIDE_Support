@@ -1,13 +1,27 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import ConfirmModal from '../shared/ConfirmModal';
+import { DraftBanner } from '../shared/DraftBanner';
+import { useDraft } from '../../hooks/useDraft';
+import {
+  useUnsavedGuard, DISCARD_TITLE,
+  DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
+} from '../../hooks/useUnsavedGuard';
 
 // Bulk import: one task title per line. Each becomes a backlog task with
 // default urgency/importance (5).
 export default function ImportModal({ onClose, onImported }) {
-  const [text, setText] = useState('');
+  // A lista colada costuma vir de outra ferramenta — perdê-la por um clique
+  // fora era caro. Rascunho + guarda (v2.25.16).
+  const {
+    value: text, setValue: setText, clearDraft, discardDraft, hasDraft,
+  } = useDraft('task-import', '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const guard = useUnsavedGuard({
+    isDirty: !!text.trim(), onClose, onDiscard: discardDraft,
+  });
 
   const lines = text
     .split('\n')
@@ -25,6 +39,7 @@ export default function ImportModal({ onClose, onImported }) {
           body: JSON.stringify({ title, urgency: 5, importance: 5, status: 'backlog' }),
         });
       }
+      clearDraft();          // importado: a lista já foi para o servidor
       onImported();
     } catch {
       setError('Falha ao importar. Algumas tarefas podem não ter sido criadas.');
@@ -33,19 +48,19 @@ export default function ImportModal({ onClose, onImported }) {
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-lg rounded-xl border border-line bg-surface shadow-soft"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <>
+    {/* Backdrop SEM onClick (v2.25.16). */}
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4">
+      <div className="w-full max-w-lg rounded-xl border border-line bg-surface shadow-soft">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <h2 className="text-base font-bold text-ink">Importar lista</h2>
-          <button type="button" onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+          <button type="button" onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
             <X className="h-5 w-5" />
           </button>
         </div>
 
         <div className="px-4 py-4">
+          {hasDraft && <DraftBanner onDiscard={discardDraft} label="Lista em rascunho recuperada" />}
           <p className="mb-2 text-xs text-ink2">
             Cole uma tarefa por linha. Cada uma será criada no Backlog com urgência e importância 5.
           </p>
@@ -64,7 +79,7 @@ export default function ImportModal({ onClose, onImported }) {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={onClose}
+              onClick={guard.requestClose}
               className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2"
             >
               Cancelar
@@ -81,5 +96,17 @@ export default function ImportModal({ onClose, onImported }) {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      open={guard.confirming}
+      title={DISCARD_TITLE}
+      message="A lista colada ainda não foi importada. Deseja descartá-la?"
+      confirmLabel={DISCARD_CONFIRM_LABEL}
+      cancelLabel={DISCARD_CANCEL_LABEL}
+      danger
+      onConfirm={guard.confirmDiscard}
+      onCancel={guard.cancelDiscard}
+    />
+    </>
   );
 }

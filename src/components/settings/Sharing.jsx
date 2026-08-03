@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Folder, File as FileIcon, Plus, X, Search, Trash2 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
@@ -18,6 +19,14 @@ export default function Sharing() {
   const [search, setSearch] = useState('');
   const [results, setResults] = useState([]);
   const [calPicker, setCalPicker] = useState(false);
+
+  // Seletores read-only: Escape fecha, clique fora não (v2.25.16).
+  const pickerGuard = useUnsavedGuard({
+    isDirty: false, onClose: () => setPicker(false), enabled: picker,
+  });
+  const calPickerGuard = useUnsavedGuard({
+    isDirty: false, onClose: () => setCalPicker(false), enabled: calPicker,
+  });
 
   const otherUser = useMemo(
     () => users.find((u) => u.id !== currentUser?.id) || null,
@@ -213,11 +222,11 @@ export default function Sharing() {
 
       {/* Drive picker */}
       {picker && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={() => setPicker(false)}>
-          <div className="flex max-h-[70vh] w-full max-w-md flex-col rounded-xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+          <div className="flex max-h-[70vh] w-full max-w-md flex-col rounded-xl border border-line bg-surface shadow-soft">
             <div className="flex items-center justify-between border-b border-line px-4 py-3">
               <h3 className="text-sm font-bold text-ink">Compartilhar do Drive</h3>
-              <button onClick={() => setPicker(false)} className="text-ink2 hover:text-ink"><X className="h-5 w-5" /></button>
+              <button onClick={pickerGuard.requestClose} className="text-ink2 hover:text-ink"><X className="h-5 w-5" /></button>
             </div>
             <div className="border-b border-line p-3">
               <div className="relative">
@@ -253,11 +262,11 @@ export default function Sharing() {
 
       {/* Calendar picker */}
       {calPicker && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={() => setCalPicker(false)}>
-          <div className="flex max-h-[70vh] w-full max-w-md flex-col rounded-xl border border-line bg-surface shadow-soft" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+          <div className="flex max-h-[70vh] w-full max-w-md flex-col rounded-xl border border-line bg-surface shadow-soft">
             <div className="flex items-center justify-between border-b border-line px-4 py-3">
               <h3 className="text-sm font-bold text-ink">Compartilhar calendário</h3>
-              <button onClick={() => setCalPicker(false)} className="text-ink2 hover:text-ink"><X className="h-5 w-5" /></button>
+              <button onClick={calPickerGuard.requestClose} className="text-ink2 hover:text-ink"><X className="h-5 w-5" /></button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {calendars.length === 0 ? (

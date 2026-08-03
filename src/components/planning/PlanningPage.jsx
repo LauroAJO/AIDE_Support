@@ -6,6 +6,7 @@ import { apiFetch } from '../../lib/api';
 import { mondayOf, weekDays, addDaysISO, formatDateBR, weekdayLabel, isTodayISO, toISODate } from '../../lib/week';
 import { formatDuration } from '../../lib/time';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/tasks';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import AreasPage from '../areas/AreasPage';
 
@@ -32,6 +33,10 @@ export default function PlanningPage() {
   const [goal, setGoal] = useState('');
   const [review, setReview] = useState('');
   const [addFor, setAddFor] = useState(null); // dayIso or null
+  // Seletor de tarefas read-only: Escape fecha, clique fora não (v2.25.16).
+  const addGuard = useUnsavedGuard({
+    isDirty: false, onClose: () => setAddFor(null), enabled: !!addFor,
+  });
   const [search, setSearch] = useState('');
   const [strategic, setStrategic] = useState({ short_term: '', tactical: '', strategic: '' });
   // Visão Estratégica (colapsável) — estado persistido em localStorage; começa fechada.
@@ -594,17 +599,11 @@ export default function PlanningPage() {
 
       {/* Add task modal */}
       {addFor && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4"
-          onClick={() => setAddFor(null)}
-        >
-          <div
-            className="flex max-h-[70vh] w-full max-w-md flex-col rounded-xl border border-line bg-surface shadow-soft"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4">
+          <div className="flex max-h-[70vh] w-full max-w-md flex-col rounded-xl border border-line bg-surface shadow-soft">
             <div className="flex items-center justify-between border-b border-line px-4 py-3">
               <h2 className="text-sm font-bold text-ink">Adicionar a {weekdayLabel(addFor)}</h2>
-              <button onClick={() => setAddFor(null)} className="text-ink2 hover:text-ink">
+              <button onClick={addGuard.requestClose} className="text-ink2 hover:text-ink">
                 <X className="h-5 w-5" />
               </button>
             </div>

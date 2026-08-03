@@ -18,8 +18,9 @@ import {
   useUnsavedGuard, DISCARD_TITLE, DISCARD_MESSAGE,
   DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
 } from '../../hooks/useUnsavedGuard';
+import CountryField from '../shared/CountryField';
 import { stripMarkdown } from '../../lib/markdownRenderer';
-import { OrgEditor } from './OrganizationsView';
+import { OrgEditor, OrgCountryTag } from './OrganizationsView';
 import {
   StarRating, OrgTypeBadge, OrgStatusBadge, ProjectTypeBadge, ProjectStatusBadge,
   ORG_STATUS_LABELS, OUTREACH_LABELS, PROJECT_TYPE_LABELS, parseTags,
@@ -225,7 +226,9 @@ function Header({ org, onEdit }) {
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0">
-        <h1 className="text-2xl font-bold text-ink">{org.name}</h1>
+        <h1 className="flex items-center gap-2 text-2xl font-bold text-ink">
+          {org.name} <OrgCountryTag country={org.country} />
+        </h1>
         <div className="mt-1.5 flex flex-wrap items-center gap-2">
           <OrgTypeBadge type={org.type} />
           <OrgStatusBadge status={org.status} />
@@ -377,15 +380,13 @@ function OverviewTab({ org, onPatch, isOwner }) {
                 className="input mt-1"
               />
             </div>
-            <div>
-              <label className="text-xs font-medium text-ink2">País</label>
-              <input
-                value={country}
-                onChange={(e) => setCountry(e.target.value)}
-                onBlur={() => saveIfChanged('country', country, org.country)}
-                className="input mt-1"
-              />
-            </div>
+            {/* Mesmas opções do editor de pessoas/organizações (v2.25.15);
+                salva na hora ao escolher e no blur do campo livre. */}
+            <CountryField
+              value={country}
+              onChange={setCountry}
+              onCommit={(v) => saveIfChanged('country', v, org.country)}
+            />
           </div>
         </div>
 

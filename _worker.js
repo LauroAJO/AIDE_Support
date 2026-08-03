@@ -6699,6 +6699,8 @@ function shapeNetworkPerson(row) {
     notes: row.notes || '',
     connection_to_lauro: row.connection_to_lauro || '',
     connection_strength: row.connection_strength || 3,
+    // Migração 0050 — código ISO alpha-2; '' significa NL (default assumido).
+    country: row.country || '',
     tags,
     lifegame_person_id: row.lifegame_person_id || '',
     dex_contact_id: row.dex_contact_id || '',
@@ -6757,14 +6759,15 @@ async function handleNetworkPeople(request, env, user) {
       await env.DB.prepare(
         `INSERT INTO network_people
           (id, name, type, institution, role, area_of_work, email, phone, linkedin, notes,
-           connection_to_lauro, connection_strength, tags, lifegame_person_id, dex_contact_id,
+           connection_to_lauro, connection_strength, country, tags, lifegame_person_id, dex_contact_id,
            created_by, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).bind(
         id, body.name, body.type || 'person', body.institution || '', derivedRole || body.role || '',
         body.area_of_work || '', body.email || '', body.phone || '', body.linkedin || '',
         body.notes || '', body.connection_to_lauro || '',
         Number(body.connection_strength) || 3,
+        body.country || '',
         JSON.stringify(body.tags || []),
         body.lifegame_person_id || '', body.dex_contact_id || '',
         user.id, now, now
@@ -6803,7 +6806,7 @@ async function handleNetworkPersonItem(request, env, user, id) {
     await env.DB.prepare(
       `UPDATE network_people SET name=?, type=?, institution=?, role=?, area_of_work=?,
          email=?, phone=?, linkedin=?, notes=?, connection_to_lauro=?, connection_strength=?,
-         tags=?, lifegame_person_id=?, dex_contact_id=?,
+         country=?, tags=?, lifegame_person_id=?, dex_contact_id=?,
          sector_weight=?, sector_weight_notes=?, sector_weight_sources=?,
          sector_weight_updated_at=?, sector_weight_updated_by=?, updated_at=? WHERE id=?`
     ).bind(
@@ -6812,6 +6815,7 @@ async function handleNetworkPersonItem(request, env, user, id) {
       pick('email', existing.email), pick('phone', existing.phone), pick('linkedin', existing.linkedin),
       pick('notes', existing.notes), pick('connection_to_lauro', existing.connection_to_lauro),
       Number(pick('connection_strength', existing.connection_strength)) || 3,
+      pick('country', existing.country || ''),
       body.tags !== undefined ? JSON.stringify(body.tags) : existing.tags,
       pick('lifegame_person_id', existing.lifegame_person_id),
       pick('dex_contact_id', existing.dex_contact_id),

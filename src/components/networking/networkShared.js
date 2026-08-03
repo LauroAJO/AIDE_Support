@@ -2,6 +2,8 @@
 // Mapa Orbital) e NetworkMapRede.jsx (Mapa de Rede). Extraídos daqui para
 // evitar duplicação — nenhuma lógica foi alterada na mudança de arquivo.
 
+import { normalizeCountry, isBrazilianCountry } from '../../lib/countries';
+
 // Temperatura do contato (pela última interação).
 export const TEMP_META = {
   hot:   { emoji: '🔥', label: 'Quente', dot: '#EF4444' },
@@ -54,35 +56,52 @@ export function truncate(str, n) {
   return str.length > n ? `${str.slice(0, n - 1)}…` : str;
 }
 
-// ── Brasil vs. exterior ─────────────────────────────────────────────────────
-// network_people NÃO tem coluna `country` (ver migrations/0015_hierarchy.sql):
-// a nacionalidade só existe nas organizações (market_organizations.country).
-// Então a detecção é feita pelas orgs vinculadas à pessoa — por
-// contact_org_links (Mercado) e por person_roles (Networking). O teste em
-// `person.country` fica por robustez, caso a coluna venha a existir.
-const BR_TOKENS = ['br', 'brasil', 'brazil'];
+// ── País da pessoa ──────────────────────────────────────────────────────────
+// Desde a migração 0050 network_people TEM coluna `country`, que é a fonte
+// primária. Quando ela está vazia (a maioria dos contatos antigos), o país é
+// herdado das organizações vinculadas — por contact_org_links (Mercado) e por
+// person_roles (Networking), ambas apontando para market_organizations.country.
+// Sem nenhuma pista, o país fica '' (= NL, o default assumido do ecossistema).
+export { isBrazilianCountry };
 
-export function isBrazilianCountry(country) {
-  const s = String(country || '').trim().toLowerCase();
-  if (!s) return false;
-  return s === 'br' || BR_TOKENS.some((t) => s.includes(t));
+// Mapa person_id → país EFETIVO (código normalizado, '' quando desconhecido).
+export function buildPersonCountryMap(people, institutions, contactOrgLinks, personRoles) {
+  const orgCountry = new Map();
+  (Array.isArray(institutions) ? institutions : []).forEach((o) => {
+    if (!o || !o.id) return;
+    const c = normalizeCountry(o.country);
+    if (c) orgCountry.set(o.id, c);
+  });
+  // País herdado de org, por pessoa. O primeiro vínculo com país vence; um
+  // vínculo brasileiro tem prioridade (é o caso que a UI precisa destacar).
+  const inherited = new Map();
+  const inherit = (personId, orgId) => {
+    if (!personId || !orgId) return;
+    const c = orgCountry.get(orgId);
+    if (!c) return;
+    const prev = inherited.get(personId);
+    if (!prev || (c === 'BR' && prev !== 'BR')) inherited.set(personId, c);
+  };
+  (Array.isArray(contactOrgLinks) ? contactOrgLinks : []).forEach((l) => {
+    if (l) inherit(l.person_id, l.organization_id);
+  });
+  (Array.isArray(personRoles) ? personRoles : []).forEach((r) => {
+    if (r) inherit(r.person_id, r.institution_id);
+  });
+
+  const out = new Map();
+  (Array.isArray(people) ? people : []).forEach((p) => {
+    if (!p || !p.id) return;
+    out.set(p.id, normalizeCountry(p.country) || inherited.get(p.id) || '');
+  });
+  return out;
 }
 
 export function buildBrazilianPersonSet(people, institutions, contactOrgLinks, personRoles) {
-  const brOrgIds = new Set(
-    (Array.isArray(institutions) ? institutions : [])
-      .filter((o) => o && isBrazilianCountry(o.country))
-      .map((o) => o.id),
-  );
+  const byPerson = buildPersonCountryMap(people, institutions, contactOrgLinks, personRoles);
   const out = new Set();
-  (Array.isArray(people) ? people : []).forEach((p) => {
-    if (p && isBrazilianCountry(p.country)) out.add(p.id);
-  });
-  (Array.isArray(contactOrgLinks) ? contactOrgLinks : []).forEach((l) => {
-    if (l && l.person_id && brOrgIds.has(l.organization_id)) out.add(l.person_id);
-  });
-  (Array.isArray(personRoles) ? personRoles : []).forEach((r) => {
-    if (r && r.person_id && brOrgIds.has(r.institution_id)) out.add(r.person_id);
+  byPerson.forEach((country, id) => {
+    if (country === 'BR') out.add(id);
   });
   return out;
 }

@@ -8,6 +8,8 @@ import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
 import Avatar from '../shared/Avatar';
 import ConfirmModal from '../shared/ConfirmModal';
+import CountryField from '../shared/CountryField';
+import { countryMark, matchesCountryFilter } from '../../lib/countries';
 import { DraftBanner } from '../shared/DraftBanner';
 import { useDraft } from '../../hooks/useDraft';
 import {
@@ -35,6 +37,27 @@ const STATUS_CHIPS = [
   { key: 'active', label: 'Ativo' },
   { key: 'partner', label: 'Parceiro' },
 ];
+// País (v2.25.15) — "Holanda" inclui as organizações sem país informado, já
+// que NL é o default/assumido do ecossistema.
+const COUNTRY_CHIPS = [
+  { key: 'all', label: '🌍 Todas' },
+  { key: 'NL', label: '🇳🇱 Holanda' },
+  { key: 'BR', label: '🇧🇷 Brasil' },
+  { key: 'other', label: '🌐 Outros' },
+];
+
+// Selo de país ao lado do nome da organização: bandeira quando existe, senão o
+// código. NL/sem país não marcam nada.
+export function OrgCountryTag({ country }) {
+  const mark = countryMark(country);
+  if (!mark) return null;
+  if (mark.isFlag) return <span className="shrink-0 text-xs" title={mark.label}>{mark.flag}</span>;
+  return (
+    <span className="shrink-0 rounded bg-surface2 px-1 py-0.5 text-[9px] font-medium text-ink2" title={mark.label}>
+      {mark.code}
+    </span>
+  );
+}
 
 const EMPTY_ORG = {
   name: '', type: 'company', subtype: '', country: 'NL', city: '', website: '', linkedin: '',
@@ -50,6 +73,7 @@ export default function OrganizationsView() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [countryFilter, setCountryFilter] = useState('all'); // 'all' | 'NL' | 'BR' | 'other'
   const [sortBy, setSortBy] = useState('relevance');
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -89,13 +113,14 @@ export default function OrganizationsView() {
     if (q) list = list.filter((o) => (o.name || '').toLowerCase().includes(q) || (o.description || '').toLowerCase().includes(q));
     if (typeFilter) list = list.filter((o) => o.type === typeFilter);
     if (statusFilter) list = list.filter((o) => o.status === statusFilter);
+    list = list.filter((o) => matchesCountryFilter(o.country, countryFilter));
     list.sort((a, b) => {
       if (sortBy === 'name') return (a.name || '').localeCompare(b.name || '');
       if (sortBy === 'status') return (a.status || '').localeCompare(b.status || '');
       return (b.relevance_score || 0) - (a.relevance_score || 0) || (a.name || '').localeCompare(b.name || '');
     });
     return list;
-  }, [orgs, search, typeFilter, statusFilter, sortBy]);
+  }, [orgs, search, typeFilter, statusFilter, countryFilter, sortBy]);
 
   const afterSave = async (savedId) => {
     setEditor(null);
@@ -149,6 +174,14 @@ export default function OrganizationsView() {
             <option value="status">Status</option>
           </select>
         </div>
+        {/* Filtros por país (v2.25.15) */}
+        <div className="flex flex-wrap gap-1.5">
+          {COUNTRY_CHIPS.map((c) => (
+            <Chip key={c.key} active={countryFilter === c.key} onClick={() => setCountryFilter(c.key)}>
+              {c.label}
+            </Chip>
+          ))}
+        </div>
 
         {/* Lista de cards */}
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
@@ -167,14 +200,18 @@ export default function OrganizationsView() {
               }`}
             >
               <div className="flex items-start justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); navigate(`/market/org/${o.id}`); }}
-                  className="truncate text-left font-semibold text-ink hover:text-accent hover:underline"
-                  title="Abrir página completa"
-                >
-                  {o.name}
-                </button>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); navigate(`/market/org/${o.id}`); }}
+                    className="truncate text-left font-semibold text-ink hover:text-accent hover:underline"
+                    title="Abrir página completa"
+                  >
+                    {o.name}
+                  </button>
+                  {/* País (v2.25.15) — nada quando é NL/não informado */}
+                  <OrgCountryTag country={o.country} />
+                </div>
                 <OrgTypeBadge type={o.type} />
               </div>
               <div className="mt-1 flex items-center gap-1 text-xs text-muted">
@@ -261,7 +298,9 @@ function QuickPreview({ org, onOpenFull, onEdit, onAddContact }) {
     <div className="flex h-full flex-col">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="text-xl font-bold text-ink">{org.name}</h2>
+          <h2 className="flex items-center gap-2 text-xl font-bold text-ink">
+            {org.name} <OrgCountryTag country={org.country} />
+          </h2>
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
             <OrgTypeBadge type={org.type} />
             <OrgStatusBadge status={org.status} />
@@ -318,7 +357,9 @@ function OrgDetail({ org, onEdit, onAddContact }) {
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-xl font-bold text-ink">{org.name}</h2>
+          <h2 className="flex items-center gap-2 text-xl font-bold text-ink">
+            {org.name} <OrgCountryTag country={org.country} />
+          </h2>
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
             <OrgTypeBadge type={org.type} />
             <OrgStatusBadge status={org.status} />
@@ -580,7 +621,7 @@ export function OrgEditor({ mode, initial, onClose, onSaved }) {
           <Field label="Subtipo"><input value={form.subtype || ''} onChange={(e) => set({ subtype: e.target.value })} className="input" placeholder="ex: spin-off, startup" /></Field>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Cidade"><input value={form.city || ''} onChange={(e) => set({ city: e.target.value })} className="input" /></Field>
-            <Field label="País"><input value={form.country || ''} onChange={(e) => set({ country: e.target.value })} className="input" /></Field>
+            <CountryField value={form.country || ''} onChange={(country) => set({ country })} />
           </div>
           <Field label="Website"><input value={form.website || ''} onChange={(e) => set({ website: e.target.value })} className="input" placeholder="https://" /></Field>
           <Field label="LinkedIn"><input value={form.linkedin || ''} onChange={(e) => set({ linkedin: e.target.value })} className="input" /></Field>

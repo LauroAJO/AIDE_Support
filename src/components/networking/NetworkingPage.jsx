@@ -12,11 +12,13 @@ import LoadingSpinner from '../shared/LoadingSpinner';
 import StalenessSection from '../shared/StalenessSection';
 import ErrorBoundary from '../shared/ErrorBoundary';
 import ConfirmModal from '../shared/ConfirmModal';
+import CountryField from '../shared/CountryField';
 import NetworkMapRede from './NetworkMapRede';
 import {
   TEMP_META, sectorWeightColor, sectorWeightLabel, currentRoleOrg,
-  subtitleForPerson, truncate,
+  subtitleForPerson, truncate, buildPersonCountryMap, buildBrazilianPersonSet,
 } from './networkShared';
+import { countryMark, matchesCountryFilter, isBrazilianCountry } from '../../lib/countries';
 import { DraftBanner } from '../shared/DraftBanner';
 import { useDraft } from '../../hooks/useDraft';
 import {
@@ -74,6 +76,30 @@ const TEMP_CHIPS = [
   { key: 'cold', label: '🔵 Frios' },
   { key: 'never', label: '⚫ Nunca' },
 ];
+
+// País do contato (v2.25.15) — a Holanda continua sendo o default assumido,
+// então "Holanda" também abraça quem ainda não tem país informado.
+const COUNTRY_CHIPS = [
+  { key: 'all', label: '🌍 Todos' },
+  { key: 'NL', label: '🇳🇱 Holanda' },
+  { key: 'BR', label: '🇧🇷 Brasil' },
+  { key: 'other', label: '🌐 Outros' },
+];
+
+// Selo de país exibido ao lado do nome na lista: bandeira quando existe,
+// senão o código como badge. NL/sem país não marcam nada (default).
+function CountryTag({ country }) {
+  const mark = countryMark(country);
+  if (!mark) return null;
+  if (mark.isFlag) {
+    return <span className="shrink-0 text-[11px]" title={mark.label}>{mark.flag}</span>;
+  }
+  return (
+    <span className="shrink-0 rounded bg-surface2 px-1 py-0.5 text-[9px] font-medium text-ink2" title={mark.label}>
+      {mark.code}
+    </span>
+  );
+}
 
 // "Como se conheceram".
 const ACQUAINTANCE_META = {
@@ -133,6 +159,13 @@ const ORG_TYPE_COLORS = {
 function orgTypeColor(type) {
   return ORG_TYPE_COLORS[type] || ORG_TYPE_COLORS.other;
 }
+// Losango (◆) do Mapa Orbital: nós de pessoas brasileiras usam <polygon> no
+// lugar do <circle> — diferenciação de forma, que sobrevive a qualquer modo de
+// cor (temperatura/peso setorial). Mesmo "raio" do círculo equivalente.
+function diamondPoints(cx, cy, r) {
+  return `${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`;
+}
+
 // Rótulos PT-BR dos tipos de organização (market_organizations.type) para o popup do mapa.
 const ORG_TYPE_LABELS = {
   university: 'Universidade',
@@ -173,6 +206,9 @@ export default function NetworkingPage() {
   const [tagMenuSearch, setTagMenuSearch] = useState('');
   const tagMenuRef = useRef(null);
   const [tempFilter, setTempFilter] = useState(null); // filtro de temperatura (Prompt G)
+  // Filtro de país (v2.25.15): 'all' | 'NL' | 'BR' | 'other'. Aceita deep-link
+  // ?country=BR — usado pelo card "Ecossistema Brasil" do Dashboard.
+  const [countryFilter, setCountryFilter] = useState('all');
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editor, setEditor] = useState(null);
@@ -257,6 +293,18 @@ export default function NetworkingPage() {
     setSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, people]);
+
+  // Deep-link do filtro de país (?country=BR): aplica e limpa o param, igual ao
+  // ?person= acima — o filtro fica no estado, não na URL.
+  useEffect(() => {
+    const c = searchParams.get('country');
+    if (!c) return;
+    if (COUNTRY_CHIPS.some((chip) => chip.key === c)) setCountryFilter(c);
+    const next = new URLSearchParams(searchParams);
+    next.delete('country');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   useEffect(() => {
     if (user?.role !== 'owner') return;
@@ -357,12 +405,20 @@ export default function NetworkingPage() {
 
   // Consolidação v2.4: a lista de Networking mostra SOMENTE pessoas (instituições
   // foram unificadas em Mercado/market_organizations).
+  // País efetivo de cada pessoa (v2.25.15): network_people.country quando
+  // preenchido, senão herdado das organizações vinculadas (Mercado/funções).
+  const personCountry = useMemo(
+    () => buildPersonCountryMap(people, institutions, contactOrgLinks, personRoles),
+    [people, institutions, contactOrgLinks, personRoles],
+  );
+
   const items = useMemo(() => {
     const q = search.trim().toLowerCase();
     const all = people.map((p) => ({ ...p, _kind: 'person' }));
     return all.filter((it) => {
       if (tagFilter && !(it.tags || []).includes(tagFilter)) return false;
       if (tempFilter && (it.temperature || 'never') !== tempFilter) return false;
+      if (!matchesCountryFilter(personCountry.get(it.id) || '', countryFilter)) return false;
       if (q) {
         const roleStr = it.roles
           ? it.roles.map((r) => `${r.role} ${r.institution_name}`).join(' ')
@@ -372,7 +428,7 @@ export default function NetworkingPage() {
       }
       return true;
     });
-  }, [people, search, tagFilter, tempFilter]);
+  }, [people, search, tagFilter, tempFilter, countryFilter, personCountry]);
 
   const selectedItem = useMemo(() => {
     if (!selected) return null;
@@ -516,6 +572,18 @@ export default function NetworkingPage() {
                 </button>
               ))}
             </div>
+            {/* Filtro de país (v2.25.15) */}
+            <div className="mt-2 flex flex-wrap gap-1">
+              {COUNTRY_CHIPS.map((c) => (
+                <button
+                  key={c.key}
+                  onClick={() => setCountryFilter(c.key)}
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium ${countryFilter === c.key ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'}`}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
             {allTags.length > 0 && (
               <div className="relative mt-2 flex flex-wrap items-center gap-1" ref={tagMenuRef}>
                 {visibleTags.map((t) => (
@@ -611,6 +679,8 @@ export default function NetworkingPage() {
                         />
                       )}
                       <span className="truncate text-sm font-semibold text-ink">{it.name}</span>
+                      {/* País (v2.25.15) — nada quando é NL/não informado */}
+                      {it._kind === 'person' && <CountryTag country={personCountry.get(it.id) || ''} />}
                       {/* Potencial de indicação alto (Prompt G) */}
                       {it._kind === 'person' && Number(proProfile[it.id]?.referral_score) >= 3 && (
                         <span className="text-[11px]" title={`Bom potencial de indicação (${proProfile[it.id].referral_score}/5)`}>🔗</span>
@@ -835,6 +905,8 @@ function emptyPerson() {
   return {
     name: '', type: 'person', institution: '', role: '', area_of_work: '',
     email: '', phone: '', linkedin: '', notes: '',
+    // Holanda é o default do ecossistema (v2.25.15).
+    country: 'NL',
     connection_to_lauro: '', connection_strength: 5,
     tags: [], lifegame_person_id: '',
     roles: [{ role: '', institution_id: '', institution_name: '', start_date: '', end_date: '', current: true }],
@@ -1708,6 +1780,14 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
     return [...s].sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [people]);
 
+  // Ecossistema Brasil (v2.25.15) — pessoas em losango, orgs com borda
+  // tracejada. País da pessoa vem de network_people.country ou é herdado das
+  // organizações vinculadas.
+  const brazilians = useMemo(
+    () => buildBrazilianPersonSet(people, institutions, contactOrgLinks, personRoles),
+    [people, institutions, contactOrgLinks, personRoles],
+  );
+
   // Pessoas vinculadas à organização selecionada (person_roles + contact_org_links).
   const orgPeopleIds = useMemo(() => {
     if (!orgFilter) return null;
@@ -2073,16 +2153,19 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           const { fill, stroke } = orgTypeColor(n.type);
           const dim = isDimmed(n.id);
           const sel = selId === n.id;
+          // Brasil (v2.25.15) — borda tracejada no lugar da sólida.
+          const isBrazilian = isBrazilianCountry(n.country);
           return (
             <g key={`inst-${n.id}`} style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); pickNode('institution', n.id); }}>
               <rect
                 x={n.x - n.width / 2} y={n.y - n.height / 2} width={n.width} height={n.height}
                 rx={5} fill={fill}
                 stroke={sel ? '#6366f1' : stroke} strokeWidth={sel ? 3 : 1.5}
+                strokeDasharray={isBrazilian ? '5 3' : undefined}
                 opacity={dim ? 0.3 : 1}
                 style={sel ? { filter: 'drop-shadow(0 0 6px #6366f1)' } : undefined}
               >
-                <title>{n.name}</title>
+                <title>{isBrazilian ? `${n.name} — 🇧🇷 Brasil` : n.name}</title>
               </rect>
               <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize="9" fontWeight="600" opacity={dim ? 0.5 : 1} style={{ pointerEvents: 'none' }}>
                 <tspan x={n.x} dy={n.line2 ? -2 : 3}>{n.line1}</tspan>
@@ -2113,14 +2196,25 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           if ((interactionData[n.id]?.count || 0) > 0) channelDots.push('#22C55E'); // verde — interação registrada
           const dotsY = n.radius + 12 + (line2 ? 13 : 0) + 10;
           const dotsStartX = -((channelDots.length - 1) * 6) / 2;
+          // Brasil (v2.25.15) — losango ◆ no lugar do círculo ●.
+          const isBrazilian = brazilians.has(n.id);
+          const shapeProps = {
+            fill: personNodeColor(n),
+            stroke: sel ? '#6366f1' : stroke,
+            strokeWidth: sel ? 3 : 2.5,
+            opacity,
+            style: sel ? { filter: 'drop-shadow(0 0 6px #6366f1)' } : undefined,
+          };
           return (
             <g key={`p-${n.id}`} style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); pickNode('person', n.id); }}>
-              <circle
-                cx={n.x} cy={n.y} r={n.radius} fill={personNodeColor(n)}
-                stroke={sel ? '#6366f1' : stroke} strokeWidth={sel ? 3 : 2.5}
-                opacity={opacity}
-                style={sel ? { filter: 'drop-shadow(0 0 6px #6366f1)' } : undefined}
-              />
+              {isBrazilian ? (
+                // Losango um pouco maior que o círculo p/ compensar a área menor.
+                <polygon points={diamondPoints(n.x, n.y, n.radius * 1.25)} {...shapeProps}>
+                  <title>{`${n.name} — 🇧🇷 Brasil`}</title>
+                </polygon>
+              ) : (
+                <circle cx={n.x} cy={n.y} r={n.radius} {...shapeProps} />
+              )}
               <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize="9" opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
                 <tspan x={n.x} dy={n.radius + 12}>{line1}</tspan>
                 {line2 && <tspan x={n.x} dy={13}>{line2}</tspan>}
@@ -2266,7 +2360,9 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           </button>
           {selectedNode.type === 'person' ? (
             <>
-              <p className="pr-4 text-sm font-semibold text-ink">{selNode.name}</p>
+              <p className="pr-4 text-sm font-semibold text-ink">
+                {selNode.name}{brazilians.has(selNode.id) ? ' 🇧🇷' : ''}
+              </p>
               <p className="mt-0.5 text-[11px] text-ink2">{subtitleForPerson(selNode)}</p>
               {proStatus[selNode.id] && OUTREACH_META[proStatus[selNode.id]] && (
                 <p className="mt-1 flex items-center gap-1 text-[10px] text-ink2">
@@ -2293,9 +2389,13 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
             </>
           ) : (
             <>
-              <p className="pr-4 text-sm font-semibold text-ink">{selNode.name}</p>
+              <p className="pr-4 text-sm font-semibold text-ink">
+                {selNode.name}{isBrazilianCountry(selNode.country) ? ' 🇧🇷' : ''}
+              </p>
               <p className="mt-0.5 text-[11px] text-ink2">{ORG_TYPE_LABELS[selNode.type] || 'Organização'}</p>
-              {selNode.city && <p className="text-[11px] text-muted">{selNode.city}</p>}
+              {(selNode.city || selNode.country) && (
+                <p className="text-[11px] text-muted">{[selNode.city, selNode.country].filter(Boolean).join(', ')}</p>
+              )}
               <div className="mt-2">
                 <button
                   type="button"
@@ -2321,6 +2421,20 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
         <div className="grid grid-cols-1 gap-1">
           <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-full bg-[#6366f1] border-2 border-[#1E1B4B]" /> Person</div>
           <div className="flex items-center gap-2"><span className="h-3 w-4 rounded-sm bg-[#E0E7FF] border border-[#4338CA]" /> Organização (cor por tipo)</div>
+          {/* Ecossistema Brasil (v2.25.15) — diferenciação por FORMA */}
+          <div className="flex items-center gap-2">
+            <svg width="12" height="12" aria-hidden="true">
+              <polygon points={diamondPoints(6, 6, 5)} fill="#6366f1" stroke="#1E1B4B" strokeWidth="1.5" />
+            </svg>
+            ◆ Brasil
+            <svg width="20" height="12" aria-hidden="true" className="ml-1">
+              <circle cx="6" cy="6" r="5" fill="#6366f1" stroke="#1E1B4B" strokeWidth="1.5" />
+            </svg>
+            ● Holanda/outros
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="h-3 w-4 rounded-sm bg-[#E0E7FF]" style={{ border: '1px dashed #4338CA' }} /> Organização no Brasil
+          </div>
           <div className="flex items-center gap-2"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#6366F1" strokeWidth="2" /></svg> Conexão direta</div>
           <div className="flex items-center gap-2"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#9CA3AF" strokeWidth="1.5" strokeDasharray="3 3" /></svg> Vínculo institucional</div>
         </div>
@@ -2889,6 +3003,7 @@ function NetworkEditor({ editor, institutions, people, connections, areas, proje
               <Field label="Área de atuação">
                 <input value={form.area_of_work || ''} onChange={(e) => setForm({ ...form, area_of_work: e.target.value })} className="input" />
               </Field>
+              <CountryField value={form.country || ''} onChange={(country) => setForm({ ...form, country })} />
               <div className="grid grid-cols-2 gap-2">
                 <Field label="Email"><input value={form.email || ''} onChange={(e) => setForm({ ...form, email: e.target.value })} className="input" /></Field>
                 <Field label="Telefone"><input value={form.phone || ''} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="input" /></Field>

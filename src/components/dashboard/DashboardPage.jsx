@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Timer, CheckCircle2, AlertTriangle, CalendarClock, Briefcase, Phone, FileText, Clock, User, Building2, FolderKanban, Loader2 } from 'lucide-react';
+import { Timer, CheckCircle2, AlertTriangle, CalendarClock, Briefcase, Phone, FileText, Clock, User, Building2, FolderKanban, Globe, Loader2 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { formatHMS } from '../../lib/time';
 import { formatDate } from '../../lib/tasks';
 import { TRACK_LABELS, trackColor, OPP_STATUS_LABELS } from '../career/careerShared';
+import { buildBrazilianPersonSet } from '../networking/networkShared';
+import { isBrazilianCountry } from '../../lib/countries';
 import LoadingSpinner from '../shared/LoadingSpinner';
 
 function lastSeen(unix) {
@@ -45,6 +47,9 @@ export default function DashboardPage() {
   const [careerDocs, setCareerDocs] = useState([]);
   // v2.25.14 — perfis (pessoas/orgs/iniciativas) sem atualização há muito tempo.
   const [staleness, setStaleness] = useState({ items: [], stale: 0, aging: 0 });
+  // v2.25.15 — Ecossistema Brasil (pessoas + organizações com país BR).
+  const [network, setNetwork] = useState({ people: [], contactOrgLinks: [], person_roles: [] });
+  const [marketOrgs, setMarketOrgs] = useState([]);
   const [genBusy, setGenBusy] = useState('');
   const [genMsg, setGenMsg] = useState('');
 
@@ -58,7 +63,7 @@ export default function DashboardPage() {
 
   const loadAll = async () => {
     try {
-      const [timer, users, completed, tasks, opps, contacts, docs, stale] = await Promise.all([
+      const [timer, users, completed, tasks, opps, contacts, docs, stale, routes, orgs] = await Promise.all([
         apiFetch('/api/dashboard/alice-timer'),
         apiFetch('/api/users'),
         apiFetch('/api/tasks?completed_today=true'),
@@ -67,6 +72,8 @@ export default function DashboardPage() {
         apiFetch('/api/market/contacts').catch(() => []),
         apiFetch('/api/career/documents').catch(() => []),
         apiFetch('/api/staleness/check').catch(() => ({ items: [], stale: 0, aging: 0 })),
+        apiFetch('/api/network/routes').catch(() => ({ people: [], contactOrgLinks: [], person_roles: [] })),
+        apiFetch('/api/market/organizations').catch(() => []),
       ]);
       setAliceTimer(timer);
       setAlice(users.find((u) => u.role === 'assistant_fixed' || u.role === 'assistant') || null);
@@ -76,6 +83,12 @@ export default function DashboardPage() {
       setMarketContacts(contacts || []);
       setCareerDocs(docs || []);
       setStaleness(stale && Array.isArray(stale.items) ? stale : { items: [], stale: 0, aging: 0 });
+      setNetwork({
+        people: (routes && routes.people) || [],
+        contactOrgLinks: (routes && routes.contactOrgLinks) || [],
+        person_roles: (routes && routes.person_roles) || [],
+      });
+      setMarketOrgs(orgs || []);
     } finally {
       setLoading(false);
     }
@@ -127,6 +140,18 @@ export default function DashboardPage() {
   const pendingDocs = careerDocs.filter((d) => !d.drive_link);
   // Perfis para revisar: o backend já devolve stale+aging ordenados por pct.
   const staleItems = (staleness.items || []).slice(0, 5);
+
+  // --- Ecossistema Brasil (v2.25.15) ---
+  // Pessoa é brasileira por network_people.country ou por herança das
+  // organizações vinculadas — mesma regra do filtro do Networking.
+  const brPeople = buildBrazilianPersonSet(
+    network.people, marketOrgs, network.contactOrgLinks, network.person_roles,
+  );
+  const brOrgs = marketOrgs.filter((o) => isBrazilianCountry(o.country));
+  const topBrOrgs = [...brOrgs]
+    .sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0) || (a.name || '').localeCompare(b.name || ''))
+    .slice(0, 3);
+  const hasBrazil = brPeople.size > 0 || brOrgs.length > 0;
 
   // Gera tarefas de revisão: com `entity` só para aquele perfil, sem ele para
   // todos os perfis stale de uma vez.
@@ -310,6 +335,41 @@ export default function DashboardPage() {
           )}
         </Panel>
       </div>
+
+      {/* Ecossistema Brasil (v2.25.15) — só aparece se houver algo no Brasil */}
+      {hasBrazil && (
+        <Panel title="🇧🇷 Ecossistema Brasil" icon={Globe} iconColor="#22C55E">
+          <p className="text-sm text-ink">
+            <span className="font-bold">{brPeople.size}</span> pessoa{brPeople.size === 1 ? '' : 's'}
+            {' · '}
+            <span className="font-bold">{brOrgs.length}</span> organiza{brOrgs.length === 1 ? 'ção' : 'ções'}
+          </p>
+          {topBrOrgs.length > 0 && (
+            <ul className="mt-2 space-y-1">
+              {topBrOrgs.map((o) => (
+                <li key={o.id} className="flex items-center justify-between text-xs">
+                  <button
+                    onClick={() => navigate(`/market/org/${o.id}`)}
+                    className="truncate text-left text-ink hover:text-accent"
+                  >
+                    {o.name}
+                  </button>
+                  <span className="ml-2 shrink-0 text-amber-500" title={`Relevância ${o.relevance_score || 0}/5`}>
+                    {'★'.repeat(Math.max(0, Math.min(5, o.relevance_score || 0)))}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            type="button"
+            onClick={() => navigate('/networking?country=BR')}
+            className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-line px-3 py-2 text-xs font-medium text-ink2 transition hover:bg-surface2"
+          >
+            Ver todos →
+          </button>
+        </Panel>
+      )}
 
       {/* Perfis para Revisar (v2.25.14) — staleness de pessoas/orgs/iniciativas */}
       <h2 className="flex items-center gap-2 pt-2 text-lg font-bold text-ink">

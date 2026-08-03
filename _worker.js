@@ -6237,6 +6237,44 @@ async function findOrCreateMeetingTask(env, user) {
   return task.id;
 }
 
+// ---------------------------------------------------------------------------
+// Sessão compartilhada de reunião (v2.25.17, migration 0051)
+//
+// time_entries continua POR USUÁRIO (é o que paga a assistente). O que passa a
+// ser compartilhado é a SESSÃO: um started_at só, que todos os participantes
+// leem, para o cronômetro mostrar o mesmo número em todas as telas.
+// ---------------------------------------------------------------------------
+
+// A sessão ATIVA é procurada sem filtro de data de propósito. `date('now')` no
+// SQLite é UTC; o cliente calcula a data em horário local. Perto da meia-noite
+// os dois discordam e a sessão aberta "sumiria". Uma sessão aberta é uma sessão
+// aberta — o índice parcial da 0051 garante que só existe uma.
+async function getActiveMeetingSession(env) {
+  try {
+    return await env.DB.prepare(
+      'SELECT * FROM meeting_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1'
+    ).first();
+  } catch {
+    return null; // migration 0051 ainda não aplicada — degrada para o modo antigo
+  }
+}
+
+// Participantes = entradas de tempo AINDA ABERTAS na tarefa da reunião, desde o
+// início da sessão. Filtra por task_id (não por LIKE '%Reunião%'), senão uma
+// tarefa qualquer chamada "Reunião com cliente" entraria na conta e impediria
+// a sessão de fechar.
+async function getMeetingParticipants(env, taskId, sinceTs) {
+  if (!taskId) return [];
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.name, u.email, e.started_at
+       FROM time_entries e
+       JOIN users u ON u.id = e.user_id
+      WHERE e.task_id = ? AND e.ended_at IS NULL AND e.started_at >= ?
+      ORDER BY e.started_at`
+  ).bind(taskId, sinceTs || 0).all();
+  return results || [];
+}
+
 async function handleMeetingStart(request, env, user) {
   if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
   if (!canDo(user.granular, 'meeting', 'start_stop')) {
@@ -6244,7 +6282,34 @@ async function handleMeetingStart(request, env, user) {
   }
   const taskId = await findOrCreateMeetingTask(env, user);
   const now = Math.floor(Date.now() / 1000);
+  // Data vinda do cliente (local) quando disponível; senão date('now') em UTC.
+  // Mantém a sessão no mesmo "bucket" de data que meeting_notes usa.
+  const body = (await readJson(request)) || {};
+  const meetingDate = (body.date && String(body.date).trim())
+    || new Date(now * 1000).toISOString().slice(0, 10);
 
+  // 1) Sessão compartilhada: reusa a aberta, senão cria.
+  let session = await getActiveMeetingSession(env);
+  let joined = false;
+  if (session) {
+    joined = true;
+  } else {
+    const sid = crypto.randomUUID();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO meeting_sessions (id, meeting_date, started_at, started_by, created_at)
+         VALUES (?,?,?,?,?)`
+      ).bind(sid, meetingDate, now, user.id, now).run();
+      session = { id: sid, meeting_date: meetingDate, started_at: now, started_by: user.id, ended_at: null };
+    } catch {
+      // Corrida entre dois cliques simultâneos: o índice parcial rejeitou a
+      // segunda inserção. Relê a sessão que o outro acabou de criar.
+      session = await getActiveMeetingSession(env);
+      joined = !!session;
+    }
+  }
+
+  // 2) Entrada de tempo individual — comportamento original, intocado.
   await stopActiveEntry(env, user.id, now);
   const avail = await env.DB.prepare(
     'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
@@ -6258,7 +6323,17 @@ async function handleMeetingStart(request, env, user) {
      VALUES (?,?,?,?,?,?,?,?,?,?)`
   ).bind(id, taskId, user.id, now, null, null, rate, 0, '', now).run();
   const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
-  return json({ taskId, entryId: id, entry: shapeEntry(row) }, 201);
+
+  return json({
+    taskId,
+    entryId: id,
+    entry: shapeEntry(row),
+    joined,                                        // true = entrou numa reunião já em curso
+    session_id: session ? session.id : null,
+    session_started_at: session ? session.started_at : null,
+    user_entry_started_at: now,
+    participants: await getMeetingParticipants(env, taskId, session ? session.started_at : now),
+  }, 201);
 }
 
 async function handleMeetingStop(request, env, user) {
@@ -6274,26 +6349,66 @@ async function handleMeetingStop(request, env, user) {
   if (active.task_title !== MEETING_TASK_TITLE) {
     return json({ error: 'O timer ativo não é uma reunião' }, 400);
   }
+  // 1) Para o tempo DESTE usuário (comportamento original).
   await env.DB.prepare(
     'UPDATE time_entries SET ended_at = ?, duration_seconds = ? WHERE id = ?'
   ).bind(now, now - active.started_at, active.id).run();
-  return json({ taskId: active.task_id, duration: now - active.started_at });
+
+  // 2) Sobrou alguém? A checagem roda DEPOIS do update acima, então o próprio
+  //    usuário já não conta.
+  const session = await getActiveMeetingSession(env);
+  const remaining = await getMeetingParticipants(
+    env, active.task_id, session ? session.started_at : 0
+  );
+  let sessionClosed = false;
+  if (session && remaining.length === 0) {
+    await env.DB.prepare(
+      'UPDATE meeting_sessions SET ended_at = ?, ended_by = ? WHERE id = ?'
+    ).bind(now, user.id, session.id).run();
+    sessionClosed = true;
+  }
+
+  return json({
+    taskId: active.task_id,
+    duration: now - active.started_at,
+    sessionClosed,                                 // true = você era o último
+    session_id: session ? session.id : null,
+    remainingParticipants: remaining,
+  });
 }
 
 async function handleMeetingStatus(request, env, user) {
+  const now = Math.floor(Date.now() / 1000);
   const row = await env.DB.prepare(
     `${ENTRY_SELECT} WHERE e.user_id = ? AND e.ended_at IS NULL`
   ).bind(user.id).first();
-  if (!row || row.task_title !== MEETING_TASK_TITLE) {
-    return json({ inMeeting: false });
-  }
-  const now = Math.floor(Date.now() / 1000);
+  const userEntry = (row && row.task_title === MEETING_TASK_TITLE) ? row : null;
+
+  const session = await getActiveMeetingSession(env);
+  const taskId = userEntry
+    ? userEntry.task_id
+    : (await env.DB.prepare('SELECT id FROM tasks WHERE title = ? LIMIT 1')
+        .bind(MEETING_TASK_TITLE).first())?.id || null;
+  const participants = session
+    ? await getMeetingParticipants(env, taskId, session.started_at)
+    : [];
+
   return json({
-    inMeeting: true,
-    taskId: row.task_id,
-    entryId: row.id,
-    startedAt: row.started_at,
-    elapsedSeconds: Math.max(0, now - row.started_at)
+    // `inMeeting` mantém o significado antigo (o SEU timer está rodando) para
+    // não quebrar quem já consome esta rota.
+    inMeeting: !!userEntry,
+    running: !!userEntry,
+    taskId: userEntry ? userEntry.task_id : taskId,
+    entryId: userEntry ? userEntry.id : null,
+    startedAt: userEntry ? userEntry.started_at : null,
+    user_started_at: userEntry ? userEntry.started_at : null,
+    elapsedSeconds: userEntry ? Math.max(0, now - userEntry.started_at) : 0,
+    // Dados COMPARTILHADOS — iguais para todos os participantes.
+    session_id: session ? session.id : null,
+    session_started_at: session ? session.started_at : null,
+    session_elapsed_seconds: session ? Math.max(0, now - session.started_at) : 0,
+    participants,
+    serverNow: now,
   });
 }
 
@@ -6301,6 +6416,24 @@ async function handleMeetingStatus(request, env, user) {
 // Qualquer usuário autenticado pode ler/gravar (a rota já passou pelo gate de
 // sessão). GET ?date=YYYY-MM-DD → registro ou vazio; PUT { date, agenda?, notes? }
 // faz upsert por meeting_date.
+// Enriquece a linha com o nome de quem atualizou — o polling do cliente usa
+// `last_updated_at` para saber se o servidor tem versão mais nova que a dele.
+async function shapeMeetingNotes(env, row, date) {
+  if (!row) {
+    return {
+      id: null, meeting_date: date, agenda: '', notes: '',
+      updated_at: 0, last_updated_at: 0, updated_by: null, updated_by_name: null,
+    };
+  }
+  let name = null;
+  if (row.updated_by) {
+    const u = await env.DB.prepare('SELECT name, email FROM users WHERE id = ?')
+      .bind(row.updated_by).first();
+    name = u ? (u.name || u.email) : null;
+  }
+  return { ...row, last_updated_at: row.updated_at || 0, updated_by_name: name };
+}
+
 async function handleMeetingNotes(request, env, user) {
   if (request.method === 'GET') {
     const date = new URL(request.url).searchParams.get('date');
@@ -6308,8 +6441,7 @@ async function handleMeetingNotes(request, env, user) {
     const row = await env.DB.prepare(
       'SELECT * FROM meeting_notes WHERE meeting_date = ?'
     ).bind(date).first();
-    if (!row) return json({ id: null, meeting_date: date, agenda: '', notes: '' });
-    return json(row);
+    return json(await shapeMeetingNotes(env, row, date));
   }
 
   if (request.method === 'PUT') {
@@ -6320,19 +6452,46 @@ async function handleMeetingNotes(request, env, user) {
     const existing = await env.DB.prepare(
       'SELECT id, agenda, notes, created_by, created_at FROM meeting_notes WHERE meeting_date = ?'
     ).bind(date).first();
-    // Mantém valores atuais quando o campo não vem no corpo (patch parcial).
-    const agenda = body.agenda !== undefined ? String(body.agenda) : (existing ? existing.agenda : '');
-    const notes = body.notes !== undefined ? String(body.notes) : (existing ? existing.notes : '');
-    const id = existing ? existing.id : crypto.randomUUID();
-    const createdBy = existing ? (existing.created_by || user.id) : user.id;
-    const createdAt = existing ? (existing.created_at || now) : now;
-    await env.DB.prepare(
-      `INSERT OR REPLACE INTO meeting_notes
-         (id, meeting_date, agenda, notes, created_by, updated_by, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?)`
-    ).bind(id, date, agenda, notes, createdBy, user.id, createdAt, now).run();
-    const row = await env.DB.prepare('SELECT * FROM meeting_notes WHERE id = ?').bind(id).first();
-    return json(row);
+
+    const hasAgenda = body.agenda !== undefined;
+    const hasNotes = body.notes !== undefined;
+    if (!hasAgenda && !hasNotes) {
+      return json(await shapeMeetingNotes(env, existing, date));
+    }
+
+    if (!existing) {
+      // Primeira gravação da data — cria a linha só com o que veio.
+      const id = crypto.randomUUID();
+      await env.DB.prepare(
+        `INSERT INTO meeting_notes
+           (id, meeting_date, agenda, notes, created_by, updated_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, date,
+        hasAgenda ? String(body.agenda) : '',
+        hasNotes ? String(body.notes) : '',
+        user.id, user.id, now, now
+      ).run();
+      const row = await env.DB.prepare('SELECT * FROM meeting_notes WHERE id = ?').bind(id).first();
+      return json(await shapeMeetingNotes(env, row, date));
+    }
+
+    // Merge por CAMPO (v2.25.17). Antes era INSERT OR REPLACE da linha inteira:
+    // se a Alice editasse a pauta e o Lauro as notas ao mesmo tempo, o último
+    // PUT sobrescrevia o campo do outro com a cópia velha que ele tinha em tela.
+    // Agora cada UPDATE toca só a coluna que o cliente declarou ter mudado.
+    if (hasAgenda) {
+      await env.DB.prepare(
+        'UPDATE meeting_notes SET agenda = ?, updated_by = ?, updated_at = ? WHERE id = ?'
+      ).bind(String(body.agenda), user.id, now, existing.id).run();
+    }
+    if (hasNotes) {
+      await env.DB.prepare(
+        'UPDATE meeting_notes SET notes = ?, updated_by = ?, updated_at = ? WHERE id = ?'
+      ).bind(String(body.notes), user.id, now, existing.id).run();
+    }
+    const row = await env.DB.prepare('SELECT * FROM meeting_notes WHERE id = ?').bind(existing.id).first();
+    return json(await shapeMeetingNotes(env, row, date));
   }
 
   return json({ error: 'Método não permitido' }, 405);

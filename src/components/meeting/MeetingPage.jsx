@@ -227,10 +227,39 @@ export default function MeetingPage() {
   const [toast, setToast] = useState(null); // { message, action?: { label, onClick } } | null
   const [savingAsNote, setSavingAsNote] = useState(false);
   const formRef = useRef(form);              // último form (evita closures stale)
-  const pendingRef = useRef(null);           // { date, agenda, notes } aguardando D1
+  const pendingRef = useRef(null);           // { date, agenda?, notes? } aguardando D1
   const saveTimerRef = useRef(null);
   const toastTimerRef = useRef(null);
   const loadSeqRef = useRef(0);
+
+  // --- Colaboração ao vivo (v2.25.17) --------------------------------------
+  // Só os campos REALMENTE alterados vão no PUT. Sem isso o merge por campo do
+  // backend não serviria de nada: mandar sempre { agenda, notes } faria o
+  // último a salvar sobrescrever o campo do outro com a cópia velha da tela.
+  const dirtyRef = useRef({ agenda: false, notes: false });
+  const [lastUpdatedAt, setLastUpdatedAt] = useState(0);
+  const [updatedByName, setUpdatedByName] = useState(null);
+  const lastUpdatedRef = useRef(0);
+  // Enquanto o usuário digita, o polling não sobrescreve o texto dele.
+  const [isTyping, setIsTyping] = useState(false);
+  const typingRef = useRef(false);
+  const typingTimeout = useRef(null);
+  // Alterações do outro usuário que chegaram enquanto este digitava.
+  const [incoming, setIncoming] = useState(null); // { agenda, notes, byName, at }
+
+  // --- Sessão compartilhada de reunião ------------------------------------
+  const [meetingStatus, setMeetingStatus] = useState(null); // resposta de /api/meeting/status
+  const [sessionElapsed, setSessionElapsed] = useState(0);
+
+  const handleTyping = useCallback(() => {
+    typingRef.current = true;
+    setIsTyping(true);
+    if (typingTimeout.current) clearTimeout(typingTimeout.current);
+    typingTimeout.current = setTimeout(() => {
+      typingRef.current = false;
+      setIsTyping(false);
+    }, 3000);
+  }, []);
 
   const today = getTodayStr();
   const isToday = meetingDate === today;
@@ -250,9 +279,17 @@ export default function MeetingPage() {
     const p = pendingRef.current;
     if (!p) return;
     pendingRef.current = null;
+    dirtyRef.current = { agenda: false, notes: false };
     try {
-      await apiFetch('/api/meeting/notes', { method: 'PUT', body: JSON.stringify(p) });
+      const saved = await apiFetch('/api/meeting/notes', { method: 'PUT', body: JSON.stringify(p) });
       setSaveState('saved');
+      // A resposta traz o updated_at pós-gravação: alinhar o marcador evita que
+      // o próximo poll trate a nossa própria escrita como "alteração do outro".
+      if (saved && saved.last_updated_at) {
+        lastUpdatedRef.current = saved.last_updated_at;
+        setLastUpdatedAt(saved.last_updated_at);
+        setUpdatedByName(saved.updated_by_name || null);
+      }
     } catch {
       setSaveState('error');
     }
@@ -263,11 +300,17 @@ export default function MeetingPage() {
     const next = { ...formRef.current, [field]: value };
     formRef.current = next;
     setForm(next);
+    handleTyping();
     try {
       localStorage.setItem(field === 'agenda' ? agendaKeyFor(meetingDate) : notesKeyFor(meetingDate), value);
     } catch { /* ignore */ }
     if (!editable) return;
-    pendingRef.current = { date: meetingDate, agenda: next.agenda, notes: next.notes };
+    dirtyRef.current[field] = true;
+    // Payload só com os campos tocados nesta sessão de edição.
+    const payload = { date: meetingDate };
+    if (dirtyRef.current.agenda) payload.agenda = next.agenda;
+    if (dirtyRef.current.notes) payload.notes = next.notes;
+    pendingRef.current = payload;
     setSaveState('saving');
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => { flushPending(); }, 1500);
@@ -315,10 +358,72 @@ export default function MeetingPage() {
       formRef.current = loaded;
       setForm(loaded);
       pendingRef.current = null; // nada a salvar logo após carregar
+      dirtyRef.current = { agenda: false, notes: false };
+      const ts = (d1 && d1.last_updated_at) || 0;
+      lastUpdatedRef.current = ts;
+      setLastUpdatedAt(ts);
+      setUpdatedByName((d1 && d1.updated_by_name) || null);
+      setIncoming(null);
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meetingDate]);
+
+  // --- Polling das notas (v2.25.17) ---------------------------------------
+  // Só para a data de hoje, só com a aba visível. Se o servidor tem versão mais
+  // nova: aplica direto quando o usuário NÃO está digitando; se estiver, guarda
+  // em `incoming` e deixa ele decidir (banner âmbar) em vez de puxar o texto
+  // debaixo dos dedos dele.
+  useEffect(() => {
+    if (!isToday || !editable) return undefined;
+    const poll = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (pendingRef.current) return;         // temos escrita local não enviada
+      let data = null;
+      try { data = await apiFetch(`/api/meeting/notes?date=${meetingDate}`); } catch { return; }
+      if (!data || !data.last_updated_at) return;
+      if (data.last_updated_at <= lastUpdatedRef.current) return;
+
+      if (typingRef.current) {
+        setIncoming({
+          agenda: data.agenda || '',
+          notes: data.notes || '',
+          byName: data.updated_by_name || 'Outro usuário',
+          at: data.last_updated_at,
+        });
+        return;
+      }
+      lastUpdatedRef.current = data.last_updated_at;
+      setLastUpdatedAt(data.last_updated_at);
+      setUpdatedByName(data.updated_by_name || null);
+      const next = { agenda: data.agenda || '', notes: data.notes || '' };
+      formRef.current = next;
+      setForm(next);
+      setIncoming(null);
+    };
+    const iv = setInterval(poll, 5000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingDate, isToday, editable]);
+
+  // Aceita a versão do servidor que chegou enquanto o usuário digitava.
+  const acceptIncoming = () => {
+    if (!incoming) return;
+    const next = { agenda: incoming.agenda, notes: incoming.notes };
+    formRef.current = next;
+    setForm(next);
+    lastUpdatedRef.current = incoming.at;
+    setLastUpdatedAt(incoming.at);
+    setUpdatedByName(incoming.byName);
+    dirtyRef.current = { agenda: false, notes: false };
+    pendingRef.current = null;
+    setIncoming(null);
+  };
+  // Mantém o texto local; o próximo save sobrescreve só os campos tocados.
+  const dismissIncoming = () => {
+    if (incoming) lastUpdatedRef.current = incoming.at;
+    setIncoming(null);
+  };
 
   // Descarrega pendências ao desmontar (localStorage já guardou a cada tecla).
   useEffect(() => () => {
@@ -334,18 +439,55 @@ export default function MeetingPage() {
 
   // Initial sync — pull the server's authoritative meeting status so a page
   // refresh mid-meeting doesn't show "Iniciar".
+  const refreshStatus = useCallback(async () => {
+    try {
+      const s = await apiFetch('/api/meeting/status');
+      setMeetingStatus(s);
+      if (s && s.inMeeting && !activeEntry) {
+        // Hand off to TimerIndicator's load path.
+        const entry = await apiFetch('/api/timer/active');
+        if (entry) setActiveEntry(entry);
+      }
+      return s;
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEntry]);
+
   useEffect(() => {
-    apiFetch('/api/meeting/status')
-      .then((s) => {
-        if (s && s.inMeeting) {
-          // Hand off to TimerIndicator's load path.
-          return apiFetch('/api/timer/active').then((entry) => entry && setActiveEntry(entry));
-        }
-        return null;
-      })
-      .catch(() => {});
+    refreshStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Polling do status (v2.25.17): mantém a lista de participantes e o relógio
+  // compartilhado em dia. Só roda com sessão ativa e aba visível.
+  const hasSession = !!(meetingStatus && meetingStatus.session_started_at);
+  useEffect(() => {
+    if (!hasSession) return undefined;
+    const iv = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      refreshStatus();
+    }, 10000);
+    return () => clearInterval(iv);
+  }, [hasSession, refreshStatus]);
+
+  // Relógio COMPARTILHADO: conta a partir de session_started_at, então todos os
+  // participantes veem o mesmo número — independente de quando cada um entrou.
+  // O tempo individual (time_entries) segue intacto para o pagamento.
+  const sessionStartedAt = meetingStatus?.session_started_at || null;
+  useEffect(() => {
+    if (!sessionStartedAt) { setSessionElapsed(0); return undefined; }
+    const tick = () => setSessionElapsed(
+      Math.max(0, Math.floor(Date.now() / 1000) - sessionStartedAt)
+    );
+    tick();
+    const iv = setInterval(tick, 1000);
+    return () => clearInterval(iv);
+  }, [sessionStartedAt]);
+
+  const participants = meetingStatus?.participants || [];
+  const initialsOf = (p) => (p.name || p.email || '?').trim().charAt(0).toUpperCase();
 
   // Load tasks if the store is empty.
   useEffect(() => {
@@ -414,12 +556,25 @@ export default function MeetingPage() {
     setError('');
     setBusy(true);
     try {
-      const res = await apiFetch('/api/meeting/start', { method: 'POST' });
+      // Manda a data LOCAL: o servidor usaria date('now') em UTC, que perto da
+      // meia-noite cai num dia diferente do que a tela mostra.
+      const res = await apiFetch('/api/meeting/start', {
+        method: 'POST',
+        body: JSON.stringify({ date: getTodayStr() }),
+      });
       if (res && res.entry) setActiveEntry(res.entry);
       else {
         const entry = await apiFetch('/api/timer/active');
         setActiveEntry(entry);
       }
+      if (res && res.joined && res.session_started_at) {
+        const hhmm = new Date(res.session_started_at * 1000)
+          .toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        showToast(`Entrando na reunião iniciada às ${hhmm}`);
+      } else {
+        showToast('Reunião iniciada');
+      }
+      await refreshStatus();
     } catch (e) {
       setError(String((e && e.message) || e) || 'Falha ao iniciar reunião.');
     } finally {
@@ -434,8 +589,11 @@ export default function MeetingPage() {
     if (!ok) return;
     setBusy(true);
     try {
-      await apiFetch('/api/meeting/stop', { method: 'POST' });
+      const res = await apiFetch('/api/meeting/stop', { method: 'POST' });
       setActiveEntry(null);
+      if (res && res.sessionClosed) showToast('Reunião encerrada para todos.');
+      else showToast('Seu tempo parado. A reunião continua para os outros.');
+      await refreshStatus();
     } catch (e) {
       setError(String((e && e.message) || e) || 'Falha ao encerrar reunião.');
     } finally {
@@ -532,6 +690,28 @@ export default function MeetingPage() {
             </div>
           )}
 
+          {/* Conflito: o outro salvou enquanto este usuário digitava (v2.25.17).
+              O texto local NÃO é substituído sem o usuário mandar. */}
+          {incoming && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              <span>⚠ {incoming.byName} atualizou as notas.</span>
+              <button
+                type="button"
+                onClick={acceptIncoming}
+                className="rounded-md border border-amber-400 px-2 py-0.5 font-medium hover:bg-amber-100"
+              >
+                Ver alterações
+              </button>
+              <button
+                type="button"
+                onClick={dismissIncoming}
+                className="rounded-md px-2 py-0.5 font-medium underline hover:bg-amber-100"
+              >
+                Manter o meu texto
+              </button>
+            </div>
+          )}
+
           <div>
             <label className="mb-1 block text-sm font-semibold text-ink">
               Pauta de hoje
@@ -545,12 +725,18 @@ export default function MeetingPage() {
                 )}
               </div>
             ) : (
-              <MarkdownEditor
-                value={form.agenda}
-                onChange={(v) => onChangeField('agenda', v)}
-                placeholder="O que será discutido hoje..."
-                minHeight={110}
-              />
+              // onFocusCapture/onKeyDownCapture no wrapper em vez de props novas
+              // no MarkdownEditor (compartilhado com Notas, Mercado, etc.):
+              // pausa o polling assim que o campo recebe foco, sem tocar num
+              // componente usado por outras 4 telas.
+              <div onFocusCapture={handleTyping} onKeyDownCapture={handleTyping}>
+                <MarkdownEditor
+                  value={form.agenda}
+                  onChange={(v) => onChangeField('agenda', v)}
+                  placeholder="O que será discutido hoje..."
+                  minHeight={110}
+                />
+              </div>
             )}
           </div>
           <div>
@@ -566,17 +752,30 @@ export default function MeetingPage() {
                 )}
               </div>
             ) : (
-              <MarkdownEditor
-                value={form.notes}
-                onChange={(v) => onChangeField('notes', v)}
-                placeholder="Anotações durante a reunião..."
-                minHeight={170}
-              />
+              <div onFocusCapture={handleTyping} onKeyDownCapture={handleTyping}>
+                <MarkdownEditor
+                  value={form.notes}
+                  onChange={(v) => onChangeField('notes', v)}
+                  placeholder="Anotações durante a reunião..."
+                  minHeight={170}
+                />
+              </div>
             )}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-[11px] text-muted">Sincronizado entre dispositivos • Salvo por data</p>
+            <p className="text-[11px] text-muted">
+              Sincronizado entre dispositivos • Salvo por data
+              {lastUpdatedAt > 0 && (
+                <>
+                  {' · '}
+                  Atualizado às{' '}
+                  {new Date(lastUpdatedAt * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                  {updatedByName ? ` por ${updatedByName}` : ''}
+                </>
+              )}
+              {isToday && editable && <>{' · '}<span className="text-emerald-600">ao vivo</span></>}
+            </p>
             <button
               type="button"
               onClick={saveAsFormalNote}
@@ -592,16 +791,40 @@ export default function MeetingPage() {
           {/* Global meeting timer (mirrors the header/sidebar timer) */}
           <div className="rounded-2xl border border-line bg-surface p-5 shadow-soft">
             <p className="text-xs font-medium text-ink2">
-              {inMeeting ? 'Reunião em andamento' : 'Reunião não iniciada'}
+              {hasSession
+                ? (inMeeting ? 'Reunião em andamento' : 'Reunião em andamento (você fora)')
+                : 'Reunião não iniciada'}
             </p>
+            {/* Relógio COMPARTILHADO — mesmo número em todas as telas (v2.25.17). */}
             <div
               className="mt-1 font-mono text-[36px] font-bold leading-none text-ink sm:text-[40px]"
               style={{ fontVariantNumeric: 'tabular-nums' }}
             >
-              {inMeeting ? formatHMS(elapsedSeconds) : '00:00:00'}
+              {hasSession ? formatHMS(sessionElapsed) : '00:00:00'}
             </div>
+
+            {participants.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-muted">Em reunião:</span>
+                {participants.map((p) => (
+                  <span
+                    key={p.id || p.email}
+                    title={`${p.name || p.email} — entrou às ${new Date((p.started_at || 0) * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`}
+                    className="flex h-5 w-5 items-center justify-center rounded-full bg-accent text-[10px] font-bold text-white"
+                  >
+                    {initialsOf(p)}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {hasSession && inMeeting && (
+              <p className="mt-1 text-[11px] text-muted">
+                Seu tempo registrado: {formatHMS(elapsedSeconds)}
+              </p>
+            )}
             <p className="mt-1 text-[11px] text-muted">
-              Usa o timer global — registra para pagamento
+              Cronômetro compartilhado · seu tempo individual é o que vai para pagamento
             </p>
             {error && (
               <p className="mt-2 text-xs text-danger">{error}</p>

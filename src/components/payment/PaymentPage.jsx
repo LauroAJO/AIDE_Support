@@ -109,10 +109,17 @@ export default function PaymentPage() {
       // Active assistants (any non-owner role; archived users are filtered out
       // server-side by getUserFromRequest). Sort owner-first by name for a
       // stable tab order.
+      //
+      // `team` continua COMPLETO — é a fonte do agregado "Todos" logo abaixo.
+      // Tirar a Alice daqui removeria as entradas dela do total agregado.
       const team = usersList
         .filter((u) => u.role && u.role !== 'owner')
         .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      setAssistants(team);
+      // Já a lista de ABAS exclui a Alice: ela é a aba "padrão" (o caminho
+      // legado sem user_id, que o worker resolve para o assistant_fixed —
+      // ver _worker.js computePaymentSummary). Sem esse filtro ela ganhava
+      // duas abas idênticas: [Alice] [Alice] [Milene] [Todos].
+      setAssistants(team.filter((u) => u.id !== aliceRow?.id));
 
       if (isOwner && tab === 'all') {
         // Aggregate: fetch each assistant's summary in parallel, merge entries
@@ -267,12 +274,22 @@ export default function PaymentPage() {
         {/* Owner-only: user tab strip. Single-assistant case (just Alice) is
             unchanged — only render tabs when there's more than one user to
             switch between. */}
-        {isOwner && assistants.length > 1 && (
+        {/* `> 0` e não `> 1`: com a Alice fora da lista, ter só a Milene já
+            precisa da barra — senão a aba dela e a "Todos" ficariam
+            inalcançáveis. Com a Alice sozinha, `assistants` fica vazia e a
+            barra some, que é o comportamento correto (uma assistente só não
+            precisa de abas). */}
+        {isOwner && assistants.length > 0 && (
           <div className="flex w-full flex-wrap items-center gap-1 border-b border-line">
             <TabBtn
               active={tabUserId === null}
               onClick={() => setTabUserId(null)}
-              label={alice?.name?.split(' ')[0] || 'Padrão'}
+              /* Nome da Alice em vez de "Padrão": deixa claro de quem é a aba.
+                 O fallback continua genérico porque, sem nenhum
+                 assistant_fixed cadastrado, o caminho legado não resolve
+                 ninguém — rotular a aba vazia com um nome de pessoa que não
+                 existe seria pior que "Padrão". */
+              label={alice?.display_name || alice?.name?.split(' ')[0] || 'Padrão'}
             />
             {assistants.map((a) => (
               <TabBtn

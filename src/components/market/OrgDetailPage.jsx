@@ -4,9 +4,11 @@ import {
   ArrowLeft, Pencil, ExternalLink, Linkedin, UserPlus, Search, X,
   Plus, Briefcase, Pin, Trash2, Loader2, Check,
 } from 'lucide-react';
+import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import Avatar from '../shared/Avatar';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import StalenessSection from '../shared/StalenessSection';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
 import MarkdownEditor from '../shared/MarkdownEditor';
 import ConfirmModal from '../shared/ConfirmModal';
@@ -87,6 +89,7 @@ function daysUntil(dateStr) {
 export default function OrgDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const user = useStore((s) => s.user);
   const [org, setOrg] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -191,7 +194,7 @@ export default function OrgDetailPage() {
 
       {/* Conteúdo */}
       <div className="min-h-0 flex-1 overflow-y-auto pb-6">
-        {tab === 'overview' && <OverviewTab org={org} onPatch={patchOrg} />}
+        {tab === 'overview' && <OverviewTab org={org} onPatch={patchOrg} isOwner={user?.role === 'owner'} />}
         {tab === 'contacts' && <ContactsTab org={org} onReload={loadFull} navigate={navigate} />}
         {tab === 'projects' && <ProjectsTab org={org} onReload={loadFull} />}
         {tab === 'notes' && <NotesTab orgId={id} />}
@@ -262,7 +265,7 @@ function Header({ org, onEdit }) {
 // ---------------------------------------------------------------------------
 // Aba: Visão Geral
 // ---------------------------------------------------------------------------
-function OverviewTab({ org, onPatch }) {
+function OverviewTab({ org, onPatch, isOwner }) {
   const [description, setDescription] = useState(org.description || '');
   const [relNotes, setRelNotes] = useState(org.relevance_notes || '');
   const [city, setCity] = useState(org.city || '');
@@ -338,6 +341,14 @@ function OverviewTab({ org, onPatch }) {
 
       {/* DIREITA (40%) */}
       <div className="space-y-4 lg:w-[40%]">
+        {/* Staleness (v2.25.14) — badge + toggle de monitoramento, owner only */}
+        {isOwner && (
+          <div className="rounded-xl border border-line bg-surface p-4">
+            <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-muted">Atualização do perfil</span>
+            <StalenessSection entityType="organization" entityId={org.id} isOwner={isOwner} />
+          </div>
+        )}
+
         <div className="rounded-xl border border-line bg-surface p-4">
           <span className="text-xs font-semibold uppercase tracking-wide text-muted">Relevância por trilha</span>
           <div className="mt-2 space-y-2">

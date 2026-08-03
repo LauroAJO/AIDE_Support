@@ -3,6 +3,7 @@ import { Plus, X, Pencil, ExternalLink, Loader2, FolderKanban, Calendar } from '
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import StalenessSection from '../shared/StalenessSection';
 import {
   StarRating, ProjectTypeBadge, ProjectStatusBadge,
   PROJECT_TYPE_LABELS, PROJECT_STATUS_LABELS, parseTags,
@@ -15,6 +16,7 @@ const EMPTY_PROJECT = {
 };
 
 export default function ProjectsView() {
+  const user = useStore((s) => s.user);
   const projects = useStore((s) => s.marketProjects);
   const setProjects = useStore((s) => s.setMarketProjects);
   const orgs = useStore((s) => s.marketOrgs);
@@ -108,6 +110,7 @@ export default function ProjectsView() {
           <ProjectDetail
             project={detail}
             orgs={orgs}
+            isOwner={user?.role === 'owner'}
             onEdit={() => setEditor({ mode: 'edit', form: { ...detail, tags: parseTags(detail.tags), partner_org_ids: parseTags(detail.partner_org_ids) } })}
           />
         )}
@@ -120,7 +123,7 @@ export default function ProjectsView() {
   );
 }
 
-function ProjectDetail({ project, orgs, onEdit }) {
+function ProjectDetail({ project, orgs, isOwner, onEdit }) {
   const tags = parseTags(project.tags);
   const partnerIds = parseTags(project.partner_org_ids);
   const partners = orgs.filter((o) => partnerIds.includes(o.id));
@@ -139,6 +142,11 @@ function ProjectDetail({ project, orgs, onEdit }) {
           <Pencil className="h-4 w-4" /> Editar
         </button>
       </div>
+
+      {/* Staleness (v2.25.14) — badge + toggle de monitoramento, owner only */}
+      {isOwner && (
+        <StalenessSection key={project.id} entityType="project" entityId={project.id} isOwner={isOwner} />
+      )}
 
       {project.organization_name && (
         <div className="text-sm">

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Timer, CheckCircle2, AlertTriangle, CalendarClock, Briefcase, Phone, FileText } from 'lucide-react';
+import { Timer, CheckCircle2, AlertTriangle, CalendarClock, Briefcase, Phone, FileText, Clock, User, Building2, FolderKanban, Loader2 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { formatHMS } from '../../lib/time';
@@ -22,6 +22,14 @@ function daysBetween(dateStr, ref) {
   return Math.round((new Date(`${dateStr}T00:00:00`) - ref) / 86400000);
 }
 
+// Staleness (v2.25.14) — ícone e destino de navegação por tipo de entidade.
+const ENTITY_ICON = { person: User, organization: Building2, project: FolderKanban };
+function entityPath(e) {
+  if (e.entity_type === 'person') return `/networking?person=${e.entity_id}`;
+  if (e.entity_type === 'organization') return `/market/org/${e.entity_id}`;
+  return '/market?tab=projects';
+}
+
 export default function DashboardPage() {
   const user = useStore((s) => s.user);
   const navigate = useNavigate();
@@ -35,6 +43,10 @@ export default function DashboardPage() {
   const [careerOpps, setCareerOpps] = useState([]);
   const [marketContacts, setMarketContacts] = useState([]);
   const [careerDocs, setCareerDocs] = useState([]);
+  // v2.25.14 — perfis (pessoas/orgs/iniciativas) sem atualização há muito tempo.
+  const [staleness, setStaleness] = useState({ items: [], stale: 0, aging: 0 });
+  const [genBusy, setGenBusy] = useState('');
+  const [genMsg, setGenMsg] = useState('');
 
   const loadTimer = async () => {
     try {
@@ -46,7 +58,7 @@ export default function DashboardPage() {
 
   const loadAll = async () => {
     try {
-      const [timer, users, completed, tasks, opps, contacts, docs] = await Promise.all([
+      const [timer, users, completed, tasks, opps, contacts, docs, stale] = await Promise.all([
         apiFetch('/api/dashboard/alice-timer'),
         apiFetch('/api/users'),
         apiFetch('/api/tasks?completed_today=true'),
@@ -54,6 +66,7 @@ export default function DashboardPage() {
         apiFetch('/api/career/opportunities').catch(() => []),
         apiFetch('/api/market/contacts').catch(() => []),
         apiFetch('/api/career/documents').catch(() => []),
+        apiFetch('/api/staleness/check').catch(() => ({ items: [], stale: 0, aging: 0 })),
       ]);
       setAliceTimer(timer);
       setAlice(users.find((u) => u.role === 'assistant_fixed' || u.role === 'assistant') || null);
@@ -62,6 +75,7 @@ export default function DashboardPage() {
       setCareerOpps(opps || []);
       setMarketContacts(contacts || []);
       setCareerDocs(docs || []);
+      setStaleness(stale && Array.isArray(stale.items) ? stale : { items: [], stale: 0, aging: 0 });
     } finally {
       setLoading(false);
     }
@@ -111,6 +125,27 @@ export default function DashboardPage() {
     .sort((a, b) => a.next_action_date.localeCompare(b.next_action_date));
   // Documentos pendentes: sem link do Drive (ainda não anexados).
   const pendingDocs = careerDocs.filter((d) => !d.drive_link);
+  // Perfis para revisar: o backend já devolve stale+aging ordenados por pct.
+  const staleItems = (staleness.items || []).slice(0, 5);
+
+  // Gera tarefas de revisão: com `entity` só para aquele perfil, sem ele para
+  // todos os perfis stale de uma vez.
+  const generateTasks = async (entity) => {
+    const key = entity ? `${entity.entity_type}:${entity.entity_id}` : 'all';
+    setGenBusy(key);
+    setGenMsg('');
+    try {
+      const r = await apiFetch('/api/staleness/generate-tasks', {
+        method: 'POST',
+        body: JSON.stringify(entity ? { entity_type: entity.entity_type, entity_id: entity.entity_id } : {}),
+      });
+      setGenMsg(`${r.created || 0} tarefa(s) criada(s), ${r.skipped || 0} já tinham tarefa aberta.`);
+    } catch {
+      setGenMsg('Falha ao gerar tarefas.');
+    } finally {
+      setGenBusy('');
+    }
+  };
 
   return (
     <div className="mx-auto max-w-4xl space-y-4">
@@ -275,6 +310,78 @@ export default function DashboardPage() {
           )}
         </Panel>
       </div>
+
+      {/* Perfis para Revisar (v2.25.14) — staleness de pessoas/orgs/iniciativas */}
+      <h2 className="flex items-center gap-2 pt-2 text-lg font-bold text-ink">
+        <Clock className="h-5 w-5 text-accent" /> Perfis para Revisar
+      </h2>
+      <Panel title={`${staleness.stale || 0} perfis desatualizados`} icon={Clock} iconColor="#EF4444">
+        {staleItems.length === 0 ? (
+          <p className="text-sm text-muted">Nenhum perfil precisa de revisão. 🎉</p>
+        ) : (
+          <>
+            <ul className="space-y-1.5">
+              {staleItems.map((e) => {
+                const Icon = ENTITY_ICON[e.entity_type] || User;
+                const critical = e.status === 'stale';
+                return (
+                  <li key={`${e.entity_type}:${e.entity_id}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line px-3 py-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <Icon className="h-3.5 w-3.5 shrink-0 text-muted" />
+                        <span className="truncate text-sm font-medium text-ink">{e.entity_name}</span>
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            critical ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-800'
+                          }`}
+                        >
+                          {e.daysSince}d
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-muted">
+                        Revisado há {e.daysSince} dias · threshold {e.threshold_days} dias
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => navigate(entityPath(e))}
+                        className="rounded-lg border border-line px-2.5 py-1 text-[11px] font-medium text-ink2 transition hover:bg-surface2"
+                      >
+                        Revisar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => generateTasks(e)}
+                        disabled={genBusy === `${e.entity_type}:${e.entity_id}`}
+                        className="flex items-center gap-1 rounded-lg bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition hover:opacity-90 disabled:opacity-60"
+                      >
+                        {genBusy === `${e.entity_type}:${e.entity_id}` && <Loader2 className="h-3 w-3 animate-spin" />}
+                        Criar tarefa
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            {staleness.items.length > staleItems.length && (
+              <p className="mt-2 text-[11px] text-muted">
+                + {staleness.items.length - staleItems.length} outro(s) perfil(is) na lista.
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={() => generateTasks(null)}
+              disabled={genBusy === 'all'}
+              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-line px-3 py-2 text-xs font-medium text-ink2 transition hover:bg-surface2 disabled:opacity-60"
+            >
+              {genBusy === 'all' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              Gerar todas as tarefas
+            </button>
+            {genMsg && <p className="mt-1.5 text-[11px] text-muted">{genMsg}</p>}
+          </>
+        )}
+      </Panel>
     </div>
   );
 }

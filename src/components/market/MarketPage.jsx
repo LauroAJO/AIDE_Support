@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Building2, FolderKanban } from 'lucide-react';
 import OrganizationsView from './OrganizationsView';
 import ProjectsView from './ProjectsView';
@@ -11,7 +12,12 @@ const TABS = [
 export default function MarketPage() {
   // Contatos deixaram de ser uma sub-aba do Mercado — agora são acessados
   // direto pela barra lateral (item "Contatos-Networking" → /networking).
-  const [tab, setTab] = useState('orgs');
+  // ?tab=projects abre direto em Iniciativas (usado pelo dashboard de perfis
+  // desatualizados, que precisa levar a uma iniciativa específica).
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState(
+    () => (TABS.some((t) => t.key === searchParams.get('tab')) ? searchParams.get('tab') : 'orgs')
+  );
 
   return (
     <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">

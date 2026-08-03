@@ -9,8 +9,14 @@ import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { MarkdownViewer } from '../../lib/markdownRenderer';
 import LoadingSpinner from '../shared/LoadingSpinner';
+import StalenessSection from '../shared/StalenessSection';
 import ErrorBoundary from '../shared/ErrorBoundary';
 import ConfirmModal from '../shared/ConfirmModal';
+import NetworkMapRede from './NetworkMapRede';
+import {
+  TEMP_META, sectorWeightColor, sectorWeightLabel, currentRoleOrg,
+  subtitleForPerson, truncate,
+} from './networkShared';
 import { DraftBanner } from '../shared/DraftBanner';
 import { useDraft } from '../../hooks/useDraft';
 import {
@@ -59,13 +65,8 @@ const INTERACTION_META = {
 };
 const INTERACTION_ORDER = ['email_sent', 'email_received', 'linkedin_connected', 'linkedin_message', 'meeting', 'coffee_chat', 'paper_mentioned', 'event', 'other'];
 
-// Temperatura do contato (pela última interação).
-const TEMP_META = {
-  hot:   { emoji: '🔥', label: 'Quente', dot: '#EF4444' },
-  warm:  { emoji: '🟡', label: 'Morno',  dot: '#F59E0B' },
-  cold:  { emoji: '🔵', label: 'Frio',   dot: '#3B82F6' },
-  never: { emoji: '⚫', label: 'Nunca contatado', dot: '#9CA3AF' },
-};
+// Temperatura do contato (pela última interação) — TEMP_META vive em
+// ./networkShared.js, compartilhado com o Mapa de Rede.
 const TEMP_CHIPS = [
   { key: null, label: 'Todos' },
   { key: 'hot', label: '🔥 Quentes' },
@@ -163,6 +164,9 @@ export default function NetworkingPage() {
   const setTasks = useStore((s) => s.setTasks);
 
   const [view, setView] = useState('list');
+  // Dentro da aba Mapa: 'orbital' (Lauro no centro, comportamento histórico)
+  // ou 'rede' (ego network navegável — v2.25.14).
+  const [mapMode, setMapMode] = useState('orbital');
   const [search, setSearch] = useState('');
   const [tagFilter, setTagFilter] = useState(null);
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
@@ -722,30 +726,65 @@ export default function NetworkingPage() {
           </div>
         </div>
       ) : view === 'map' ? (
-        <div className="mt-3 min-h-0 flex-1">
-          <ErrorBoundary
-            fallback={({ reset }) => (
-              <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-line bg-surface p-8 text-center">
-                <p className="text-sm font-medium text-ink">Erro ao carregar mapa — tente recarregar</p>
-                <div className="flex gap-2">
-                  <button onClick={reset} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink2 hover:bg-surface2">Tentar de novo</button>
-                  <button onClick={() => setView('list')} className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover">Voltar à lista</button>
+        <div className="mt-3 flex min-h-0 flex-1 flex-col gap-2">
+          {/* Alternância entre os dois mapas (v2.25.14) */}
+          <div className="flex w-fit items-center gap-1 rounded-lg border border-line bg-surface p-1">
+            <button
+              type="button"
+              onClick={() => setMapMode('orbital')}
+              className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+                mapMode === 'orbital' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+              }`}
+            >
+              🌐 Mapa Orbital
+            </button>
+            <button
+              type="button"
+              onClick={() => setMapMode('rede')}
+              className={`rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+                mapMode === 'rede' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+              }`}
+            >
+              🕸 Mapa de Rede
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1">
+            <ErrorBoundary
+              fallback={({ reset }) => (
+                <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-line bg-surface p-8 text-center">
+                  <p className="text-sm font-medium text-ink">Erro ao carregar mapa — tente recarregar</p>
+                  <div className="flex gap-2">
+                    <button onClick={reset} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink2 hover:bg-surface2">Tentar de novo</button>
+                    <button onClick={() => setView('list')} className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover">Voltar à lista</button>
+                  </div>
                 </div>
-              </div>
-            )}
-          >
-            <NetworkMap
-              people={Array.isArray(people) ? people : []}
-              institutions={Array.isArray(institutions) ? institutions : []}
-              connections={Array.isArray(connections) ? connections : []}
-              personRoles={Array.isArray(personRoles) ? personRoles : []}
-              contactOrgLinks={Array.isArray(contactOrgLinks) ? contactOrgLinks : []}
-              proStatus={proStatus}
-              interactionData={interactionData}
-              onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
-              onViewOrg={(id) => navigate(`/market/org/${id}`)}
-            />
-          </ErrorBoundary>
+              )}
+            >
+              {mapMode === 'orbital' ? (
+                <NetworkMap
+                  people={Array.isArray(people) ? people : []}
+                  institutions={Array.isArray(institutions) ? institutions : []}
+                  connections={Array.isArray(connections) ? connections : []}
+                  personRoles={Array.isArray(personRoles) ? personRoles : []}
+                  contactOrgLinks={Array.isArray(contactOrgLinks) ? contactOrgLinks : []}
+                  proStatus={proStatus}
+                  interactionData={interactionData}
+                  onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
+                  onViewOrg={(id) => navigate(`/market/org/${id}`)}
+                />
+              ) : (
+                <NetworkMapRede
+                  people={Array.isArray(people) ? people : []}
+                  institutions={Array.isArray(institutions) ? institutions : []}
+                  connections={Array.isArray(connections) ? connections : []}
+                  contactOrgLinks={Array.isArray(contactOrgLinks) ? contactOrgLinks : []}
+                  personRoles={Array.isArray(personRoles) ? personRoles : []}
+                  onOpenPerson={(id) => { setView('list'); setSelected({ kind: 'person', id }); }}
+                />
+              )}
+            </ErrorBoundary>
+          </div>
         </div>
       ) : view === 'table' ? (
         <div className="mt-3 min-h-0 flex-1">
@@ -790,14 +829,6 @@ export default function NetworkingPage() {
       )}
     </div>
   );
-}
-
-function subtitleForPerson(p) {
-  if (p.roles && p.roles.length > 0) {
-    const current = p.roles.find((r) => r.current) || p.roles[0];
-    return [current.role, current.institution_name].filter(Boolean).join(' @ ') || 'Pessoa';
-  }
-  return [p.role, p.institution].filter(Boolean).join(' · ') || 'Pessoa';
 }
 
 function emptyPerson() {
@@ -917,25 +948,8 @@ function ReferralSection({ profile, onPatch }) {
 
 // "Peso setorial" (v2.25.9) — avaliação manual 1-10 de quanta influência a
 // pessoa tem no setor, com justificativa (markdown) + fontes + autoria.
-const SECTOR_WEIGHT_LABELS = [
-  [1, 2, 'Pouca influência'],
-  [3, 4, 'Influência local/restrita'],
-  [5, 6, 'Influência regional/setorial'],
-  [7, 8, 'Influência nacional/europeia'],
-  [9, 10, 'Referência global'],
-];
-function sectorWeightLabel(n) {
-  const hit = SECTOR_WEIGHT_LABELS.find(([lo, hi]) => n >= lo && n <= hi);
-  return hit ? hit[2] : '';
-}
-function sectorWeightColor(n) {
-  if (n >= 9) return '#7C3AED';
-  if (n >= 7) return '#6366F1';
-  if (n >= 5) return '#3B82F6';
-  if (n >= 3) return '#93C5FD';
-  if (n >= 1) return '#DBEAFE';
-  return '#E5E7EB';
-}
+// sectorWeightLabel/sectorWeightColor vivem em ./networkShared.js,
+// compartilhados com o Mapa de Rede.
 function fmtDDMM(unixSeconds) {
   if (!unixSeconds) return '';
   const d = new Date(unixSeconds * 1000);
@@ -1270,6 +1284,11 @@ function DetailPanel({ item, kind, people, connections, isOwner, hasPro, outreac
       </div>
 
       <div className="space-y-4 p-4">
+        {/* Staleness (v2.25.14) — badge + toggle de monitoramento, owner only */}
+        {isPerson && (
+          <StalenessSection key={item.id} entityType="person" entityId={item.id} isOwner={isOwner} />
+        )}
+
         {isPerson && hasPro && (
           <button
             type="button"
@@ -2340,12 +2359,6 @@ function fmtDateBRFromISO(iso) {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : 'Nunca';
 }
 
-function currentRoleOrg(p) {
-  const current = p.roles && p.roles.length > 0 ? (p.roles.find((r) => r.current) || p.roles[0]) : null;
-  if (current) return { role: current.role || '', org: current.institution_name || '' };
-  return { role: p.role || '', org: p.institution || '' };
-}
-
 // Escapa um valor pra célula CSV (aspas duplas + separador ; caso contenha vírgula/quebra/aspas).
 function csvCell(v) {
   const s = String(v == null ? '' : v);
@@ -2631,11 +2644,6 @@ function SectorHeatmap({ people, institutions, contactOrgLinks, proProfile }) {
       })()}
     </div>
   );
-}
-
-function truncate(str, n) {
-  if (!str) return '';
-  return str.length > n ? `${str.slice(0, n - 1)}…` : str;
 }
 
 // Normaliza um nome de organização para casar funções (por institution_name)

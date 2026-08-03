@@ -316,6 +316,21 @@ async function handleAPI(request, env, ctx) {
     return handleAttachmentItem(request, env, user, 'market_org', parts[4], parts[6]);
   }
 
+  // Staleness (v2.25.14) — owner only (guard dentro de cada handler). A ordem
+  // importa: as rotas fixas antes das genéricas /:entityType/:entityId, senão
+  // "check"/"config" seriam lidos como um entity_type.
+  if (path === '/api/staleness/check') return handleStalenessCheck(request, env, user);
+  if (path === '/api/staleness/config') return handleStalenessConfig(request, env, user);
+  if (path === '/api/staleness/generate-tasks') return handleStalenessGenerateTasks(request, env, user);
+  if (path.match(/^\/api\/staleness\/[^/]+\/[^/]+\/reviewed$/)) {
+    const parts = path.split('/');
+    return handleStalenessReviewed(request, env, user, parts[3], parts[4]);
+  }
+  if (path.match(/^\/api\/staleness\/[^/]+\/[^/]+$/)) {
+    const parts = path.split('/');
+    return handleStalenessEntity(request, env, user, parts[3], parts[4]);
+  }
+
   // Carreira (Etapa 2) — oportunidades, documentos, metas.
   if (path === '/api/career/opportunities') return handleCareerOpportunities(request, env, user);
   if (path.startsWith('/api/career/opportunities/')) return handleCareerOpportunityItem(request, env, user, path.split('/')[4]);
@@ -5341,6 +5356,36 @@ async function runDailyNotifications(env) {
     console.error('[CRON] Bridge push failed:', msg);
   }
 
+  // --- Perfis desatualizados (v2.25.14) -----------------------------------
+  // Avisa o responsável (ou o owner) uma vez por dia por perfil já stale.
+  // Envolvido em try/catch: sem a migration 0049 o resto do cron segue.
+  let staleAlerts = 0;
+  try {
+    const ownerRow = await env.DB.prepare("SELECT id FROM users WHERE role = 'owner' LIMIT 1").first();
+    const ownerId = (ownerRow && ownerRow.id) || null;
+    const staleEntities = await checkStaleness(env);
+    for (const entity of staleEntities) {
+      if (entity.status !== 'stale') continue;
+      const key = `staleness:${entity.entity_type}:${entity.entity_id}:${today}`;
+      if (await dedupCheck(key, env)) continue;
+
+      const assignedUser = entity.assigned_to || ownerId;
+      if (!assignedUser) continue;
+      await createNotification(env, null, {
+        to_user_id: assignedUser,
+        type: 'staleness_alert',
+        title: 'Perfil desatualizado',
+        body: `${entity.entity_name} não é atualizado há ${entity.daysSince} dias`
+      });
+
+      await dedupSet(key, 86400, env);
+      staleAlerts += 1;
+      sent += 1;
+    }
+  } catch (e) {
+    console.error('[CRON] Staleness check failed:', e.message);
+  }
+
   return {
     dueSoon: (dueSoon.results || []).length,
     overdue: (overdue.results || []).length,
@@ -5350,6 +5395,7 @@ async function runDailyNotifications(env) {
     gmailUnread,
     eventDeadlines,
     bridgePush,
+    staleAlerts,
   };
 }
 
@@ -10432,6 +10478,297 @@ async function handleHubStats(request, env, user) {
   } catch {
     return json({ by_project: [], total: 0 });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Staleness (v2.25.14) — rastreia há quanto tempo um perfil (pessoa,
+// organização ou iniciativa) não é atualizado, e gera tarefas de revisão.
+// Tabela: staleness_config (migration 0049). Tudo aqui é owner-only.
+// ---------------------------------------------------------------------------
+
+const STALENESS_ENTITY_TYPES = ['person', 'organization', 'project'];
+
+// updatedAt/lastReviewedAt são unix seconds; o que valer mais recente conta
+// como "última atividade". pct é o quanto do threshold já foi consumido.
+function computeStaleness(updatedAt, lastReviewedAt, thresholdDays) {
+  const now = Math.floor(Date.now() / 1000);
+  // threshold 0/negativo/inválido dividiria por zero — cai no padrão de 60 dias.
+  const threshold = Number(thresholdDays) > 0 ? Number(thresholdDays) : 60;
+  const lastActivity = Math.max(
+    updatedAt || 0,
+    lastReviewedAt || 0
+  );
+  const daysSince = Math.floor(
+    (now - lastActivity) / 86400
+  );
+  const pct = Math.min(100,
+    Math.floor((daysSince / threshold) * 100)
+  );
+
+  let status = 'fresh'; // < 50% of threshold
+  if (pct >= 100) status = 'stale';
+  else if (pct >= 75) status = 'aging';
+  else if (pct >= 50) status = 'ok';
+
+  return { daysSince, pct, status };
+  // status: fresh | ok | aging | stale
+}
+
+// Uma linha de staleness_config já resolvida (nome + updated_at da entidade)
+// e com a staleness calculada. `sc.*` traz threshold_days/assigned_to/etc.
+function shapeStalenessRow(sc) {
+  const s = computeStaleness(sc.entity_updated_at, sc.last_reviewed_at, sc.threshold_days);
+  return {
+    id: sc.id,
+    entity_type: sc.entity_type,
+    entity_id: sc.entity_id,
+    entity_name: sc.entity_name || '—',
+    enabled: sc.enabled ? 1 : 0,
+    threshold_days: sc.threshold_days || 60,
+    assigned_to: sc.assigned_to || null,
+    last_reviewed_at: sc.last_reviewed_at || null,
+    entity_updated_at: sc.entity_updated_at || null,
+    daysSince: s.daysSince,
+    pct: s.pct,
+    status: s.status,
+  };
+}
+
+// SELECT compartilhado: junta staleness_config com a tabela da entidade certa
+// (pessoa/organização/iniciativa) para trazer nome e updated_at.
+const STALENESS_SELECT = `
+  SELECT sc.*,
+    CASE sc.entity_type
+      WHEN 'person' THEN np.name
+      WHEN 'organization' THEN mo.name
+      WHEN 'project' THEN mp.name
+    END as entity_name,
+    CASE sc.entity_type
+      WHEN 'person' THEN np.updated_at
+      WHEN 'organization' THEN mo.updated_at
+      WHEN 'project' THEN mp.updated_at
+    END as entity_updated_at
+  FROM staleness_config sc
+  LEFT JOIN network_people np
+    ON sc.entity_type='person' AND sc.entity_id=np.id
+  LEFT JOIN market_organizations mo
+    ON sc.entity_type='organization' AND sc.entity_id=mo.id
+  LEFT JOIN market_projects mp
+    ON sc.entity_type='project' AND sc.entity_id=mp.id`;
+
+// Todas as entidades monitoradas com a staleness já calculada. Usado pela
+// rota /check e pelo cron. Devolve [] se a migration 0049 não foi aplicada.
+async function checkStaleness(env) {
+  try {
+    const { results } = await env.DB.prepare(
+      `${STALENESS_SELECT} WHERE sc.enabled = 1`
+    ).all();
+    // entity_name nulo = a entidade foi apagada e só sobrou a config órfã;
+    // notificar/gerar tarefa sobre ela não faria sentido.
+    return (results || [])
+      .filter((r) => r.entity_name)
+      .map(shapeStalenessRow);
+  } catch {
+    return []; // migration 0049 não aplicada
+  }
+}
+
+// GET /api/staleness/check — só perfis já desatualizados (stale) ou perto
+// disso (aging), ordenados pelo mais crítico.
+async function handleStalenessCheck(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  if (!requireOwner(user)) return json({ error: 'Acesso restrito ao proprietário' }, 403);
+  const all = await checkStaleness(env);
+  const items = all
+    .filter((e) => e.status === 'stale' || e.status === 'aging')
+    // pct satura em 100, então todos os "stale" empatam — o desempate por
+    // dias de atraso relativo ao threshold mantém o mais crítico no topo.
+    .sort((a, b) => (b.pct - a.pct)
+      || ((b.daysSince / (b.threshold_days || 60)) - (a.daysSince / (a.threshold_days || 60))));
+  return json({
+    items,
+    monitored: all.length,
+    stale: all.filter((e) => e.status === 'stale').length,
+    aging: all.filter((e) => e.status === 'aging').length,
+  });
+}
+
+// GET /api/staleness/:entityType/:entityId — configuração + staleness atual de
+// uma entidade só (o painel de detalhe usa isto para decidir se mostra badge).
+// Devolve { config: null } quando a entidade não é monitorada.
+async function handleStalenessEntity(request, env, user, entityType, entityId) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  if (!requireOwner(user)) return json({ config: null });
+  if (!STALENESS_ENTITY_TYPES.includes(entityType)) return json({ error: 'entity_type inválido' }, 400);
+  try {
+    const row = await env.DB.prepare(
+      `${STALENESS_SELECT} WHERE sc.entity_type = ? AND sc.entity_id = ?`
+    ).bind(entityType, entityId).first();
+    return json({ config: row ? shapeStalenessRow(row) : null });
+  } catch {
+    return json({ config: null }); // migration 0049 não aplicada
+  }
+}
+
+// POST /api/staleness/config — cria/atualiza a configuração da entidade.
+async function handleStalenessConfig(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!requireOwner(user)) return json({ error: 'Acesso restrito ao proprietário' }, 403);
+  const body = (await readJson(request)) || {};
+  const entityType = String(body.entity_type || '');
+  const entityId = String(body.entity_id || '');
+  if (!STALENESS_ENTITY_TYPES.includes(entityType)) return json({ error: 'entity_type inválido' }, 400);
+  if (!entityId) return json({ error: 'entity_id é obrigatório' }, 400);
+
+  const threshold = Number(body.threshold_days) > 0 ? Math.round(Number(body.threshold_days)) : 60;
+  // INSERT OR REPLACE recria a linha: preserva last_reviewed_at/created_at da
+  // configuração anterior, senão desmarcar e remarcar o toggle zeraria a revisão.
+  let previous = null;
+  try {
+    previous = await env.DB.prepare(
+      'SELECT id, last_reviewed_at, created_at FROM staleness_config WHERE entity_type = ? AND entity_id = ?'
+    ).bind(entityType, entityId).first();
+  } catch {
+    return json({ error: 'Tabela staleness_config não existe — aplique migrations/0049_staleness.sql' }, 503);
+  }
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO staleness_config
+      (id, entity_type, entity_id, enabled, threshold_days, assigned_to, last_reviewed_at, created_at)
+     VALUES (?,?,?,?,?,?,?,?)`
+  ).bind(
+    (previous && previous.id) || crypto.randomUUID(),
+    entityType,
+    entityId,
+    body.enabled ? 1 : 0,
+    threshold,
+    body.assigned_to || null,
+    (previous && previous.last_reviewed_at) || null,
+    (previous && previous.created_at) || now
+  ).run();
+
+  const row = await env.DB.prepare(
+    `${STALENESS_SELECT} WHERE sc.entity_type = ? AND sc.entity_id = ?`
+  ).bind(entityType, entityId).first();
+  return json({ config: row ? shapeStalenessRow(row) : null });
+}
+
+// POST /api/staleness/:entityType/:entityId/reviewed — "marcar como revisado".
+// Além de carimbar last_reviewed_at, registra uma interação no histórico da
+// pessoa (quando a entidade for uma pessoa).
+async function handleStalenessReviewed(request, env, user, entityType, entityId) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!requireOwner(user)) return json({ error: 'Acesso restrito ao proprietário' }, 403);
+  if (!STALENESS_ENTITY_TYPES.includes(entityType)) return json({ error: 'entity_type inválido' }, 400);
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    const res = await env.DB.prepare(
+      `UPDATE staleness_config SET last_reviewed_at = unixepoch()
+       WHERE entity_type = ? AND entity_id = ?`
+    ).bind(entityType, entityId).run();
+    // Nada atualizado = entidade ainda não monitorada; cria a config já revisada
+    // para que o botão funcione mesmo antes de ligar o toggle.
+    const changed = (res && res.meta && res.meta.changes) || 0;
+    if (!changed) {
+      await env.DB.prepare(
+        `INSERT OR REPLACE INTO staleness_config
+          (id, entity_type, entity_id, enabled, threshold_days, assigned_to, last_reviewed_at, created_at)
+         VALUES (?,?,?,1,60,NULL,?,?)`
+      ).bind(crypto.randomUUID(), entityType, entityId, now, now).run();
+    }
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/no such table/i.test(msg)) {
+      return json({ error: 'Tabela staleness_config não existe — aplique migrations/0049_staleness.sql' }, 503);
+    }
+    return json({ error: 'Falha ao marcar como revisado', detail: msg }, 500);
+  }
+
+  if (entityType === 'person') {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO contact_interactions
+          (id, person_id, interaction_type, date, summary, outcome, next_step, next_step_date, created_by, created_at)
+         VALUES (?,?,'other',?,?,'','','',?,?)`
+      ).bind(
+        crypto.randomUUID(), entityId, new Date().toISOString().slice(0, 10),
+        'Perfil revisado e atualizado', user.id, now
+      ).run();
+    } catch { /* best-effort — não bloqueia a marcação de revisão */ }
+  }
+
+  const row = await env.DB.prepare(
+    `${STALENESS_SELECT} WHERE sc.entity_type = ? AND sc.entity_id = ?`
+  ).bind(entityType, entityId).first();
+  return json({ ok: true, config: row ? shapeStalenessRow(row) : null });
+}
+
+// Cria a tarefa de revisão de UMA entidade, pulando se já houver uma aberta.
+// Devolve 'created' | 'skipped'. `ownerId` é o fallback de responsável.
+async function createStalenessTask(env, entity, ownerId) {
+  const name = entity.entity_name || '—';
+  const existing = await env.DB.prepare(
+    `SELECT id FROM tasks
+     WHERE title LIKE ? ESCAPE '\\'
+       AND status NOT IN ('done')
+       AND source = 'staleness'`
+  ).bind(`%${escapeLikeQuery(name)}%`).first();
+  if (existing) return 'skipped';
+
+  const id = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  const urgency = entity.status === 'stale' ? 7 : 5;
+  await env.DB.prepare(
+    `INSERT INTO tasks
+      (id, title, description, assigned_to, created_by, urgency, importance, energy,
+       status, tags, comments, subtasks, time_entries, favorited, drive_attachments,
+       source, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,5,'todo','[]','[]','[]','[]',0,'[]','staleness',?,?)`
+  ).bind(
+    id,
+    `Revisar perfil: ${name}`,
+    `Perfil não atualizado há ${entity.daysSince} dias. `
+      + 'Verificar cargo, organização, projetos e informações de contato.',
+    entity.assigned_to || ownerId,
+    ownerId,
+    urgency,
+    6,
+    now,
+    now
+  ).run();
+  return 'created';
+}
+
+// POST /api/staleness/generate-tasks — gera tarefas de revisão para todas as
+// entidades stale. Com { entity_type, entity_id } no corpo, gera só para uma.
+async function handleStalenessGenerateTasks(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!requireOwner(user)) return json({ error: 'Acesso restrito ao proprietário' }, 403);
+  const body = (await readJson(request)) || {};
+  const all = await checkStaleness(env);
+  let targets = all.filter((e) => e.status === 'stale');
+  if (body.entity_type && body.entity_id) {
+    // Alvo único: aceita também 'aging' (o botão "Criar tarefa" do dashboard
+    // aparece antes do perfil ficar totalmente stale).
+    targets = all.filter((e) => e.entity_type === body.entity_type && e.entity_id === body.entity_id);
+  }
+
+  const owner = await env.DB.prepare("SELECT id FROM users WHERE role = 'owner' LIMIT 1").first();
+  const ownerId = (owner && owner.id) || user.id;
+
+  let created = 0;
+  let skipped = 0;
+  for (const entity of targets) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const outcome = await createStalenessTask(env, entity, ownerId);
+      if (outcome === 'created') created += 1; else skipped += 1;
+    } catch (e) {
+      console.error('[STALENESS] Falha ao criar tarefa:', (e && e.message) || e);
+      skipped += 1;
+    }
+  }
+  return json({ created, skipped });
 }
 
 function json(data, status = 200) {

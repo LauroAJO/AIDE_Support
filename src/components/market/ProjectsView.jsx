@@ -32,9 +32,18 @@ export default function ProjectsView() {
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [editor, setEditor] = useState(null);
+  // Erros passaram a ser VISÍVEIS (v2.25.19). Antes as duas chamadas abaixo
+  // engoliam a falha: a lista ficava vazia ("Nenhuma iniciativa registrada") e
+  // o painel de detalhe ficava totalmente em branco — sem mensagem, sem botão
+  // Editar, sem como saber o que aconteceu. Era exatamente o sintoma relatado
+  // ("não consigo editar os cards").
+  const [loadError, setLoadError] = useState('');
+  const [detailError, setDetailError] = useState('');
 
   const load = async () => {
+    setLoadError('');
     try {
       const [p, o] = await Promise.all([
         apiFetch('/api/market/projects'),
@@ -42,6 +51,10 @@ export default function ProjectsView() {
       ]);
       setProjects(p || []);
       if (!orgs.length) setOrgs(o || []);
+    } catch (e) {
+      // Sem este catch a promise rejeitava sem tratamento: a lista simplesmente
+      // não aparecia e nada era reportado ao usuário nem ao console.
+      setLoadError(String((e && e.message) || e).slice(0, 300));
     } finally {
       setLoading(false);
     }
@@ -54,10 +67,16 @@ export default function ProjectsView() {
 
   const openDetail = async (id) => {
     setSelectedId(id);
+    setDetail(null);
+    setDetailError('');
+    setDetailLoading(true);
     try {
       setDetail(await apiFetch(`/api/market/projects/${id}`));
-    } catch {
+    } catch (e) {
       setDetail(null);
+      setDetailError(String((e && e.message) || e).slice(0, 300));
+    } finally {
+      setDetailLoading(false);
     }
   };
 
@@ -80,8 +99,21 @@ export default function ProjectsView() {
         >
           <Plus className="h-4 w-4" /> Nova Iniciativa
         </button>
+        {loadError && (
+          <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+            <p className="font-medium">Falha ao carregar as iniciativas</p>
+            <p className="mt-0.5 break-words opacity-90">{loadError}</p>
+            <button
+              type="button"
+              onClick={() => { setLoading(true); load(); }}
+              className="mt-1.5 rounded-md border border-danger/40 px-2 py-0.5 font-medium hover:bg-danger/10"
+            >
+              Tentar de novo
+            </button>
+          </div>
+        )}
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-          {projects.length === 0 && <p className="px-1 text-sm text-muted">Nenhuma iniciativa registrada</p>}
+          {projects.length === 0 && !loadError && <p className="px-1 text-sm text-muted">Nenhuma iniciativa registrada</p>}
           {projects.map((p) => (
             <button
               key={p.id}
@@ -113,13 +145,44 @@ export default function ProjectsView() {
       {/* RIGHT — detalhe */}
       <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-line bg-surface p-5">
         {!selectedId && <div className="flex h-full items-center justify-center text-muted">Selecione uma iniciativa</div>}
-        {selectedId && detail && (
+        {selectedId && detailLoading && <LoadingSpinner label="Carregando iniciativa..." />}
+        {/* Falha ao abrir o detalhe agora aparece na tela (v2.25.19) — antes o
+            painel ficava em branco e o botão Editar simplesmente não existia. */}
+        {selectedId && !detailLoading && detailError && (
+          <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+            <p className="font-medium">Falha ao carregar esta iniciativa</p>
+            <p className="mt-0.5 break-words text-xs opacity-90">{detailError}</p>
+            <button
+              type="button"
+              onClick={() => openDetail(selectedId)}
+              className="mt-2 rounded-md border border-danger/40 px-2.5 py-1 text-xs font-medium hover:bg-danger/10"
+            >
+              Tentar de novo
+            </button>
+          </div>
+        )}
+        {selectedId && !detailLoading && !detailError && detail && (
           <ProjectDetail
             project={detail}
             orgs={orgs}
             isOwner={user?.role === 'owner'}
             onEdit={() => setEditor({ mode: 'edit', form: { ...detail, tags: parseTags(detail.tags), partner_org_ids: parseTags(detail.partner_org_ids) } })}
           />
+        )}
+        {/* Último caso possível: requisição OK mas corpo vazio. Sem isto o
+            painel voltaria a ficar totalmente em branco — o bug que este
+            commit existe para eliminar. */}
+        {selectedId && !detailLoading && !detailError && !detail && (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-muted">
+            <p>Esta iniciativa não retornou dados.</p>
+            <button
+              type="button"
+              onClick={() => openDetail(selectedId)}
+              className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink2 hover:bg-surface2"
+            >
+              Tentar de novo
+            </button>
+          </div>
         )}
       </div>
 

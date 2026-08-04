@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Building2, FolderKanban } from 'lucide-react';
+import ErrorBoundary from '../shared/ErrorBoundary';
 import OrganizationsView from './OrganizationsView';
 import ProjectsView from './ProjectsView';
 
@@ -48,10 +49,46 @@ export default function MarketPage() {
         </div>
       </div>
 
-      {/* Conteúdo da sub-aba */}
+      {/* Conteúdo da sub-aba.
+          ErrorBoundary local (v2.25.19): antes, qualquer exceção de render aqui
+          subia até o boundary de App.jsx e derrubava o app inteiro com o texto
+          genérico "Algo deu errado", sem dizer QUAL erro nem em qual aba. Agora
+          o estouro fica contido na sub-aba e a mensagem real aparece na tela —
+          o resto do Mercado continua utilizável e o erro vira diagnosticável
+          sem precisar do console. */}
       <div className="min-h-0 flex-1">
-        {tab === 'orgs' && <OrganizationsView />}
-        {tab === 'projects' && <ProjectsView />}
+        <ErrorBoundary
+          key={tab}
+          fallback={({ error, reset }) => (
+            <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-danger/40 bg-danger/5 p-8 text-center">
+              <p className="text-sm font-semibold text-ink">
+                Erro ao carregar {tab === 'orgs' ? 'Organizações' : 'Projetos & Iniciativas'}
+              </p>
+              <p className="max-w-lg break-words font-mono text-xs text-danger">
+                {String((error && error.message) || error)}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={reset}
+                  className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink2 hover:bg-surface2"
+                >
+                  Tentar de novo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
+                >
+                  Recarregar página
+                </button>
+              </div>
+            </div>
+          )}
+        >
+          {tab === 'orgs' && <OrganizationsView />}
+          {tab === 'projects' && <ProjectsView />}
+        </ErrorBoundary>
       </div>
     </div>
   );

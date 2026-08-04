@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, X, Pencil, ExternalLink, Loader2, FolderKanban, Calendar } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';

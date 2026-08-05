@@ -13,6 +13,17 @@ import {
   taskAssignees,
 } from '../../lib/tasks';
 
+// v2.25.20 — fundo esmaecido com a cor da área. A cor chega em task.areaColor
+// (TASK_SELECT já faz o JOIN tasks → projects → areas). Só aceita hex de 6
+// dígitos: o seletor de cor da AreasPage sempre gera esse formato, e qualquer
+// outra coisa (vazio, nome CSS, hex já com alfa) viraria cor inválida ao
+// concatenar o alfa. Sem área — ou cor fora do formato — o card mantém bg-surface.
+const AREA_TINT_ALPHA = '1F'; // 12%
+function areaFadedBg(hexColor) {
+  if (!hexColor || !/^#[0-9a-f]{6}$/i.test(hexColor)) return undefined;
+  return hexColor + AREA_TINT_ALPHA;
+}
+
 export default function TaskCard({ task, selected, onClick, onToggleFavorite, onToggleSubtask }) {
   const overdue = isOverdue(task.due_date);
   const warn = needsDate(task);
@@ -38,7 +49,11 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
           onClick?.();
         }
       }}
-      style={{ borderLeftWidth: 4, borderLeftColor: scoreColor(task.score) }}
+      style={{
+        borderLeftWidth: 4,
+        borderLeftColor: scoreColor(task.score),
+        backgroundColor: areaFadedBg(task.areaColor),
+      }}
       className={`w-full cursor-pointer rounded-lg border bg-surface p-3 text-left transition hover:-translate-y-px hover:shadow-soft ${
         selected ? 'border-accent ring-1 ring-accent' : 'border-line'
       }`}

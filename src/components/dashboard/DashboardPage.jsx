@@ -172,22 +172,34 @@ export default function DashboardPage() {
     }
   };
 
+  // De quem é o timer mostrado no painel: o owner acompanha a primeira
+  // assistente, cada assistente vê o próprio. `userName` vem do backend, que é
+  // quem resolve o alvo — o palpite local é só fallback.
+  const timerUser = user?.role === 'owner' ? alice : user;
+  const timerName = aliceTimer?.userName || timerUser?.name || '';
+
   return (
     <div className="mx-auto max-w-4xl space-y-4">
       <h1 className="text-2xl font-bold text-ink">Dashboard</h1>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* Alice status */}
-        <Panel title="Status da Alice" icon={Timer}>
+        {/* Status do timer — do owner: a primeira assistente; de uma
+            assistente: o dela mesma (v2.25.20). O nome vem do backend, que é
+            quem decide de quem é o timer. */}
+        <Panel title={`Status ${timerName ? `de ${timerName.split(' ')[0]}` : 'do timer'}`} icon={Timer}>
           {aliceTimer?.active ? (
             <div>
               <div className="text-sm text-ink">{aliceTimer.taskTitle}</div>
               <div className="font-mono text-2xl font-bold text-accent">{formatHMS(aliceTimer.elapsedSeconds)}</div>
             </div>
           ) : (
-            <p className="text-sm text-muted">Alice não está com timer ativo</p>
+            <p className="text-sm text-muted">
+              {timerName ? `${timerName.split(' ')[0]} não está` : 'Ninguém está'} com timer ativo
+            </p>
           )}
-          <p className="mt-2 text-xs text-ink2">Vista {lastSeen(alice?.last_seen_at)}</p>
+          {timerUser?.last_seen_at != null && (
+            <p className="mt-2 text-xs text-ink2">Vista {lastSeen(timerUser.last_seen_at)}</p>
+          )}
         </Panel>
 
         {/* Completed today */}

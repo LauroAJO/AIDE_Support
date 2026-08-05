@@ -72,10 +72,14 @@ export default function PaymentPage() {
   const setSummary = useStore((s) => s.setPaymentSummary);
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [loading, setLoading] = useState(true);
-  const [alice, setAlice] = useState(null);
+  // v2.25.20: `primaryAssistant` = a primeira assistente (a antiga "Alice"
+  // hardcoded). `allAssistants` = time completo, usado para resolver de quem é
+  // o perfil em cada aba; `assistants` continua sendo só a lista de abas EXTRA.
+  const [primaryAssistant, setPrimaryAssistant] = useState(null);
+  const [allAssistants, setAllAssistants] = useState([]);
   const [lauro, setLauro] = useState(null);
   const [assistants, setAssistants] = useState([]);  // owner tabs source
-  const [tabUserId, setTabUserId] = useState(null);  // null=default(Alice), 'all'=merged, or specific id
+  const [tabUserId, setTabUserId] = useState(null);  // null=default(1ª assistente), 'all'=merged, or specific id
   const [allEntries, setAllEntries] = useState([]);  // populated only on the 'all' tab
   const [editRate, setEditRate] = useState(null); // { taskId, type, value }
   // Popup de taxa: dois campos já preenchidos a partir da linha, sem rascunho
@@ -93,9 +97,17 @@ export default function PaymentPage() {
 
   const isOwner = user?.role === 'owner';
   const isAllTab = tabUserId === 'all';
-  // The default rate / PIX editor only makes sense on the legacy Alice view —
-  // it writes specifically to Alice's availability row server-side.
-  const showAliceEditor = !isOwner || (tabUserId === null);
+  // De QUEM é o perfil/taxa exibidos. Não-owner: sempre ele mesmo (o backend
+  // também só devolve os dados dele). Owner: a assistente da aba atual, ou a
+  // primeira na aba padrão.
+  const profileUser = isOwner
+    ? (tabUserId && tabUserId !== 'all'
+      ? allAssistants.find((a) => a.id === tabUserId) || null
+      : primaryAssistant)
+    : user;
+  // Aparece em TODAS as abas de pessoa (antes só na aba legado da Alice) —
+  // menos na visão agregada "Todos", que não tem um perfil único pra mostrar.
+  const showProfileCard = !isAllTab && !!profileUser;
 
   const load = async (m, tabOverride = undefined) => {
     setLoading(true);
@@ -103,23 +115,31 @@ export default function PaymentPage() {
     try {
       // Roster fetch is reused by both branches below to derive the tab list.
       const usersList = await apiFetch('/api/users').catch(() => []);
-      const aliceRow = usersList.find((u) => u.role === 'assistant_fixed' || u.role === 'assistant') || null;
-      setAlice(aliceRow);
       setLauro(usersList.find((u) => u.role === 'owner') || null);
       // Active assistants (any non-owner role; archived users are filtered out
       // server-side by getUserFromRequest). Sort owner-first by name for a
       // stable tab order.
       //
       // `team` continua COMPLETO — é a fonte do agregado "Todos" logo abaixo.
-      // Tirar a Alice daqui removeria as entradas dela do total agregado.
+      // Tirar a primeira assistente daqui removeria as entradas dela do total.
       const team = usersList
         .filter((u) => u.role && u.role !== 'owner')
         .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-      // Já a lista de ABAS exclui a Alice: ela é a aba "padrão" (o caminho
-      // legado sem user_id, que o worker resolve para o assistant_fixed —
-      // ver _worker.js computePaymentSummary). Sem esse filtro ela ganhava
-      // duas abas idênticas: [Alice] [Alice] [Milene] [Todos].
-      setAssistants(team.filter((u) => u.id !== aliceRow?.id));
+      setAllAssistants(team);
+      // Quem é a "primeira assistente" (dona da aba padrão) é decisão do
+      // BACKEND — getRoleUsers ordena por rowid, não por nome. Este palpite
+      // pela função só vale até o summary chegar com `userId` e confirmar
+      // (ver abaixo); sem isso a aba padrão podia mostrar o perfil de uma
+      // pessoa e os lançamentos de outra.
+      const guess = team.find((u) => u.role === 'assistant_fixed')
+        || team.find((u) => u.role === 'assistant')
+        || team[0] || null;
+      setPrimaryAssistant((prev) => prev || guess);
+      // A lista de ABAS exclui a primeira assistente: ela É a aba padrão (a
+      // chamada sem user_id, que o worker resolve para a primeira). Sem esse
+      // filtro ela ganhava duas abas idênticas: [Alice] [Alice] [Milene] [Todos].
+      const primaryId = (primaryAssistant || guess)?.id;
+      setAssistants(team.filter((u) => u.id !== primaryId));
 
       if (isOwner && tab === 'all') {
         // Aggregate: fetch each assistant's summary in parallel, merge entries
@@ -157,9 +177,10 @@ export default function PaymentPage() {
         merged.month = m;
         merged.entries = allTaggedEntries;
         merged.defaultRate = 0;
-        merged.alicePixKey = '';
-        merged.alicePixKeyType = '';
-        merged.aliceBankName = '';
+        merged.userPixKey = '';
+        merged.userPixKeyType = '';
+        merged.userBankName = '';
+        merged.userName = '';
         setSummary(merged);
         setAllEntries(allTaggedEntries);
         setDefaultRateDraft('0');
@@ -169,6 +190,15 @@ export default function PaymentPage() {
         setSummary(sum);
         setAllEntries([]);
         setDefaultRateDraft(String(sum.defaultRate ?? 0));
+        // O backend disse de quem são estes lançamentos — usa isso para fixar
+        // a identidade da aba padrão em vez do palpite por papel.
+        if (isOwner && !tab && sum.userId) {
+          const resolved = team.find((u) => u.id === sum.userId);
+          if (resolved) {
+            setPrimaryAssistant(resolved);
+            setAssistants(team.filter((u) => u.id !== resolved.id));
+          }
+        }
       }
     } finally {
       setLoading(false);
@@ -184,9 +214,12 @@ export default function PaymentPage() {
     setDefaultRateMsg(null);
     try {
       const rate = Number(defaultRateDraft) || 0;
-      // Endpoint dedicado escreve em ALICE.availability.hourly_rate_brl
-      // independente do papel do usuário logado.
-      await apiFetch('/api/payment/default-rate', {
+      // Escreve em availability.hourly_rate_brl DE QUEM a aba está mostrando.
+      // Não-owner: o backend ignora o user_id e usa o próprio usuário logado.
+      const qs = isOwner && profileUser?.id
+        ? `?user_id=${encodeURIComponent(profileUser.id)}`
+        : '';
+      await apiFetch(`/api/payment/default-rate${qs}`, {
         method: 'PUT',
         body: JSON.stringify({ rate }),
       });
@@ -254,8 +287,13 @@ export default function PaymentPage() {
   };
 
   const generatePdf = async () => {
-    const report = await apiFetch(`/api/reports/monthly?month=${month}`);
-    openPrintWindow(report, alice, lauro, isOwner);
+    // Owner numa aba de pessoa gera o relatório DELA; qualquer outro usuário
+    // gera o próprio (o backend recusa user_id de terceiros).
+    const qs = isOwner && profileUser?.id
+      ? `?month=${month}&user_id=${encodeURIComponent(profileUser.id)}`
+      : `?month=${month}`;
+    const report = await apiFetch(`/api/reports/monthly${qs}`);
+    openPrintWindow(report, profileUser, lauro, isOwner);
   };
 
   if (loading || !summary) return <div className="h-full"><LoadingSpinner label="Carregando pagamentos..." /></div>;
@@ -271,25 +309,22 @@ export default function PaymentPage() {
     <div className="mx-auto max-w-5xl space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-2xl font-bold text-ink">Pagamentos</h1>
-        {/* Owner-only: user tab strip. Single-assistant case (just Alice) is
-            unchanged — only render tabs when there's more than one user to
-            switch between. */}
-        {/* `> 0` e não `> 1`: com a Alice fora da lista, ter só a Milene já
-            precisa da barra — senão a aba dela e a "Todos" ficariam
-            inalcançáveis. Com a Alice sozinha, `assistants` fica vazia e a
-            barra some, que é o comportamento correto (uma assistente só não
-            precisa de abas). */}
+        {/* Owner-only: user tab strip. Com uma assistente só, `assistants`
+            fica vazia e a barra some — que é o comportamento correto. */}
+        {/* `> 0` e não `> 1`: com a primeira assistente fora da lista, ter só
+            mais uma pessoa já precisa da barra — senão a aba dela e a "Todos"
+            ficariam inalcançáveis. */}
         {isOwner && assistants.length > 0 && (
           <div className="flex w-full flex-wrap items-center gap-1 border-b border-line">
             <TabBtn
               active={tabUserId === null}
               onClick={() => setTabUserId(null)}
-              /* Nome da Alice em vez de "Padrão": deixa claro de quem é a aba.
-                 O fallback continua genérico porque, sem nenhum
-                 assistant_fixed cadastrado, o caminho legado não resolve
-                 ninguém — rotular a aba vazia com um nome de pessoa que não
-                 existe seria pior que "Padrão". */
-              label={alice?.display_name || alice?.name?.split(' ')[0] || 'Padrão'}
+              /* Nome da pessoa em vez de "Padrão": deixa claro de quem é a aba.
+                 O fallback continua genérico porque, sem nenhuma assistente
+                 cadastrada, o caminho padrão não resolve ninguém — rotular a
+                 aba vazia com um nome de pessoa que não existe seria pior. */
+              label={primaryAssistant?.display_name
+                || primaryAssistant?.name?.split(' ')[0] || 'Padrão'}
             />
             {assistants.map((a) => (
               <TabBtn
@@ -332,23 +367,31 @@ export default function PaymentPage() {
         </div>
       </div>
 
-      {/* Alice info — only on the legacy default tab (the per-user tabs and
-          the aggregated 'Todos' view don't have a single PIX/profile target). */}
-      {showAliceEditor && (
+      {/* Perfil da pessoa da aba atual. Aparece para qualquer assistente vendo
+          os próprios pagamentos E em cada aba do owner — só some na visão
+          agregada 'Todos', que não tem um alvo único de PIX/perfil. */}
+      {showProfileCard && (
       <div className="flex items-center gap-3 rounded-xl border border-line bg-surface p-4">
-        <Avatar user={alice || {}} size={48} />
+        <Avatar user={profileUser || {}} size={48} />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-bold text-ink">{alice?.name || 'Alice'}</div>
-          {summary.alicePixKey ? (
+          <div className="text-sm font-bold text-ink">
+            {profileUser?.name || summary.userName || 'Assistente'}
+          </div>
+          {summary.userPixKey ? (
             <div className="text-xs text-ink2">
-              PIX ({summary.alicePixKeyType || '—'}): <span className="font-medium text-ink">{summary.alicePixKey}</span>
-              {summary.aliceBankName && <> · {summary.aliceBankName}</>}
+              PIX ({summary.userPixKeyType || '—'}): <span className="font-medium text-ink">{summary.userPixKey}</span>
+              {summary.userBankName && <> · {summary.userBankName}</>}
             </div>
           ) : (
-            <div className="text-xs" style={{ color: '#F59E0B' }}>Alice não cadastrou chave PIX</div>
+            <div className="text-xs" style={{ color: '#F59E0B' }}>
+              {profileUser?.name?.split(' ')[0] || 'Esta pessoa'} não cadastrou chave PIX
+            </div>
           )}
         </div>
-        <a href="/profile" className="text-xs text-accent hover:underline">Editar dados → Perfil</a>
+        {/* Owner vendo outra pessoa não edita o perfil dela por aqui. */}
+        {(!isOwner || profileUser?.id === user?.id) && (
+          <a href="/profile" className="text-xs text-accent hover:underline">Editar dados → Perfil</a>
+        )}
       </div>
       )}
 
@@ -357,18 +400,19 @@ export default function PaymentPage() {
         <div className="rounded-lg border border-line bg-surface2 px-3 py-2 text-xs text-ink2">
           {tabUserId === 'all'
             ? 'Visão agregada de todos os assistentes — entradas combinadas com coluna de usuário.'
-            : `Visualizando pagamentos de ${assistants.find((a) => a.id === tabUserId)?.name || 'usuário'}.`}
+            : `Visualizando pagamentos de ${profileUser?.name || summary.userName || 'usuário'}.`}
         </div>
       )}
 
-      {/* Editor da taxa padrão — único local. Escreve em Alice.hourly_rate_brl
-          via /api/payment/default-rate independente do papel do usuário logado. */}
-      {showAliceEditor && (
+      {/* Editor da taxa padrão — escreve em availability.hourly_rate_brl da
+          pessoa da aba atual via /api/payment/default-rate. */}
+      {showProfileCard && (
       <div className="rounded-xl border border-line bg-surface p-4">
         <div className="flex flex-wrap items-end gap-3">
           <label className="block min-w-[200px]">
             <span className="mb-1 block text-xs font-medium text-ink2">
-              Taxa padrão de {alice?.name?.split(' ')[0] || 'Alice'} (R$/h)
+              Taxa padrão de {profileUser?.name?.split(' ')[0]
+                || summary.userName?.split(' ')[0] || 'assistente'} (R$/h)
             </span>
             <input
               type="number"
@@ -1105,7 +1149,8 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
   );
 }
 
-function openPrintWindow(report, alice, lauro, isOwner) {
+// `assistant` é a pessoa do relatório (a da aba atual), não mais a Alice fixa.
+function openPrintWindow(report, assistant, lauro, isOwner) {
   const fmt = (n) => `R$ ${(Number(n) || 0).toFixed(2).replace('.', ',')}`;
   const fmtEur = (n) => `€${(Number(n) || 0).toFixed(2)}`;
   const rows = (report.entries || [])
@@ -1131,10 +1176,10 @@ function openPrintWindow(report, alice, lauro, isOwner) {
   <div class="muted">Gerado em ${new Date().toLocaleString('pt-BR')}</div>
   ${isOwner && report.brlRate ? `<div class="muted">Cotação: 1 BRL = €${Number(report.brlRate).toFixed(4)}</div>` : ''}
 
-  <h2>Alice (Assistente)</h2>
-  <div class="muted">${alice?.name || 'Alice'} · ${alice?.email || ''}<br>PIX (${report.alicePixKeyType || '—'}): ${report.alicePixKey || '—'} · ${report.aliceBankName || ''}</div>
+  <h2>${assistant?.name || report.userName || 'Assistente'} (Assistente)</h2>
+  <div class="muted">${assistant?.name || report.userName || ''} · ${assistant?.email || report.userEmail || ''}<br>PIX (${report.userPixKeyType || '—'}): ${report.userPixKey || '—'} · ${report.userBankName || ''}</div>
 
-  <h2>Lauro (Proprietário)</h2>
+  <h2>${lauro?.name || 'Lauro'} (Proprietário)</h2>
   <div class="muted">${lauro?.name || 'Lauro'} · ${lauro?.email || ''}</div>
 
   <h2>Resumo</h2>

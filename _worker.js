@@ -284,10 +284,13 @@ async function handleAPI(request, env, ctx) {
 
   // Reports
   if (path === '/api/reports/monthly') return handleMonthlyReport(request, env, user);
-  if (path === '/api/reports/list') return handleReportsList(env);
+  if (path === '/api/reports/list') return handleReportsList(env, user);
 
   // Dashboard
-  if (path === '/api/dashboard/alice-timer') return handleAliceTimer(env, user);
+  // Path mantido por compatibilidade com bundles antigos em cache; o handler
+  // não é mais "da Alice" (ver handleAssistantTimer).
+  if (path === '/api/dashboard/alice-timer'
+    || path === '/api/dashboard/assistant-timer') return handleAssistantTimer(env, user);
 
   // Chat — general channel (v1.10 multi-user).
   if (path === '/api/chat/messages') return handleChatMessages(request, env, user, ctx);
@@ -6126,15 +6129,35 @@ async function handleAlertRuleTest(request, env, user, id) {
   });
 }
 
+// v2.25.20 — o sistema foi desenhado para UMA assistente (Alice). Com duas ou
+// mais (Alice + Milene), `find(role === 'assistant_fixed')` devolvia sempre a
+// primeira por rowid, e todo mundo via os dados da Alice. Agora devolve a lista
+// COMPLETA de assistentes; `assistantId`/`assistant` continuam existindo só
+// para os chamadores da era de uma assistente só (reunião, alertas, dashboard
+// do owner) — código novo deve usar `assistants`/`assistantIds`.
 async function getRoleUsers(env) {
   const { results } = await env.DB.prepare('SELECT id, role FROM users').all();
   const owner = (results || []).find((u) => u.role === 'owner');
   // Migration 0022 renamed the legacy 'assistant' role to 'assistant_fixed'.
-  // Accept either name — preferring the new one — so alert targeting and the
-  // payment summary keep working across the rename.
-  const assistant = (results || []).find((u) => u.role === 'assistant_fixed')
-    || (results || []).find((u) => u.role === 'assistant');
-  return { ownerId: owner ? owner.id : null, assistantId: assistant ? assistant.id : null };
+  // Accept either name — plus 'assistant_external' — so alert targeting and the
+  // payment routes keep working across the rename.
+  const assistants = (results || []).filter(
+    (u) => u.role === 'assistant_fixed'
+      || u.role === 'assistant_external'
+      || u.role === 'assistant'
+  );
+  // "Primeira assistente" preserva a preferência antiga pelo nome novo do papel
+  // (assistant_fixed antes de um 'assistant' legado), não a ordem da tabela.
+  const primary = assistants.find((u) => u.role === 'assistant_fixed') || assistants[0] || null;
+  return {
+    ownerId: owner ? owner.id : null,
+    owner: owner || null,
+    assistants,
+    assistantIds: assistants.map((u) => u.id),
+    // Back-compat (uma assistente só):
+    assistantId: primary ? primary.id : null,
+    assistant: primary,
+  };
 }
 
 function targetUserIds(target, roleUsers) {
@@ -6267,6 +6290,9 @@ function monthRange(month) {
   return { start, end };
 }
 
+// `overrideUserId` é DE QUEM é o resumo. Sem ele cai na primeira assistente —
+// caminho legado mantido só para chamadas internas sem um usuário-alvo; todas
+// as rotas HTTP passam um id explícito (ver handlePaymentSummary).
 async function computePaymentSummary(env, month, overrideUserId = null) {
   const { start, end } = monthRange(month);
   const { assistantId: legacyAssistantId } = await getRoleUsers(env);
@@ -6281,7 +6307,7 @@ async function computePaymentSummary(env, month, overrideUserId = null) {
      ORDER BY e.started_at`
   ).bind(assistantId, start, end).all();
 
-  // Taxa padrão = Alice.availability.hourly_rate_brl (BRL).
+  // Taxa padrão = availability.hourly_rate_brl (BRL) DO USUÁRIO do resumo.
   // NÃO faz fallback pra `hourly_rate` legacy (€/h), porque misturar moedas
   // produzia valores fantasmas tipo "R$ 2.50" quando hourly_rate_brl estava 0
   // mas hourly_rate tinha um euro antigo. Se hourly_rate_brl não foi setado,
@@ -6354,9 +6380,18 @@ async function computePaymentSummary(env, month, overrideUserId = null) {
   }
 
   const pd = await env.DB.prepare('SELECT pix_key, pix_key_type, bank_name FROM user_profile_data WHERE user_id = ?').bind(assistantId).first();
+  // Identidade de quem é o resumo — a página não precisa mais adivinhar a
+  // partir do papel (era daí que saía o "Alice" na tela da Milene).
+  const su = assistantId
+    ? await env.DB.prepare('SELECT id, name, email, avatar FROM users WHERE id = ?').bind(assistantId).first()
+    : null;
 
   return {
     month,
+    userId: su ? su.id : null,
+    userName: su ? (su.name || su.email || '') : '',
+    userEmail: su ? su.email || '' : '',
+    userAvatar: su ? su.avatar || '' : '',
     totalHours: Math.round(totalHours * 100) / 100,
     totalDue: Math.round(totalDue * 100) / 100,
     totalPaid: Math.round(totalPaid * 100) / 100,
@@ -6370,8 +6405,15 @@ async function computePaymentSummary(env, month, overrideUserId = null) {
     brlRate,
     brlRateUpdatedAt: brl.updated_at,
     defaultRate,
-    aliceRate: defaultRate,
+    userRate: defaultRate,
     entries,
+    userPixKey: pd ? pd.pix_key || '' : '',
+    userPixKeyType: pd ? pd.pix_key_type || '' : '',
+    userBankName: pd ? pd.bank_name || '' : '',
+    // DEPRECATED (v2.25.20): nomes antigos mantidos por um release para não
+    // quebrar um bundle antigo em cache. Remover quando todos os clientes
+    // estiverem na versão nova.
+    aliceRate: defaultRate,
     alicePixKey: pd ? pd.pix_key || '' : '',
     alicePixKeyType: pd ? pd.pix_key_type || '' : '',
     aliceBankName: pd ? pd.bank_name || '' : ''
@@ -6387,8 +6429,11 @@ async function handlePaymentSummary(request, env, user) {
     totalDueBrl: 0, totalPaidBrl: 0, balanceBrl: 0,
     totalDueEur: 0, totalPaidEur: 0, balanceEur: 0,
     brlRate: 0, brlRateUpdatedAt: null,
-    defaultRate: 0, aliceRate: 0,
-    entries: [], alicePixKey: '', alicePixKeyType: '', aliceBankName: '',
+    defaultRate: 0, userRate: 0, aliceRate: 0,
+    userId: null, userName: '', userEmail: '', userAvatar: '',
+    entries: [],
+    userPixKey: '', userPixKeyType: '', userBankName: '',
+    alicePixKey: '', alicePixKeyType: '', aliceBankName: '',
   };
   if (!requirePermission(user, 'payment', 'view')) return json(emptySummary);
   if (!canDo(user.granular, 'payment', 'view_own') &&
@@ -6398,33 +6443,50 @@ async function handlePaymentSummary(request, env, user) {
   const url = new URL(request.url);
   const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7);
   const requestedUserId = url.searchParams.get('user_id');
-  // Override priority:
-  //   payment='own' (non-owner) → always self.
-  //   owner + explicit ?user_id=X → that user (lets the owner tab through
-  //     each team member's payments without logging in as them).
-  //   anything else → null (legacy "always Alice" computePaymentSummary path).
-  const paymentLevel = (user.permissions && user.permissions.payment) || 'full';
+  // Quem NÃO é owner sempre vê os próprios dados — nunca mais o caminho legado
+  // "sempre a Alice". Antes isso dependia de payment==='own'; qualquer outro
+  // nível (ex.: 'full' concedido a uma assistente) caía no legado e mostrava a
+  // primeira assistente da tabela para todo mundo.
+  // Owner + ?user_id=X → aquele usuário (abas por assistente na PaymentPage).
   let overrideUserId = null;
-  if (paymentLevel === 'own' && user.role !== 'owner') {
+  if (user.role !== 'owner') {
     overrideUserId = user.id;
-  } else if (user.role === 'owner' && requestedUserId) {
+  } else if (requestedUserId) {
     overrideUserId = requestedUserId;
   }
   return json(await computePaymentSummary(env, month, overrideUserId));
 }
 
-// GET retorna a taxa padrão (BRL) atualmente configurada para Alice.
-// PUT define/atualiza a taxa padrão. Salva em ALICE.availability.hourly_rate_brl
-// independente de quem está logado (owner ou assistant). Owner edita a taxa
-// de Alice da PaymentPage sem precisar logar como Alice.
+// Taxa padrão (BRL) em availability.hourly_rate_brl.
+// v2.25.20: o alvo é o PRÓPRIO usuário logado — antes era sempre a primeira
+// assistente (Alice), então a Milene editava o campo e o valor ia parar na
+// linha da Alice. O owner continua podendo editar a de outra pessoa via
+// ?user_id=X (é assim que as abas da PaymentPage funcionam); sem esse
+// parâmetro, edita a primeira assistente (aba padrão).
+// O check de papel usava 'assistant', nome morto desde a migration 0022 —
+// nenhuma assistente passava por ele (todas são assistant_fixed/external).
 async function handlePaymentDefaultRate(request, env, user) {
   if (request.method !== 'GET' && request.method !== 'PUT') {
     return json({ error: 'Método não permitido' }, 405);
   }
-  if (user.role !== 'owner' && user.role !== 'assistant') {
-    return json({ error: 'Não autorizado' }, 403);
+  if (user.role !== 'owner'
+      && user.role !== 'assistant_fixed'
+      && user.role !== 'assistant_external'
+      && user.role !== 'assistant') {
+    return json({ error: 'Sem permissão' }, 403);
   }
-  const { assistantId } = await getRoleUsers(env);
+  const requestedUserId = new URL(request.url).searchParams.get('user_id');
+  let assistantId;
+  if (user.role === 'owner') {
+    if (requestedUserId) {
+      assistantId = requestedUserId;
+    } else {
+      ({ assistantId } = await getRoleUsers(env));
+    }
+  } else {
+    // Não-owner: sempre a própria taxa, ignorando qualquer ?user_id.
+    assistantId = user.id;
+  }
   if (!assistantId) return json({ error: 'Assistente não cadastrada' }, 404);
 
   if (request.method === 'GET') {
@@ -6557,9 +6619,30 @@ async function handlePersonalDataByUser(request, env, user, userId) {
 // Monthly report
 // ---------------------------------------------------------------------------
 
+// v2.25.20: o relatório é SEMPRE de alguém. Antes chamava computePaymentSummary
+// sem alvo — ou seja, qualquer pessoa com payment.generate_report gerava (e
+// baixava em PDF) os lançamentos e a chave PIX da primeira assistente.
 async function handleMonthlyReport(request, env, user) {
-  const month = new URL(request.url).searchParams.get('month') || new Date().toISOString().slice(0, 7);
-  const summary = await computePaymentSummary(env, month);
+  const url = new URL(request.url);
+  const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7);
+  const requestedUserId = url.searchParams.get('user_id');
+  if (!requirePermission(user, 'payment', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+  if (!canDo(user.granular, 'payment', 'generate_report')) {
+    return json({ error: 'Sem permissão para gerar relatórios' }, 403);
+  }
+  // Só o owner gera o relatório de outra pessoa.
+  if (user.role !== 'owner' && requestedUserId && requestedUserId !== user.id) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+  let targetUserId;
+  if (user.role === 'owner') {
+    targetUserId = requestedUserId || (await getRoleUsers(env)).assistantId;
+  } else {
+    targetUserId = user.id;
+  }
+  const summary = await computePaymentSummary(env, month, targetUserId);
   const { start, end } = monthRange(month);
   const { results } = await env.DB.prepare(
     `${await taskSelectFor(env)} WHERE t.status = 'done' AND t.updated_at >= ? AND t.updated_at < ? ORDER BY t.updated_at DESC`
@@ -6568,12 +6651,28 @@ async function handleMonthlyReport(request, env, user) {
 
   const report = { ...summary, completedTasks, generatedAt: Math.floor(Date.now() / 1000) };
 
-  const existing = await env.DB.prepare('SELECT id FROM monthly_reports WHERE month = ?').bind(month).first();
   const now = Math.floor(Date.now() / 1000);
+  // Chave lógica (month, user_id) — migration 0053. Em bancos sem a coluna
+  // ainda, cai no comportamento antigo (uma linha por mês).
+  let existing = null;
+  let hasUserColumn = true;
+  try {
+    existing = await env.DB.prepare(
+      'SELECT id FROM monthly_reports WHERE month = ? AND user_id IS ?'
+    ).bind(month, targetUserId || null).first();
+  } catch {
+    hasUserColumn = false;
+    existing = await env.DB.prepare('SELECT id FROM monthly_reports WHERE month = ?').bind(month).first();
+  }
   if (existing) {
     await env.DB.prepare(
       `UPDATE monthly_reports SET generated_at=?, generated_by=?, total_hours=?, total_due=?, total_paid=?, tasks_completed=?, report_data=? WHERE id=?`
     ).bind(now, user.id, summary.totalHours, summary.totalDue, summary.totalPaid, completedTasks.length, JSON.stringify(report), existing.id).run();
+  } else if (hasUserColumn) {
+    await env.DB.prepare(
+      `INSERT INTO monthly_reports (id, month, user_id, generated_at, generated_by, total_hours, total_due, total_paid, tasks_completed, report_data)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
+    ).bind(crypto.randomUUID(), month, targetUserId || null, now, user.id, summary.totalHours, summary.totalDue, summary.totalPaid, completedTasks.length, JSON.stringify(report)).run();
   } else {
     await env.DB.prepare(
       `INSERT INTO monthly_reports (id, month, generated_at, generated_by, total_hours, total_due, total_paid, tasks_completed, report_data)
@@ -6583,26 +6682,54 @@ async function handleMonthlyReport(request, env, user) {
   return json(report);
 }
 
-async function handleReportsList(env) {
-  const { results } = await env.DB.prepare(
-    'SELECT id, month, generated_at, total_hours, total_due, total_paid, tasks_completed FROM monthly_reports ORDER BY month DESC'
-  ).all();
-  return json(results || []);
+// Não-owner só enxerga os próprios relatórios.
+async function handleReportsList(env, user) {
+  const cols = 'id, month, generated_at, total_hours, total_due, total_paid, tasks_completed';
+  try {
+    const { results } = user && user.role === 'owner'
+      ? await env.DB.prepare(
+        `SELECT ${cols}, user_id FROM monthly_reports ORDER BY month DESC`
+      ).all()
+      : await env.DB.prepare(
+        `SELECT ${cols}, user_id FROM monthly_reports WHERE user_id = ? ORDER BY month DESC`
+      ).bind(user ? user.id : null).all();
+    return json(results || []);
+  } catch {
+    // Banco sem a coluna user_id (migration 0053 não aplicada).
+    if (user && user.role !== 'owner') return json([]);
+    const { results } = await env.DB.prepare(
+      `SELECT ${cols} FROM monthly_reports ORDER BY month DESC`
+    ).all();
+    return json(results || []);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
 
-async function handleAliceTimer(env, user) {
-  const { assistantId } = await getRoleUsers(env);
-  if (!assistantId) return json({ active: false });
+// v2.25.20 — era handleAliceTimer e mostrava sempre o timer da primeira
+// assistente: a Milene via no dashboard dela o cronômetro da Alice. Agora o
+// owner vê a primeira assistente (comportamento de sempre, é o painel de
+// acompanhamento dele) e cada assistente vê o próprio. `userName` vai junto
+// para o painel não ter que adivinhar de quem é o timer.
+async function handleAssistantTimer(env, user) {
+  const targetUserId = user && user.role === 'owner'
+    ? (await getRoleUsers(env)).assistantId
+    : (user ? user.id : null);
+  if (!targetUserId) return json({ active: false, userName: '' });
+  const target = await env.DB.prepare(
+    'SELECT name, email FROM users WHERE id = ?'
+  ).bind(targetUserId).first();
+  const userName = target ? (target.name || target.email || '') : '';
   const row = await env.DB.prepare(
     `${ENTRY_SELECT} WHERE e.user_id = ? AND e.ended_at IS NULL`
-  ).bind(assistantId).first();
-  if (!row) return json({ active: false });
+  ).bind(targetUserId).first();
+  if (!row) return json({ active: false, userId: targetUserId, userName });
   return json({
     active: true,
+    userId: targetUserId,
+    userName,
     taskTitle: row.task_title || 'Sem tarefa',
     startedAt: row.started_at,
     elapsedSeconds: Math.max(0, Math.floor(Date.now() / 1000) - row.started_at)

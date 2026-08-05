@@ -67,6 +67,38 @@ export function needsDate(task) {
   return task.status !== 'done' && !task.due_date && !task.delivery_date;
 }
 
+// v2.25.19 — lista única de responsáveis de uma tarefa, na ordem de exibição:
+// o principal (assigned_to/assignedUser) primeiro, depois os co-responsáveis.
+// O backend devolve `assignees` já contendo o principal com role='owner', mas
+// tarefas anteriores à migration 0052 (e respostas de endpoints que não passam
+// pelo TASK_SELECT completo) só têm assignedUser — daí a fusão aqui.
+export function taskAssignees(task) {
+  if (!task) return [];
+  const out = [];
+  const seen = new Set();
+  const push = (u, role) => {
+    if (!u || !u.id || seen.has(u.id)) return;
+    seen.add(u.id);
+    out.push({ id: u.id, name: u.name, avatar: u.avatar, role });
+  };
+  push(task.assignedUser, 'owner');
+  for (const a of task.assignees || []) push(a, a.role || 'assignee');
+  return out;
+}
+
+// Ids de todos os responsáveis — usado pelos filtros ("Eu"/"Outro").
+export function taskAssigneeIds(task) {
+  return taskAssignees(task).map((a) => a.id);
+}
+
+// Só os co-responsáveis (sem o principal) — o que o editor edita.
+export function coAssigneeIds(task) {
+  if (!task) return [];
+  return (task.assignees || [])
+    .filter((a) => a && a.id && a.id !== task.assigned_to)
+    .map((a) => a.id);
+}
+
 // Recorrência (v2.25.5) — dias da semana na convenção Date.getDay() (0=domingo),
 // exibidos em ordem PT-BR (Seg…Dom). Mesma convenção usada em recurrence_days
 // e em _worker.js::calcNextDate.

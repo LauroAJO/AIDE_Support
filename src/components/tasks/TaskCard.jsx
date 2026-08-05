@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { AlertTriangle, Star, ChevronRight, ChevronDown, Briefcase, Repeat } from 'lucide-react';
-import Avatar from '../shared/Avatar';
+import AvatarStack from '../shared/AvatarStack';
 import { useStore } from '../../store';
 import {
   scoreColor,
@@ -10,6 +10,7 @@ import {
   isOverdue,
   needsDate,
   recurrenceSummary,
+  taskAssignees,
 } from '../../lib/tasks';
 
 export default function TaskCard({ task, selected, onClick, onToggleFavorite, onToggleSubtask }) {
@@ -17,6 +18,8 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
   const warn = needsDate(task);
   const fav = !!task.favorited;
   const subs = task.subtasks || [];
+  // v2.25.19 — principal + co-responsáveis numa pilha só.
+  const assignees = taskAssignees(task);
   const [expanded, setExpanded] = useState(false);
   // Etapa 6 — nome da oportunidade vinculada, resolvido a partir do store.
   const opportunityTitle = useStore((s) =>
@@ -122,10 +125,13 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
         </div>
       )}
 
-      {task.assignedUser && (
+      {assignees.length > 0 && (
         <div className="mt-2 flex items-center gap-1.5">
-          <Avatar user={task.assignedUser} size={18} />
-          <span className="text-[11px] text-ink2">{task.assignedUser.name}</span>
+          <AvatarStack users={assignees} size={18} max={3} />
+          <span className="text-[11px] text-ink2">
+            {assignees[0].name}
+            {assignees.length > 1 && ` +${assignees.length - 1}`}
+          </span>
         </div>
       )}
 
@@ -156,7 +162,9 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
                     }}
                     className="accent-[#6366f1]"
                   />
-                  <span className={s.done ? 'text-muted line-through' : 'text-ink'}>{s.text}</span>
+                  <span className={`flex-1 ${s.done ? 'text-muted line-through' : 'text-ink'}`}>{s.text}</span>
+                  {/* Subtarefa-linha pode ter responsável próprio (v2.25.19) */}
+                  {s.assignedUser && <AvatarStack users={[s.assignedUser]} size={14} max={1} />}
                 </li>
               ))}
             </ul>

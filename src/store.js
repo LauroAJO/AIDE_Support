@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { taskAssigneeIds } from './lib/tasks';
 
 export const useStore = create((set) => ({
   user: null,
@@ -202,8 +203,13 @@ export const selectFilteredTasks = (state) => {
       return false;
     }
     if (q && !t.title.toLowerCase().includes(q)) return false;
-    if (taskFilter.assignedTo === 'me' && t.assigned_to !== user?.id) return false;
-    if (taskFilter.assignedTo === 'other' && (!t.assigned_to || t.assigned_to === user?.id)) {
+    // v2.25.19 — "Eu"/"Outro" passam a considerar TODOS os responsáveis
+    // (principal + co-responsáveis da junction task_assignees), não só
+    // assigned_to. Sem isso, uma tarefa em que sou co-responsável some do
+    // filtro "Eu" mesmo sendo minha.
+    const ids = taskAssigneeIds(t);
+    if (taskFilter.assignedTo === 'me' && !ids.includes(user?.id)) return false;
+    if (taskFilter.assignedTo === 'other' && (!ids.length || ids.every((id) => id === user?.id))) {
       return false;
     }
     return true;

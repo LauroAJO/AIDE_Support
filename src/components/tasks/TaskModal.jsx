@@ -13,7 +13,8 @@ import {
   DISCARD_CONFIRM_LABEL, DISCARD_CANCEL_LABEL,
 } from '../../hooks/useUnsavedGuard';
 import { MarkdownViewer } from '../../lib/markdownRenderer';
-import { scoreColor, STATUS_LABELS, STATUS_COLORS, formatDate, isOverdue, WEEKDAY_CHIPS } from '../../lib/tasks';
+import AvatarStack from '../shared/AvatarStack';
+import { scoreColor, STATUS_LABELS, STATUS_COLORS, formatDate, isOverdue, WEEKDAY_CHIPS, taskAssignees } from '../../lib/tasks';
 
 // Recorrência (v2.25.5): "Personalizada" no seletor é só uma forma alternativa
 // de configurar o mesmo recurrence_type ('daily'/'weekly'/'monthly') — deixa
@@ -241,13 +242,37 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
     isDirty: !!comment.trim(), onClose, onDiscard: discardDraft,
   });
 
+  // v2.25.19 — as subtarefas podem ser linhas reais (isReal, com endpoint
+  // próprio e responsável independente) ou o JSON legado dentro da tarefa mãe.
+  // Cópia local só para o check marcar na hora: a lista volta a sair do `task`
+  // assim que a página recarrega.
+  const [subs, setSubs] = useState(task?.subtasks || []);
+  useEffect(() => { setSubs(task?.subtasks || []); }, [task?.id, task?.subtasks]);
+
   if (!task) return null;
-  const subs = task.subtasks || [];
   const done = subs.filter((s) => s.done).length;
   const overdue = isOverdue(task.due_date);
+  const assignees = taskAssignees(task);
 
-  const toggleSub = (id) =>
-    onPersist(task, { subtasks: subs.map((s) => (s.id === id ? { ...s, done: !s.done } : s)) });
+  const toggleSub = async (id) => {
+    const sub = subs.find((s) => s.id === id);
+    if (!sub) return;
+    if (!sub.isReal) {
+      onPersist(task, { subtasks: subs.map((s) => (s.id === id ? { ...s, done: !s.done } : s)) });
+      return;
+    }
+    setSubs((list) => list.map((s) => (
+      s.id === id ? { ...s, done: !s.done, status: s.done ? 'todo' : 'done' } : s)));
+    try {
+      await apiFetch(`/api/tasks/${task.id}/subtasks/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: sub.done ? 'todo' : 'done' }),
+      });
+    } catch {
+      setSubs((list) => list.map((s) => (
+        s.id === id ? { ...s, done: sub.done, status: sub.status } : s)));
+    }
+  };
 
   const addComment = () => {
     const v = comment.trim();
@@ -335,9 +360,18 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
           {hasDraft && <DraftBanner onDiscard={discardDraft} label="Comentário em rascunho recuperado" />}
           {/* Meta */}
           <div className="flex flex-wrap items-center gap-3 text-xs">
-            {task.assignedUser && (
-              <span className="flex items-center gap-1.5 text-ink2">
-                <Avatar user={task.assignedUser} size={20} /> {task.assignedUser.name}
+            {/* v2.25.19 — todos os responsáveis, não só o principal. */}
+            {assignees.length > 0 && (
+              <span className="flex flex-wrap items-center gap-1.5 text-ink2">
+                <span className="font-medium">
+                  {assignees.length > 1 ? 'Responsáveis:' : 'Responsável:'}
+                </span>
+                {assignees.map((a, i) => (
+                  <span key={a.id} className="flex items-center gap-1">
+                    {i > 0 && <span className="text-muted">·</span>}
+                    <Avatar user={a} size={20} /> {a.name}
+                  </span>
+                ))}
               </span>
             )}
             {task.due_date && (
@@ -349,7 +383,12 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
             <span className="text-ink2">U {task.urgency} · I {task.importance} · E {task.energy}</span>
           </div>
 
-          {task.parent_task_id && <ParentTaskNote parentTaskId={task.parent_task_id} onOpenTask={onOpenTask} />}
+          {/* Só para a linhagem de RECORRÊNCIA. Subtarefas (is_subtask=1) também
+              usam parent_task_id, mas "gerada automaticamente de" seria mentira
+              para elas — daí o !task.is_subtask (v2.25.19). */}
+          {task.parent_task_id && !task.is_subtask && (
+            <ParentTaskNote parentTaskId={task.parent_task_id} onOpenTask={onOpenTask} />
+          )}
 
           <RecurrenceSection key={task.id} task={task} onPersist={onPersist} />
 
@@ -377,7 +416,14 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
                 {subs.map((s) => (
                   <li key={s.id} className="flex items-center gap-2 text-sm">
                     <input type="checkbox" checked={!!s.done} onChange={() => toggleSub(s.id)} className="accent-[#6366f1]" />
-                    <span className={s.done ? 'text-muted line-through' : 'text-ink'}>{s.text}</span>
+                    <span className={`flex-1 ${s.done ? 'text-muted line-through' : 'text-ink'}`}>{s.text}</span>
+                    {/* Subtarefa-linha pode ter responsável próprio (v2.25.19) */}
+                    {s.assignedUser && (
+                      <span className="flex items-center gap-1 text-[11px] text-ink2">
+                        <AvatarStack users={[s.assignedUser]} size={16} max={1} />
+                        {s.assignedUser.name}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>

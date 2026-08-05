@@ -173,10 +173,34 @@ export default function TasksPage() {
   };
   const toggleFavorite = (task) => persistTask(task, { favorited: task.favorited ? 0 : 1 });
   const changeStatus = (task, status) => persistTask(task, { status });
-  const toggleSubtask = (task, subId) =>
-    persistTask(task, {
-      subtasks: (task.subtasks || []).map((s) => (s.id === subId ? { ...s, done: !s.done } : s)),
-    });
+  // v2.25.19 — subtarefas agora podem ser linhas reais (isReal) ou o JSON
+  // legado. As reais têm endpoint próprio; as legadas seguem salvando o array
+  // inteiro no PUT da tarefa mãe, como antes.
+  const toggleSubtask = async (task, subId) => {
+    const sub = (task.subtasks || []).find((s) => s.id === subId);
+    if (!sub) return;
+    if (!sub.isReal) {
+      return persistTask(task, {
+        subtasks: (task.subtasks || []).map((s) => (s.id === subId ? { ...s, done: !s.done } : s)),
+      });
+    }
+    // Otimista na lista, igual ao persistTask: reverte recarregando em caso de erro.
+    const next = {
+      ...task,
+      subtasks: task.subtasks.map((s) =>
+        (s.id === subId ? { ...s, done: !s.done, status: s.done ? 'todo' : 'done' } : s)),
+    };
+    setTasks(tasks.map((t) => (t.id === task.id ? next : t)));
+    if (selectedTask?.id === task.id) setSelectedTask(next);
+    try {
+      await apiFetch(`/api/tasks/${task.id}/subtasks/${subId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: sub.done ? 'todo' : 'done' }),
+      });
+    } catch {
+      loadAll();
+    }
+  };
   const addInColumn = (status) => {
     setEditorStatus(status);
     setEditorTask(null);
@@ -426,6 +450,7 @@ export default function TasksPage() {
           }}
           onSaved={onSaved}
           onDeleted={onDeleted}
+          onChanged={loadAll}
         />
       )}
 

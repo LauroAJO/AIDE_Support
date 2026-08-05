@@ -104,6 +104,18 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/tasks/recurring' && method === 'GET') {
     return handleTasksRecurring(request, env, user);
   }
+  // v2.25.19 — subtarefas como linhas reais. Todas ANTES da rota generica
+  // /api/tasks/:id, senao 'migrate-subtasks' viraria um id de tarefa.
+  if (path === '/api/tasks/migrate-subtasks') {
+    return handleMigrateSubtasks(request, env, user);
+  }
+  if (path.match(/^\/api\/tasks\/[^/]+\/subtasks$/)) {
+    return handleTaskSubtasks(request, env, user, path.split('/')[3], ctx);
+  }
+  if (path.match(/^\/api\/tasks\/[^/]+\/subtasks\/[^/]+$/)) {
+    const parts = path.split('/');
+    return handleTaskSubtaskItem(request, env, user, parts[3], parts[5], ctx);
+  }
   // Task files — must match BEFORE the generic /api/tasks/:id route below.
   if (path.match(/^\/api\/tasks\/[^/]+\/files\/link$/)) {
     return handleAttachmentLink(request, env, user, 'task', path.split('/')[3]);
@@ -1382,7 +1394,7 @@ function shapeTask(row) {
     delivery_date: row.delivery_date || null,
     tags: parseJsonArray(row.tags),
     comments: parseJsonArray(row.comments),
-    subtasks: parseJsonArray(row.subtasks),
+    subtasks: shapeSubtasks(row),
     time_entries: parseJsonArray(row.time_entries),
     favorited: row.favorited ? 1 : 0,
     google_event_id: row.google_event_id || null,
@@ -1397,13 +1409,50 @@ function shapeTask(row) {
     recurrence_end_date: row.recurrence_end_date || '',
     recurrence_count: row.recurrence_count || 0,
     parent_task_id: row.parent_task_id || null,
+    is_subtask: row.is_subtask ? 1 : 0,
+    subtask_order: row.subtask_order != null ? row.subtask_order : 0,
     created_at: row.created_at,
     updated_at: row.updated_at,
     score: calcScore(row.urgency, row.importance),
     assignedUser: row.au_id
       ? { id: row.au_id, name: row.au_name, avatar: row.au_avatar }
-      : null
+      : null,
+    // v2.25.19 — co-responsaveis (migration 0052). Vem de task_assignees; o
+    // responsavel principal aparece aqui com role='owner' e continua tambem em
+    // assigned_to/assignedUser. Vazio quando a migracao ainda nao rodou.
+    assignees: parseJsonArray(row.assignees_json)
   };
+}
+
+// v2.25.19 — subtarefas. Depois da migration 0052 elas sao linhas reais de
+// `tasks` (is_subtask=1) e chegam aqui pre-agregadas em row.subtasks_json;
+// antes disso (e em tarefas ainda nao migradas) continuam no JSON legado
+// tasks.subtasks. Real ganha do legado quando existe, senao cai no legado —
+// e por isso que a migracao zera a coluna antiga ao promover as linhas.
+//
+// Cada item sai com title/status (campos reais) E text/done (formato legado),
+// para os renderizadores antigos seguirem funcionando sem alteracao.
+function shapeSubtasks(row) {
+  const real = parseJsonArray(row.subtasks_json);
+  if (!real.length) return parseJsonArray(row.subtasks);
+  // Ordenado em JS: json_group_array(... ORDER BY ...) exige SQLite 3.44+ e
+  // um subselect com ORDER BY nao pode ser correlacionado (sem LATERAL).
+  return real
+    .slice()
+    .sort((a, b) => (a.subtask_order || 0) - (b.subtask_order || 0))
+    .map((s) => ({
+      id: s.id,
+      title: s.title,
+      text: s.title,
+      status: s.status,
+      done: s.status === 'done',
+      assigned_to: s.assigned_to || null,
+      subtask_order: s.subtask_order || 0,
+      assignedUser: s.assigned_to
+        ? { id: s.assigned_to, name: s.assigned_name, avatar: s.assigned_avatar }
+        : null,
+      isReal: true
+    }));
 }
 
 // LEFT JOINs all the way through (front → project → area + assignee) so the
@@ -1418,6 +1467,117 @@ const TASK_SELECT =
   'LEFT JOIN fronts f ON t.front_id = f.id ' +
   'LEFT JOIN projects p ON t.project_id = p.id ' +
   'LEFT JOIN areas a ON p.area_id = a.id';
+
+// v2.25.19 — mesma consulta + os dois agregados da migration 0052:
+// co-responsaveis (task_assignees) e subtarefas-linha (tasks com is_subtask=1).
+// Precisa ser montado a partir do TASK_SELECT legado para as duas versoes nunca
+// divergirem nas colunas base.
+const TASK_SELECT_FULL = TASK_SELECT.replace(
+  'SELECT t.*,',
+  "SELECT t.*, " +
+  "(SELECT json_group_array(json_object(" +
+  "  'id', ta.user_id, 'name', u2.name, 'avatar', u2.avatar, 'role', ta.role" +
+  ")) FROM task_assignees ta JOIN users u2 ON u2.id = ta.user_id " +
+  " WHERE ta.task_id = t.id) AS assignees_json, " +
+  "(SELECT json_group_array(json_object(" +
+  "  'id', st.id, 'title', st.title, 'status', st.status, " +
+  "  'assigned_to', st.assigned_to, 'subtask_order', st.subtask_order, " +
+  "  'assigned_name', (SELECT name FROM users WHERE id = st.assigned_to), " +
+  "  'assigned_avatar', (SELECT avatar FROM users WHERE id = st.assigned_to)" +
+  ")) FROM tasks st " +
+  " WHERE st.parent_task_id = t.id AND st.is_subtask = 1) AS subtasks_json,"
+);
+
+// A 0052 pode nao ter rodado ainda no banco remoto quando este deploy sobe —
+// sem essa checagem TODA leitura de tarefa quebraria (coluna/tabela ausente).
+// Sonda uma vez por isolate; so o resultado positivo e memoizado, para um
+// isolate que subiu antes da migracao passar a enxerga-la assim que ela rodar.
+let taskExtrasReady = false;
+async function ensureTaskExtras(env) {
+  if (taskExtrasReady) return true;
+  try {
+    await env.DB.prepare('SELECT is_subtask, subtask_order FROM tasks LIMIT 1').first();
+    await env.DB.prepare('SELECT task_id FROM task_assignees LIMIT 1').first();
+    taskExtrasReady = true;
+  } catch {
+    return false; // migration 0052 nao aplicada — segue no formato legado
+  }
+  return true;
+}
+
+// SELECT de tarefa a usar nesta request: completo se a 0052 ja rodou, legado
+// caso contrario.
+async function taskSelectFor(env) {
+  return (await ensureTaskExtras(env)) ? TASK_SELECT_FULL : TASK_SELECT;
+}
+
+// Filtro para esconder as subtarefas das listagens de tarefas de topo. Elas sao
+// linhas de `tasks` como qualquer outra: sem isso apareceriam soltas na lista,
+// no kanban e no export, duplicando o que ja aparece dentro da tarefa mae.
+const NOT_SUBTASK = '(t.is_subtask IS NULL OR t.is_subtask = 0)';
+
+// Ids de todos os responsaveis de uma tarefa (principal + co-responsaveis).
+// Array vazio quando a 0052 ainda nao rodou.
+async function listTaskAssigneeIds(env, taskId) {
+  if (!(await ensureTaskExtras(env))) return [];
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT user_id FROM task_assignees WHERE task_id = ?'
+    ).bind(taskId).all();
+    return (results || []).map((r) => r.user_id).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// Mantem task_assignees em dia depois de um POST/PUT de tarefa.
+//   assigneeIds: array = substitui TODO o conjunto de co-responsaveis;
+//                null  = nao mexe neles.
+//   ownerChanged: true = regrava a linha role='owner' a partir de ownerId
+//                 (ownerId null remove o responsavel principal da junction).
+// Nunca derruba a request: se a 0052 nao rodou, a tarefa salva do mesmo jeito
+// e a junction fica para depois.
+async function syncTaskAssignees(env, taskId, { assigneeIds, ownerId, ownerChanged, addedBy }) {
+  if (!(await ensureTaskExtras(env))) return;
+  try {
+    // A ORDEM importa. O 'owner' antigo sai PRIMEIRO: se ele virou
+    // co-responsavel nesta mesma edicao (troca de responsavel principal entre
+    // duas pessoas que ja estavam na tarefa), a linha antiga dele ainda estaria
+    // la com role='owner' e o INSERT OR IGNORE de co-responsavel seria
+    // silenciosamente descartado pela PK — depois o DELETE do owner o removeria
+    // de vez, sumindo com a pessoa da tarefa.
+    if (ownerChanged) {
+      await env.DB.prepare(
+        "DELETE FROM task_assignees WHERE task_id = ? AND role = 'owner'"
+      ).bind(taskId).run();
+    }
+    if (Array.isArray(assigneeIds)) {
+      await env.DB.prepare(
+        "DELETE FROM task_assignees WHERE task_id = ? AND role = 'assignee'"
+      ).bind(taskId).run();
+      const seen = new Set();
+      for (const uid of assigneeIds) {
+        // O responsavel principal ja entra como 'owner' — nao duplicar (a PK
+        // (task_id,user_id) so guarda um papel por pessoa).
+        if (!uid || uid === ownerId || seen.has(uid)) continue;
+        seen.add(uid);
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO task_assignees (task_id, user_id, role, added_by)
+           VALUES (?,?,'assignee',?)`
+        ).bind(taskId, uid, addedBy || null).run();
+      }
+    }
+    if (ownerChanged && ownerId) {
+      // OR REPLACE (e nao UPDATE do user_id, como no plano original): se a
+      // pessoa ja estava na tarefa como co-responsavel, o UPDATE colidiria
+      // com a PK; aqui ela simplesmente e promovida a 'owner'.
+      await env.DB.prepare(
+        `INSERT OR REPLACE INTO task_assignees (task_id, user_id, role, added_by, added_at)
+         VALUES (?,?,'owner',?,unixepoch())`
+      ).bind(taskId, ownerId, addedBy || null).run();
+    }
+  } catch { /* migration 0052 não aplicada — segue sem a junction */ }
+}
 
 async function readJson(request) {
   try {
@@ -1483,30 +1643,46 @@ async function handleTasksCollection(request, env, user, ctx) {
   const granularViewAllDenied = user.granular && !canDo(user.granular, 'tasks', 'view_all');
   const assignedOnly = tasksLevel === 'assigned_only' || granularViewAllDenied;
 
+  const extras = await ensureTaskExtras(env);
+  const select = extras ? TASK_SELECT_FULL : TASK_SELECT;
+  // v2.25.19 — com a 0052, "minhas tarefas" passa a incluir aquelas em que sou
+  // co-responsavel (task_assignees), nao so as que tem meu id em assigned_to.
+  const mineCond = extras
+    ? '(t.assigned_to = ? OR t.created_by = ? OR EXISTS ' +
+      '(SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?))'
+    : '(t.assigned_to = ? OR t.created_by = ?)';
+  const mineBinds = extras ? [user.id, user.id, user.id] : [user.id, user.id];
+
   if (request.method === 'GET') {
     if (new URL(request.url).searchParams.get('completed_today') === 'true') {
       const midnight = Math.floor(new Date().setHours(0, 0, 0, 0) / 1000);
       // v2.1.2 — assigned_only sees tasks assigned to them OR authored by them.
       // Without the OR, the user couldn't see tasks they just created if those
       // weren't also auto-assigned to themselves.
-      const filter = assignedOnly ? ' AND (t.assigned_to = ? OR t.created_by = ?)' : '';
-      const binds = assignedOnly ? [midnight, user.id, user.id] : [midnight];
+      const conds = ["t.status = 'done'", 't.updated_at >= ?'];
+      const binds = [midnight];
+      if (extras) conds.push(NOT_SUBTASK);
+      if (assignedOnly) {
+        conds.push(mineCond);
+        binds.push(...mineBinds);
+      }
       const { results } = await env.DB.prepare(
-        `${TASK_SELECT} WHERE t.status = 'done' AND t.updated_at >= ?${filter} ORDER BY t.updated_at DESC`
+        `${select} WHERE ${conds.join(' AND ')} ORDER BY t.updated_at DESC`
       ).bind(...binds).all();
       return json((results || []).map(shapeTask));
     }
     const onlyFav = new URL(request.url).searchParams.get('favorited') === 'true';
     const conds = [];
     const binds = [];
+    if (extras) conds.push(NOT_SUBTASK);
     if (onlyFav) conds.push('t.favorited = 1');
     if (assignedOnly) {
-      conds.push('(t.assigned_to = ? OR t.created_by = ?)');
-      binds.push(user.id, user.id);
+      conds.push(mineCond);
+      binds.push(...mineBinds);
     }
     const where = conds.length ? `WHERE ${conds.join(' AND ')} ` : '';
     const { results } = await env.DB.prepare(
-      `${TASK_SELECT} ${where}ORDER BY (t.urgency + t.importance) DESC, t.created_at DESC`
+      `${select} ${where}ORDER BY (t.urgency + t.importance) DESC, t.created_at DESC`
     ).bind(...binds).all();
     return json((results || []).map(shapeTask));
   }
@@ -1562,11 +1738,18 @@ async function handleTasksCollection(request, env, user, ctx) {
         await env.DB.prepare('UPDATE tasks SET opportunity_id = ? WHERE id = ?').bind(body.opportunity_id, id).run();
       } catch { /* migration 0026 not applied */ }
     }
-    const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(id).first();
+    // v2.25.19 — responsavel principal + co-responsaveis na junction (0052).
+    await syncTaskAssignees(env, id, {
+      assigneeIds: Array.isArray(body.assignee_ids) ? body.assignee_ids : null,
+      ownerId: body.assigned_to || null,
+      ownerChanged: true,
+      addedBy: user.id
+    });
+    const row = await env.DB.prepare(`${await taskSelectFor(env)} WHERE t.id = ?`).bind(id).first();
     const shaped = shapeTask(row);
-    if (shaped.assigned_to && shaped.assigned_to !== user.id) {
-      await notifyTaskAssignment(env, ctx, user, shaped);
-    }
+    // Notifica todo mundo que ficou responsavel (principal e co-responsaveis),
+    // menos quem criou a tarefa.
+    await notifyTaskAssignment(env, ctx, user, shaped);
     await notifyTaskDue(env, ctx, shaped);
     syncTaskToCalendar(env, ctx, shaped);
     return json(shaped, 201);
@@ -1625,15 +1808,23 @@ async function handleTasksRecurring(request, env, user) {
   const granularViewAllDenied = user.granular && !canDo(user.granular, 'tasks', 'view_all');
   const assignedOnly = tasksLevel === 'assigned_only' || granularViewAllDenied;
 
+  const extras = await ensureTaskExtras(env);
   const conds = ["t.is_recurring = 1", "t.status != 'done'"];
   const binds = [];
+  if (extras) conds.push(NOT_SUBTASK);
   if (assignedOnly) {
-    conds.push('(t.assigned_to = ? OR t.created_by = ?)');
-    binds.push(user.id, user.id);
+    if (extras) {
+      conds.push('(t.assigned_to = ? OR t.created_by = ? OR EXISTS ' +
+        '(SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?))');
+      binds.push(user.id, user.id, user.id);
+    } else {
+      conds.push('(t.assigned_to = ? OR t.created_by = ?)');
+      binds.push(user.id, user.id);
+    }
   }
   try {
     const { results } = await env.DB.prepare(
-      `${TASK_SELECT} WHERE ${conds.join(' AND ')} ORDER BY t.due_date ASC, t.created_at DESC`
+      `${extras ? TASK_SELECT_FULL : TASK_SELECT} WHERE ${conds.join(' AND ')} ORDER BY t.due_date ASC, t.created_at DESC`
     ).bind(...binds).all();
     return json((results || []).map(shapeTask));
   } catch {
@@ -1645,7 +1836,7 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
   if (!taskId) return json({ error: 'ID ausente' }, 400);
 
   if (request.method === 'GET') {
-    const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(taskId).first();
+    const row = await env.DB.prepare(`${await taskSelectFor(env)} WHERE t.id = ?`).bind(taskId).first();
     if (!row) return json({ error: 'Tarefa não encontrada' }, 404);
     return json(shapeTask(row));
   }
@@ -1817,20 +2008,37 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
                 .bind(existing.front_id, newId).run();
             } catch { /* migration 0015 not applied */ }
           }
-          nextRecurrenceRow = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(newId).first();
+          nextRecurrenceRow = await env.DB.prepare(`${await taskSelectFor(env)} WHERE t.id = ?`).bind(newId).first();
         } catch { /* migration 0046 não aplicada, ou falha pontual — não trava a conclusão */ }
       }
     }
 
-    const row = await env.DB.prepare(`${TASK_SELECT} WHERE t.id = ?`).bind(taskId).first();
+    // v2.25.19 — junction de responsaveis (0052). Guarda quem ja era
+    // responsavel ANTES de sincronizar: so os recem-adicionados sao
+    // notificados, senao todo PUT (favoritar, arrastar no kanban) reenviaria
+    // notificacao para quem ja estava na tarefa.
+    const assigneeChanged = (existing.assigned_to || null) !== (merged.assigned_to || null);
+    const before = await listTaskAssigneeIds(env, taskId);
+    await syncTaskAssignees(env, taskId, {
+      assigneeIds: Array.isArray(body.assignee_ids) ? body.assignee_ids : null,
+      ownerId: merged.assigned_to || null,
+      ownerChanged: assigneeChanged,
+      addedBy: user.id
+    });
+    const after = await listTaskAssigneeIds(env, taskId);
+    const newlyAssigned = after.filter((uid) => !before.includes(uid));
+
+    const row = await env.DB.prepare(`${await taskSelectFor(env)} WHERE t.id = ?`).bind(taskId).first();
     const shaped = shapeTask(row);
     // Anexado como campo extra (não substitui o formato de resposta plano de
     // sempre) para não quebrar os demais consumidores de PUT /api/tasks/:id
     // que esperam o task atualizado direto na raiz do JSON.
     if (nextRecurrenceRow) shaped.nextRecurrence = shapeTask(nextRecurrenceRow);
-    const assigneeChanged = (existing.assigned_to || null) !== (merged.assigned_to || null);
-    if (assigneeChanged && shaped.assigned_to && shaped.assigned_to !== user.id) {
-      await notifyTaskAssignment(env, ctx, user, shaped);
+    if (newlyAssigned.length) {
+      await notifyTaskAssignment(env, ctx, user, shaped, newlyAssigned);
+    } else if (assigneeChanged && shaped.assigned_to && shaped.assigned_to !== user.id) {
+      // Sem a 0052 aplicada a junction fica vazia — cai no caminho legado.
+      await notifyTaskAssignment(env, ctx, user, shaped, [shaped.assigned_to]);
     }
     const dueChanged = (existing.due_date || null) !== (merged.due_date || null);
     if (dueChanged) await notifyTaskDue(env, ctx, shaped);
@@ -1853,15 +2061,254 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
       console.log('[DELETE /api/tasks/:id] tarefa não encontrada', taskId);
       return json({ error: 'Tarefa não encontrada' }, 404);
     }
+    // v2.25.19 — subtarefas sao linhas de `tasks` com parent_task_id, e a FK da
+    // 0046 e ON DELETE SET NULL: sem apagar antes, elas sobreviveriam a mae com
+    // parent_task_id NULL e is_subtask=1 — invisiveis em qualquer tela (a lista
+    // de topo filtra is_subtask, e nao ha mais mae para abri-las).
+    let subDeleted = 0;
+    try {
+      const subs = await env.DB.prepare(
+        'DELETE FROM tasks WHERE parent_task_id = ? AND is_subtask = 1'
+      ).bind(taskId).run();
+      subDeleted = (subs && subs.meta && subs.meta.changes) || 0;
+    } catch { /* migration 0052 não aplicada */ }
     const result = await env.DB.prepare('DELETE FROM tasks WHERE id = ?').bind(taskId).run();
     console.log(
       '[DELETE /api/tasks/:id] excluída', taskId, 'por', user.id,
-      '— changes:', result && result.meta && result.meta.changes
+      '— changes:', result && result.meta && result.meta.changes,
+      '— subtarefas removidas:', subDeleted
     );
     return json({ ok: true });
   }
 
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// ---------------------------------------------------------------------------
+// v2.25.19 — Subtarefas como linhas reais (migration 0052)
+//
+// Uma subtarefa e uma linha de `tasks` com is_subtask=1 e parent_task_id
+// apontando para a mae. Ganha responsavel proprio, status proprio e
+// notificacao propria — coisas que o JSON antigo (tasks.subtasks) nao tinha.
+// Herda projeto/frente da mae (area NAO e coluna de tasks: sai do projeto).
+// ---------------------------------------------------------------------------
+
+// Mesma regra do PUT /api/tasks/:id: edit_all, ou edit_own sendo o autor.
+function canEditTaskRow(user, taskRow) {
+  if (canDo(user.granular, 'tasks', 'edit_all')) return true;
+  return canDo(user.granular, 'tasks', 'edit_own') && taskRow.created_by === user.id;
+}
+
+async function loadSubtaskRow(env, parentId, subId) {
+  return env.DB.prepare(
+    'SELECT * FROM tasks WHERE id = ? AND parent_task_id = ? AND is_subtask = 1'
+  ).bind(subId, parentId).first();
+}
+
+// GET  /api/tasks/:id/subtasks — lista as subtarefas da tarefa
+// POST /api/tasks/:id/subtasks — cria uma subtarefa
+async function handleTaskSubtasks(request, env, user, parentId, ctx) {
+  if (!parentId) return json({ error: 'ID ausente' }, 400);
+  if (!(await ensureTaskExtras(env))) {
+    return json({ error: 'Migration 0052 não aplicada neste banco' }, 503);
+  }
+  if (!requirePermission(user, 'tasks', 'view')) return json({ error: 'Sem permissão' }, 403);
+
+  const parent = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(parentId).first();
+  if (!parent) return json({ error: 'Tarefa não encontrada' }, 404);
+
+  if (request.method === 'GET') {
+    const { results } = await env.DB.prepare(
+      `${TASK_SELECT_FULL} WHERE t.parent_task_id = ? AND t.is_subtask = 1
+       ORDER BY t.subtask_order ASC, t.created_at ASC`
+    ).bind(parentId).all();
+    return json((results || []).map(shapeTask));
+  }
+
+  if (request.method === 'POST') {
+    if (!canEditTaskRow(user, parent)) {
+      return json({ error: 'Sem permissão para editar esta tarefa' }, 403);
+    }
+    const body = (await readJson(request)) || {};
+    const title = String(body.title || '').trim();
+    if (!title) return json({ error: 'Título é obrigatório' }, 400);
+
+    const maxRow = await env.DB.prepare(
+      'SELECT MAX(subtask_order) AS m FROM tasks WHERE parent_task_id = ? AND is_subtask = 1'
+    ).bind(parentId).first();
+    const nextOrder = (maxRow && maxRow.m != null ? maxRow.m : -1) + 1;
+
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    const status = TASK_STATUSES.includes(body.status) ? body.status : 'todo';
+    await env.DB.prepare(
+      `INSERT INTO tasks
+        (id, title, description, project_id, front_id, assigned_to, created_by,
+         urgency, importance, energy, status, tags, comments, subtasks,
+         time_entries, drive_attachments, parent_task_id, is_subtask,
+         subtask_order, created_at, updated_at)
+       SELECT ?, ?, '', p.project_id, p.front_id, ?, ?,
+              p.urgency, p.importance, p.energy, ?, '[]', '[]', '[]',
+              '[]', '[]', p.id, 1, ?, ?, ?
+         FROM tasks p WHERE p.id = ?`
+    ).bind(
+      id, title, body.assigned_to || null, user.id, status, nextOrder, now, now, parentId
+    ).run();
+
+    await syncTaskAssignees(env, id, {
+      assigneeIds: Array.isArray(body.assignee_ids) ? body.assignee_ids : null,
+      ownerId: body.assigned_to || null,
+      ownerChanged: true,
+      addedBy: user.id
+    });
+
+    const row = await env.DB.prepare(`${TASK_SELECT_FULL} WHERE t.id = ?`).bind(id).first();
+    const shaped = shapeTask(row);
+    await notifyTaskAssignment(env, ctx, user, shaped);
+    return json(shaped, 201);
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// PUT    /api/tasks/:id/subtasks/:subId — titulo, status, responsaveis
+// DELETE /api/tasks/:id/subtasks/:subId
+async function handleTaskSubtaskItem(request, env, user, parentId, subId, ctx) {
+  if (!parentId || !subId) return json({ error: 'ID ausente' }, 400);
+  if (!(await ensureTaskExtras(env))) {
+    return json({ error: 'Migration 0052 não aplicada neste banco' }, 503);
+  }
+  // O par (parentId, subId) tem que bater E a linha tem que ser is_subtask=1 —
+  // parent_task_id sozinho tambem marca a linhagem de recorrencia (0046), e uma
+  // proxima ocorrencia nao pode ser editada/apagada por esta rota.
+  const sub = await loadSubtaskRow(env, parentId, subId);
+  if (!sub) return json({ error: 'Subtarefa não encontrada' }, 404);
+
+  if (request.method === 'PUT') {
+    if (!canEditTaskRow(user, sub)) {
+      return json({ error: 'Sem permissão para editar esta subtarefa' }, 403);
+    }
+    const body = (await readJson(request)) || {};
+    const title = body.title !== undefined ? String(body.title).trim() : sub.title;
+    if (!title) return json({ error: 'Título é obrigatório' }, 400);
+    const status = body.status !== undefined
+      ? (TASK_STATUSES.includes(body.status) ? body.status : sub.status)
+      : sub.status;
+    const assignedTo = body.assigned_to !== undefined ? (body.assigned_to || null) : sub.assigned_to;
+    const order = body.subtask_order !== undefined
+      ? (Number(body.subtask_order) || 0)
+      : sub.subtask_order;
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `UPDATE tasks SET title=?, status=?, assigned_to=?, subtask_order=?, updated_at=?
+       WHERE id=? AND parent_task_id=? AND is_subtask=1`
+    ).bind(title, status, assignedTo, order, now, subId, parentId).run();
+
+    const ownerChanged = (sub.assigned_to || null) !== (assignedTo || null);
+    const before = await listTaskAssigneeIds(env, subId);
+    await syncTaskAssignees(env, subId, {
+      assigneeIds: Array.isArray(body.assignee_ids) ? body.assignee_ids : null,
+      ownerId: assignedTo,
+      ownerChanged,
+      addedBy: user.id
+    });
+    const after = await listTaskAssigneeIds(env, subId);
+    const newlyAssigned = after.filter((uid) => !before.includes(uid));
+
+    const row = await env.DB.prepare(`${TASK_SELECT_FULL} WHERE t.id = ?`).bind(subId).first();
+    const shaped = shapeTask(row);
+    if (newlyAssigned.length) await notifyTaskAssignment(env, ctx, user, shaped, newlyAssigned);
+    return json(shaped);
+  }
+
+  if (request.method === 'DELETE') {
+    if (!canDo(user.granular, 'tasks', 'delete') && !canEditTaskRow(user, sub)) {
+      return json({ error: 'Sem permissão para excluir esta subtarefa' }, 403);
+    }
+    await env.DB.prepare(
+      'DELETE FROM tasks WHERE id = ? AND parent_task_id = ? AND is_subtask = 1'
+    ).bind(subId, parentId).run();
+    return json({ ok: true });
+  }
+
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+// POST /api/tasks/migrate-subtasks (somente owner) — promove as subtarefas que
+// ainda estao em JSON (tasks.subtasks) a linhas reais. Idempotente: ao terminar
+// cada tarefa, zera a coluna antiga, entao rodar de novo nao duplica nada.
+async function handleMigrateSubtasks(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!requireOwner(user)) return json({ error: 'Somente o owner' }, 403);
+  if (!(await ensureTaskExtras(env))) {
+    return json({ error: 'Migration 0052 não aplicada neste banco' }, 503);
+  }
+
+  const { results } = await env.DB.prepare(
+    `SELECT id, subtasks, created_by, project_id, front_id, urgency, importance, energy
+       FROM tasks
+      WHERE subtasks IS NOT NULL AND subtasks != '' AND subtasks != '[]'
+        AND (is_subtask IS NULL OR is_subtask = 0)`
+  ).all();
+
+  let tasksMigrated = 0;
+  let subtasksMigrated = 0;
+  let skipped = 0;
+  const now = Math.floor(Date.now() / 1000);
+
+  for (const t of results || []) {
+    let items = [];
+    try {
+      const parsed = JSON.parse(t.subtasks || '[]');
+      items = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (!items.length) continue;
+
+    // Continua de onde parou se uma execucao anterior morreu no meio.
+    const maxRow = await env.DB.prepare(
+      'SELECT MAX(subtask_order) AS m FROM tasks WHERE parent_task_id = ? AND is_subtask = 1'
+    ).bind(t.id).first();
+    let order = (maxRow && maxRow.m != null ? maxRow.m : -1) + 1;
+
+    let inserted = 0;
+    for (const item of items) {
+      const title = String((item && (item.text || item.title)) || '').trim();
+      if (!title) continue;
+      const done = item && (item.done === true || item.done === 1 || item.status === 'done');
+      await env.DB.prepare(
+        `INSERT INTO tasks
+          (id, title, description, project_id, front_id, assigned_to, created_by,
+           urgency, importance, energy, status, tags, comments, subtasks,
+           time_entries, drive_attachments, parent_task_id, is_subtask,
+           subtask_order, created_at, updated_at)
+         VALUES (?,?,'',?,?,?,?,?,?,?,?,'[]','[]','[]','[]','[]',?,1,?,?,?)`
+      ).bind(
+        crypto.randomUUID(), title, t.project_id || null, t.front_id || null,
+        null, t.created_by || user.id,
+        t.urgency, t.importance, t.energy, done ? 'done' : 'todo',
+        t.id, order, now, now
+      ).run();
+      order += 1;
+      inserted += 1;
+    }
+
+    // So zera o JSON antigo depois de gravar as linhas: se algo falhar antes
+    // daqui, a proxima execucao reencontra a tarefa e retoma.
+    await env.DB.prepare("UPDATE tasks SET subtasks = '[]' WHERE id = ?").bind(t.id).run();
+    if (inserted) {
+      tasksMigrated += 1;
+      subtasksMigrated += inserted;
+    }
+  }
+
+  console.log(
+    '[POST /api/tasks/migrate-subtasks] tarefas:', tasksMigrated,
+    'subtarefas:', subtasksMigrated, 'ignoradas:', skipped
+  );
+  return json({ ok: true, tasks_migrated: tasksMigrated, subtasks_migrated: subtasksMigrated, skipped });
 }
 
 async function handleProjectsCollection(request, env, user) {
@@ -3570,15 +4017,29 @@ async function createNotification(env, ctx, n) {
   return id;
 }
 
-async function notifyTaskAssignment(env, ctx, assigner, task) {
-  await createNotification(env, ctx, {
-    from_user_id: assigner.id,
-    to_user_id: task.assigned_to,
-    type: 'task_assigned',
-    title: `${assigner.name || 'Alguém'} atribuiu uma tarefa a você`,
-    body: task.title,
-    task_id: task.id
-  });
+// v2.25.19 — notifica TODOS os responsaveis, nao so o principal. `targetIds`
+// limita a quem notificar (o PUT passa so os recem-adicionados); sem ele, cai
+// na junction inteira e, se ela estiver vazia (0052 nao aplicada), no
+// assigned_to legado. Quem disparou a acao nunca se auto-notifica.
+async function notifyTaskAssignment(env, ctx, assigner, task, targetIds) {
+  let targets = targetIds;
+  if (!targets) {
+    targets = await listTaskAssigneeIds(env, task.id);
+    if (!targets.length && task.assigned_to) targets = [task.assigned_to];
+  }
+  const seen = new Set();
+  for (const uid of targets) {
+    if (!uid || uid === assigner.id || seen.has(uid)) continue;
+    seen.add(uid);
+    await createNotification(env, ctx, {
+      from_user_id: assigner.id,
+      to_user_id: uid,
+      type: 'task_assigned',
+      title: `${assigner.name || 'Alguém'} atribuiu uma tarefa a você`,
+      body: task.title,
+      task_id: task.id
+    });
+  }
 }
 
 // Notify users mentioned in newly added comments (compares old vs new by id).
@@ -3991,7 +4452,9 @@ function downloadJson(data, filename) {
 }
 
 async function handleExportTasks(env) {
-  const { results } = await env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC`).all();
+  // Export e dump completo: as subtarefas-linha entram junto (nao filtramos
+  // por NOT_SUBTASK aqui) para o backup nao perder dado.
+  const { results } = await env.DB.prepare(`${await taskSelectFor(env)} ORDER BY t.created_at DESC`).all();
   return downloadJson((results || []).map(shapeTask), 'aide-tasks.json');
 }
 
@@ -4600,7 +5063,12 @@ async function pushTasksToLifegame(env, cfgIn = null) {
       hint: 'Configurar em Settings → Bridge — Lifegame na AIDE',
     };
   }
-  const { results } = await env.DB.prepare(`${TASK_SELECT} ORDER BY t.created_at DESC`).all();
+  // v2.25.19 — subtarefas ficam de fora do export da bridge: no Lifegame elas
+  // virariam tarefas soltas, duplicando o que ja vai dentro da tarefa mae.
+  const extrasReady = await ensureTaskExtras(env);
+  const { results } = await env.DB.prepare(
+    `${extrasReady ? TASK_SELECT_FULL : TASK_SELECT}${extrasReady ? ` WHERE ${NOT_SUBTASK}` : ''} ORDER BY t.created_at DESC`
+  ).all();
   // Anti-loop de eco: carimba cada tarefa de ORIGEM AIDE com aideTaskId + source
   // 'aide'. Se o Lifegame devolvê-la, o import a reconhece como eco e a ignora
   // (ver handleBridgeImport). Tarefas de origem 'lifegame' seguem SEM aideTaskId
@@ -6094,7 +6562,7 @@ async function handleMonthlyReport(request, env, user) {
   const summary = await computePaymentSummary(env, month);
   const { start, end } = monthRange(month);
   const { results } = await env.DB.prepare(
-    `${TASK_SELECT} WHERE t.status = 'done' AND t.updated_at >= ? AND t.updated_at < ? ORDER BY t.updated_at DESC`
+    `${await taskSelectFor(env)} WHERE t.status = 'done' AND t.updated_at >= ? AND t.updated_at < ? ORDER BY t.updated_at DESC`
   ).bind(start, end).all();
   const completedTasks = (results || []).map(shapeTask);
 

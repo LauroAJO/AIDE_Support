@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Plus, Trash2, Paperclip, Search, ExternalLink } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
-import { STATUSES, STATUS_LABELS, calcScore, scoreColor } from '../../lib/tasks';
+import { STATUSES, STATUS_LABELS, calcScore, scoreColor, coAssigneeIds } from '../../lib/tasks';
 import Avatar from '../shared/Avatar';
 import MentionText from './MentionText';
 import DriveAttachmentZone from '../shared/DriveAttachmentZone';
@@ -24,6 +24,9 @@ const EMPTY = {
   due_date: '',
   delivery_date: '',
   assigned_to: '',
+  // v2.25.19 — co-responsáveis (ids). O responsável principal segue em
+  // assigned_to; estes são os demais, gravados em task_assignees.
+  assignee_ids: [],
   area_id: '',
   project_id: '',
   front_id: '',
@@ -46,6 +49,7 @@ function fromTask(task, initialStatus) {
     due_date: task.due_date || '',
     delivery_date: task.delivery_date || '',
     assigned_to: task.assigned_to || '',
+    assignee_ids: coAssigneeIds(task),
     area_id: task.area_id || '',
     project_id: task.project_id || '',
     front_id: task.front_id || '',
@@ -76,7 +80,7 @@ function Slider({ label, value, onChange }) {
   );
 }
 
-export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, initialStatus }) {
+export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, onChanged, initialStatus }) {
   const currentUser = useStore((s) => s.user);
   const isEdit = !!task;
   // Rascunho: o formulário inteiro vive no localStorage enquanto não é salvo
@@ -128,10 +132,101 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
   const [showDrivePicker, setShowDrivePicker] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [coOpen, setCoOpen] = useState(false);
   const commentRef = useRef(null);
 
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
   const score = calcScore(form.urgency, form.importance);
+
+  // --- Co-responsáveis (v2.25.19) -----------------------------------------
+  // Rascunhos salvos antes desta versão não têm o campo — daí o fallback.
+  const coIds = form.assignee_ids || [];
+  const coUsers = coIds.map((id) => users.find((u) => u.id === id)).filter(Boolean);
+  // O responsável principal não pode ser também co-responsável: na junction
+  // cada pessoa tem um papel só (PK task_id+user_id).
+  const coCandidates = users.filter((u) => u.id !== form.assigned_to && !coIds.includes(u.id));
+  const addCo = (id) => {
+    set({ assignee_ids: [...coIds, id] });
+    setCoOpen(false);
+  };
+  const removeCo = (id) => set({ assignee_ids: coIds.filter((x) => x !== id) });
+  // Promover alguém a responsável principal tira essa pessoa dos co-responsáveis.
+  const changeOwner = (id) => set({ assigned_to: id, assignee_ids: coIds.filter((x) => x !== id) });
+
+  // --- Subtarefas como linhas reais (v2.25.19) -----------------------------
+  // Só em tarefas já existentes: uma subtarefa é uma linha de `tasks` com
+  // parent_task_id, então precisa da mãe salva. Em tarefa nova, a UI antiga
+  // (JSON) continua valendo e a migração converte depois.
+  const realSubs = (form.subtasks || []).filter((s) => s.isReal);
+  const legacySubs = (form.subtasks || []).filter((s) => !s.isReal);
+  // "Modo legado" = a tarefa ainda tem subtarefas em JSON não migradas. Nesse
+  // caso o editor mantém o comportamento antigo (salva o array no PUT) para
+  // não perdê-las antes de rodar POST /api/tasks/migrate-subtasks.
+  const legacyMode = !isEdit || (legacySubs.length > 0 && realSubs.length === 0);
+  const [subs, setSubs] = useState(realSubs);
+  const [subBusy, setSubBusy] = useState(false);
+  const [subError, setSubError] = useState('');
+  // O editor é reaproveitado quando se abre OUTRA tarefa (mesma posição na
+  // árvore React, sem remontar) — sem isto a lista de subtarefas ficaria a da
+  // tarefa anterior. Depende só do id: recarregar não pode atropelar edições
+  // ainda em voo nesta mesma tarefa.
+  useEffect(() => {
+    setSubs((task?.subtasks || []).filter((s) => s.isReal));
+    setSubError('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?.id]);
+
+  const subApi = async (path, options) => {
+    setSubBusy(true);
+    setSubError('');
+    try {
+      const res = await apiFetch(path, options);
+      // Subtarefas-linha salvam na hora, fora do fluxo do botao Salvar — avisa
+      // a lista para ela nao ficar mostrando a contagem antiga.
+      onChanged?.();
+      return res;
+    } catch {
+      setSubError('Falha ao salvar a subtarefa.');
+      return null;
+    } finally {
+      setSubBusy(false);
+    }
+  };
+
+  const addRealSub = async () => {
+    const v = subInput.trim();
+    if (!v) return;
+    const created = await subApi(`/api/tasks/${task.id}/subtasks`, {
+      method: 'POST',
+      body: JSON.stringify({ title: v }),
+    });
+    if (created) {
+      setSubs((list) => [...list, { ...created, text: created.title, done: created.status === 'done', isReal: true }]);
+      setSubInput('');
+    }
+  };
+
+  const patchRealSub = async (sub, patch) => {
+    setSubs((list) => list.map((s) => (s.id === sub.id ? { ...s, ...patch } : s)));
+    const updated = await subApi(`/api/tasks/${task.id}/subtasks/${sub.id}`, {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    });
+    if (updated) {
+      setSubs((list) => list.map((s) => (s.id === sub.id
+        ? { ...updated, text: updated.title, done: updated.status === 'done', isReal: true }
+        : s)));
+    } else {
+      setSubs((list) => list.map((s) => (s.id === sub.id ? sub : s))); // reverte
+    }
+  };
+
+  const removeRealSub = async (sub) => {
+    const before = subs;
+    setSubs((list) => list.filter((s) => s.id !== sub.id));
+    const res = await subApi(`/api/tasks/${task.id}/subtasks/${sub.id}`, { method: 'DELETE' });
+    if (!res) setSubs(before);
+  };
 
   // "Sujo" = formulário difere do estado inicial OU há texto pendente em algum
   // dos campos auxiliares (tag/subtarefa/comentário digitados mas não
@@ -253,6 +348,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
     const payload = {
       ...form,
       assigned_to: form.assigned_to || null,
+      assignee_ids: form.assignee_ids || [],
       due_date: form.due_date || null,
       delivery_date: form.delivery_date || null,
       project_id: form.project_id || null,
@@ -261,6 +357,10 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
     };
     // area_id is derived from project — don't send it to the API.
     delete payload.area_id;
+    // v2.25.19 — subtarefas-linha têm endpoints próprios e já foram salvas ao
+    // serem editadas. Mandá-las aqui sobrescreveria a coluna JSON legada com
+    // objetos que não são mais a fonte da verdade.
+    if (!legacyMode) delete payload.subtasks;
     try {
       const saved = isEdit
         ? await apiFetch(`/api/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify(payload) })
@@ -463,7 +563,7 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
             <Field label="Responsável">
               <select
                 value={form.assigned_to}
-                onChange={(e) => set({ assigned_to: e.target.value })}
+                onChange={(e) => changeOwner(e.target.value)}
                 className="input"
               >
                 <option value="">Ninguém</option>
@@ -474,6 +574,60 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
                 ))}
               </select>
             </Field>
+          </div>
+
+          {/* Co-responsáveis (v2.25.19) — vão para task_assignees com
+              role='assignee'. Recebem as mesmas notificações do principal e a
+              tarefa aparece no filtro "Eu" deles. */}
+          <div className="block">
+            <span className="mb-1 block text-xs font-medium text-ink2">Co-responsáveis</span>
+            {coUsers.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {coUsers.map((u) => (
+                  <span
+                    key={u.id}
+                    className="flex items-center gap-1.5 rounded-full bg-surface2 py-0.5 pl-0.5 pr-2 text-[11px] text-ink2"
+                  >
+                    <Avatar user={u} size={18} />
+                    {u.name || u.email}
+                    <button
+                      type="button"
+                      onClick={() => removeCo(u.id)}
+                      title="Remover co-responsável"
+                      className="text-muted hover:text-danger"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setCoOpen((v) => !v)}
+                disabled={coCandidates.length === 0}
+                className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2 disabled:opacity-50"
+              >
+                <Plus className="h-4 w-4" />
+                {coCandidates.length === 0 ? 'Ninguém mais para adicionar' : 'Adicionar co-responsável'}
+              </button>
+              {coOpen && coCandidates.length > 0 && (
+                <div className="absolute left-0 z-10 mt-1 max-h-44 w-64 overflow-y-auto rounded-lg border border-line bg-surface shadow-soft">
+                  {coCandidates.map((u) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onClick={() => addCo(u.id)}
+                      className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-ink transition hover:bg-surface2"
+                    >
+                      <Avatar user={u} size={18} />
+                      <span>{u.name || u.email}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="space-y-3 rounded-lg border border-line p-3">
@@ -547,45 +701,127 @@ export default function TaskEditor({ task, users, onClose, onSaved, onDeleted, i
             )}
           </Field>
 
-          {/* Subtasks */}
-          <Field label="Subtarefas">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={subInput}
-                onChange={(e) => setSubInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    addSub();
-                  }
-                }}
-                placeholder="Adicionar subtarefa"
-                className="input flex-1"
-              />
-              <button type="button" onClick={addSub} className="btn-icon">
-                <Plus className="h-4 w-4" />
-              </button>
+          {/* Subtasks — v2.25.19: em tarefa já salva, cada subtarefa é uma
+              linha real de `tasks` com responsável e status próprios, salva na
+              hora pelos endpoints /api/tasks/:id/subtasks. Em tarefa nova (e em
+              tarefas cujas subtarefas JSON ainda não foram migradas) vale a UI
+              antiga, que salva o array junto com a tarefa. */}
+          {legacyMode ? (
+            <Field label="Subtarefas">
+              {!isEdit && (
+                <p className="mb-1.5 text-[11px] text-muted">
+                  Salve a tarefa para dar responsável e status próprios a cada subtarefa.
+                </p>
+              )}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={subInput}
+                  onChange={(e) => setSubInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      addSub();
+                    }
+                  }}
+                  placeholder="Adicionar subtarefa"
+                  className="input flex-1"
+                />
+                <button type="button" onClick={addSub} className="btn-icon">
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
+              {form.subtasks.length > 0 && (
+                <ul className="mt-2 space-y-1">
+                  {form.subtasks.map((s) => (
+                    <li key={s.id} className="flex items-center gap-2 text-sm text-ink">
+                      <input
+                        type="checkbox"
+                        checked={!!s.done}
+                        onChange={() => toggleSub(s.id)}
+                        className="accent-[#6366f1]"
+                      />
+                      <span className={`flex-1 ${s.done ? 'text-muted line-through' : ''}`}>{s.text}</span>
+                      <button type="button" onClick={() => removeSub(s.id)} className="text-muted hover:text-danger">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Field>
+          ) : (
+            <div className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Subtarefas</span>
+              {subError && <p className="mb-1.5 text-[11px] text-danger">{subError}</p>}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={subInput}
+                  onChange={(e) => setSubInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      addRealSub();
+                    }
+                  }}
+                  placeholder="Adicionar subtarefa"
+                  className="input flex-1"
+                />
+                <button type="button" onClick={addRealSub} disabled={subBusy} className="btn-icon disabled:opacity-50">
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
+              {subs.length > 0 && (
+                <ul className="mt-2 space-y-1.5">
+                  {subs.map((s) => (
+                    <li key={s.id} className="flex items-center gap-2 text-sm text-ink">
+                      <input
+                        type="checkbox"
+                        checked={!!s.done}
+                        onChange={() => patchRealSub(s, { status: s.done ? 'todo' : 'done' })}
+                        className="accent-[#6366f1]"
+                      />
+                      <input
+                        type="text"
+                        defaultValue={s.text}
+                        onBlur={(e) => {
+                          const v = e.target.value.trim();
+                          if (v && v !== s.text) patchRealSub(s, { title: v });
+                          else e.target.value = s.text;
+                        }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                        className={`min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1 py-0.5 text-sm text-ink hover:border-line focus:border-line focus:outline-none ${
+                          s.done ? 'text-muted line-through' : ''
+                        }`}
+                      />
+                      {/* Responsável da subtarefa — pode ser diferente do da mãe */}
+                      <select
+                        value={s.assigned_to || ''}
+                        onChange={(e) => patchRealSub(s, { assigned_to: e.target.value || null })}
+                        title="Responsável pela subtarefa"
+                        className="max-w-[7.5rem] shrink-0 rounded-md border border-line bg-surface2 px-1.5 py-0.5 text-[11px] text-ink2"
+                      >
+                        <option value="">Ninguém</option>
+                        {users.map((u) => (
+                          <option key={u.id} value={u.id}>{u.name || u.email}</option>
+                        ))}
+                      </select>
+                      {s.assignedUser && <Avatar user={s.assignedUser} size={18} />}
+                      <button
+                        type="button"
+                        onClick={() => removeRealSub(s)}
+                        disabled={subBusy}
+                        className="shrink-0 text-muted hover:text-danger disabled:opacity-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
-            {form.subtasks.length > 0 && (
-              <ul className="mt-2 space-y-1">
-                {form.subtasks.map((s) => (
-                  <li key={s.id} className="flex items-center gap-2 text-sm text-ink">
-                    <input
-                      type="checkbox"
-                      checked={!!s.done}
-                      onChange={() => toggleSub(s.id)}
-                      className="accent-[#6366f1]"
-                    />
-                    <span className={`flex-1 ${s.done ? 'text-muted line-through' : ''}`}>{s.text}</span>
-                    <button type="button" onClick={() => removeSub(s.id)} className="text-muted hover:text-danger">
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Field>
+          )}
 
           {/* Comments */}
           <Field label="Comentários">

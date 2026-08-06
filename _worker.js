@@ -5031,10 +5031,16 @@ async function handleBridgeStagingReject(request, env, user) {
   const ids = Array.isArray(body.ids) ? body.ids : [];
   if (!ids.length) return json({ error: 'ids é obrigatório' }, 400);
   try {
-    const placeholders = ids.map(() => '?').join(',');
-    await env.DB.prepare(
-      `UPDATE bridge_task_staging SET reviewed=1, approved=0 WHERE id IN (${placeholders})`
-    ).bind(...ids).run();
+    // O SQLite limita o número de variáveis por query (~100). Com centenas de
+    // ids o IN (?, ?, ...) rebenta com "too many SQL variables" — daí os lotes.
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+      const batch = ids.slice(i, i + BATCH_SIZE);
+      const placeholders = batch.map(() => '?').join(',');
+      await env.DB.prepare(
+        `UPDATE bridge_task_staging SET reviewed=1, approved=0 WHERE id IN (${placeholders})`
+      ).bind(...batch).run();
+    }
     return json({ rejected: ids.length });
   } catch (e) {
     return json({ error: 'Falha ao rejeitar', detail: String((e && e.message) || e) }, 500);
@@ -5138,10 +5144,15 @@ async function handleBridgePeopleStagingReject(request, env, user) {
   const ids = Array.isArray(body.ids) ? body.ids : [];
   if (!ids.length) return json({ error: 'ids é obrigatório' }, 400);
   try {
-    const placeholders = ids.map(() => '?').join(',');
-    await env.DB.prepare(
-      `UPDATE bridge_person_staging SET reviewed=1, approved=0 WHERE id IN (${placeholders})`
-    ).bind(...ids).run();
+    // Mesmo limite de variáveis do SQLite que em handleBridgeStagingReject.
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+      const batch = ids.slice(i, i + BATCH_SIZE);
+      const placeholders = batch.map(() => '?').join(',');
+      await env.DB.prepare(
+        `UPDATE bridge_person_staging SET reviewed=1, approved=0 WHERE id IN (${placeholders})`
+      ).bind(...batch).run();
+    }
     return json({ rejected: ids.length });
   } catch (e) {
     return json({ error: 'Falha ao rejeitar', detail: String((e && e.message) || e) }, 500);

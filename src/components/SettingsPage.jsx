@@ -3,6 +3,7 @@ import { Trash2, ExternalLink, CheckCircle2, AlertTriangle, RefreshCw, Eye, EyeO
 import { useStore } from '../store';
 import { apiFetch } from '../lib/api';
 import { getToken } from '../lib/auth';
+import { downloadTasksExport } from '../lib/exportTasks';
 import { APP_VERSION } from '../version';
 import { isAuthScopeError } from './shared/ScopeBanner';
 import Avatar from './shared/Avatar';
@@ -296,11 +297,15 @@ export default function SettingsPage() {
       {/* Data */}
       <Section title="Dados">
         <div className="flex flex-wrap gap-2">
+          {/* Este botão dizia "minhas" e exportava a base inteira (o handler
+              não tinha scoping nenhum). Agora o servidor filtra mesmo pelas do
+              utilizador, e o rótulo passou a ser verdade. Os outros formatos e
+              o âmbito "todas" (owner) estão em Perfil → Exportar Tarefas. */}
           <button
-            onClick={() => downloadExport('/api/export/tasks', 'aide-tasks.json')}
+            onClick={() => downloadTasksExport({ format: 'json' })}
             className="rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2"
           >
-            Exportar minhas tarefas
+            Exportar minhas tarefas (JSON)
           </button>
           <button
             onClick={() => downloadExport('/api/export/notes', 'aide-notes.json')}

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Plus, Upload, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch, Briefcase, Repeat } from 'lucide-react';
+import { Plus, Upload, Download, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch, Briefcase, Repeat } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
+import { downloadTasksExport, EXPORT_FORMATS } from '../../lib/exportTasks';
 import { canDo } from '../../lib/can';
 import { needsDate, formatDate } from '../../lib/tasks';
 import LoadingSpinner from '../shared/LoadingSpinner';
@@ -85,6 +86,16 @@ export default function TasksPage() {
   const [showImport, setShowImport] = useState(false);
   const [showMatrix, setShowMatrix] = useState(false);
   const [alertDismissed, setAlertDismissed] = useState(false);
+  // Menu de export. Fecha ao clicar fora — mesmo padrão do menu de perfil.
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState('');
+  const exportRef = useRef(null);
+  useEffect(() => {
+    if (!exportOpen) return undefined;
+    const fora = (e) => { if (exportRef.current && !exportRef.current.contains(e.target)) setExportOpen(false); };
+    document.addEventListener('mousedown', fora);
+    return () => document.removeEventListener('mousedown', fora);
+  }, [exportOpen]);
 
   const loadAll = async () => {
     try {
@@ -266,8 +277,61 @@ export default function TasksPage() {
             className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
           >
             <Upload className="h-4 w-4" />
-            Importar Lista
+            Importar
           </button>
+          <div ref={exportRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setExportOpen((v) => !v)}
+              className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+            >
+              <Download className="h-4 w-4" />
+              Exportar
+            </button>
+            {exportOpen && (
+              <div className="absolute right-0 top-11 z-30 w-[260px] overflow-hidden rounded-lg border border-line bg-surface shadow-soft">
+                {EXPORT_FORMATS.map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    disabled={!!exporting}
+                    onClick={async () => {
+                      setExporting(f.id);
+                      try {
+                        // Exporta exactamente o que está no ecrã (filtros,
+                        // pesquisa e separador incluídos).
+                        const nome = await downloadTasksExport({
+                          format: f.id,
+                          ids: filtered.map((t) => t.id),
+                        });
+                        showToast(`✅ ${nome} (${filtered.length} tarefas)`);
+                        setExportOpen(false);
+                      } catch (e) {
+                        showToast(`Falha ao exportar: ${String((e && e.message) || e).slice(0, 80)}`);
+                      } finally {
+                        setExporting('');
+                      }
+                    }}
+                    className="flex w-full items-start gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2 disabled:opacity-60"
+                  >
+                    <span>{f.icon}</span>
+                    <span className="flex-1">
+                      <span className="block font-medium">
+                        {exporting === f.id ? 'A exportar...' : `Exportar ${f.label}`}
+                      </span>
+                      <span className="block text-[11px] text-muted">{f.hint}</span>
+                    </span>
+                  </button>
+                ))}
+                {/* O âmbito continua a ser decidido no servidor: os ids são um
+                    recorte do que já é teu. Para exportar TUDO (owner), o modal
+                    do menu de perfil tem o selector de âmbito. */}
+                <div className="border-t border-line px-3 py-2 text-[11px] text-muted">
+                  Exporta as {filtered.length} tarefa(s) desta vista, com os filtros aplicados.
+                </div>
+              </div>
+            )}
+          </div>
           {canDo(userGranular, 'tasks', 'create') && (
             <button
               type="button"

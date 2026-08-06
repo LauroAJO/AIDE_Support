@@ -97,8 +97,9 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/profile') return handleProfileUpdate(request, env, user);
 
   // Exports
-  if (path === '/api/export/tasks') return handleExportTasks(env);
+  if (path === '/api/export/tasks') return handleExportTasks(request, env, user);
   if (path === '/api/export/notes') return handleExportNotes(env);
+  if (path === '/api/import/tasks') return handleImportTasks(request, env, user);
 
   if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
   // Tarefas recorrentes — precisa vir ANTES da rota genérica /api/tasks/:id
@@ -4465,11 +4466,347 @@ function downloadJson(data, filename) {
   });
 }
 
-async function handleExportTasks(env) {
-  // Export e dump completo: as subtarefas-linha entram junto (nao filtramos
-  // por NOT_SUBTASK aqui) para o backup nao perder dado.
-  const { results } = await env.DB.prepare(`${await taskSelectFor(env)} ORDER BY t.created_at DESC`).all();
-  return downloadJson((results || []).map(shapeTask), 'aide-tasks.json');
+function downloadText(text, filename, contentType) {
+  return new Response(text, {
+    status: 200,
+    headers: {
+      'Content-Type': contentType,
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+}
+
+// ── Export de tarefas — compatível com o Lifegame ──────────────────────────
+// Contratos verificados em _AUDITORIAS/AUDIT_EXPORT_FOR_AIDE.txt (auditoria do
+// ExportTab real do Lifegame). Os pontos que NÃO são óbvios:
+//   · o CSV do Lifegame é separado por VÍRGULA com TODAS as células entre aspas
+//     e linhas \r\n, com BOM (sem BOM o Excel PT estraga "Área"/"Título");
+//   · o import do Lifegame IGNORA `status`, `id`, `tags` e `aideTaskId` — vão
+//     no ficheiro para o AIDE se reimportar a si próprio, não para o Lifegame;
+//   · `priority` no Lifegame é BOOLEANO, não um enum de 3 níveis;
+//   · o prazo interno do Lifegame é `realDeadline` (o `dueDate` é legado), por
+//     isso mandamos os dois.
+// Vocabulário de status: AIDE {backlog,todo,doing,done} → Lifegame
+// {backlog,sprint,done,revisao}.
+const AIDE_TO_LG_STATUS = {
+  backlog: 'backlog', todo: 'backlog', doing: 'sprint',
+  done: 'done', reviewing: 'revisao', blocked: 'backlog',
+};
+const LG_TO_AIDE_STATUS = {
+  backlog: 'backlog', sprint: 'doing', done: 'done', revisao: 'todo',
+  todo: 'todo', doing: 'doing',
+};
+
+// RFC 4180 como o Lifegame o faz: aspas sempre, quebras de linha achatadas ao
+// nível da CÉLULA (um título com \n partiria a linha do CSV).
+const csvCell = (v) => `"${String(v == null ? '' : v).replace(/\r?\n/g, ' ').replace(/"/g, '""')}"`;
+const csvRow = (cells) => cells.map(csvCell).join(',');
+
+function exportTaskToLifegame(t) {
+  const prazo = t.due_date || '';
+  return {
+    // lidos pelo import do Lifegame
+    title: t.title,
+    notes: t.description || '',
+    description: t.description || '',
+    priority: (Number(t.urgency) || 0) >= 7 || (Number(t.importance) || 0) >= 7,
+    energy: t.energy, urgency: t.urgency, importance: t.importance,
+    realDeadline: prazo, dueDate: prazo,
+    // ignorados pelo Lifegame, usados no reimport do próprio AIDE
+    id: t.id, aideTaskId: t.id,
+    status: AIDE_TO_LG_STATUS[t.status] || 'backlog',
+    aideStatus: t.status,
+    area: t.areaName || '', project: t.projectName || '',
+    aideAreaId: t.area_id || null, aideProjectId: t.project_id || null,
+    tags: Array.isArray(t.tags) ? t.tags : [],
+    source: 'aide',
+    created: t.created_at, updated: t.updated_at,
+  };
+  // NOTA: NÃO mandamos `areaId`/`projectId`. O Lifegame valida-os contra as
+  // SUAS áreas e, não encontrando, atira a tarefa para 'a_arquivo' — onde ela
+  // não aparece no Backlog (AUDIT_EXPORT_FOR_AIDE 5.7, "o meu import
+  // desapareceu"). Mandar os ids do AIDE garantia esse destino. O caminho
+  // certo AIDE→Lifegame é a bridge, que passa por revisão humana.
+}
+
+function buildTasksCsv(tasks) {
+  const linhas = [
+    csvRow(['TAREFAS']),
+    csvRow(['ID', 'Título', 'Área', 'Projeto', 'Status', 'Prioridade', 'Urgência',
+            'Importância', 'Data Limite', 'Notas', 'Tags', 'aideTaskId']),
+  ];
+  for (const t of tasks) {
+    const lg = exportTaskToLifegame(t);
+    linhas.push(csvRow([
+      t.id, t.title || '', lg.area, lg.project, lg.status,
+      lg.priority ? 'Alta' : 'Normal', t.urgency, t.importance,
+      lg.realDeadline, lg.notes, (lg.tags || []).join(' '), t.id,
+    ]));
+  }
+  return '﻿' + linhas.join('\r\n');
+}
+
+function buildTasksMarkdown(tasks, dateLabel) {
+  const out = [`# Tarefas AIDE — ${dateLabel}`, ''];
+  // Agrupamento área → projeto, na ordem em que aparecem (igual ao Lifegame).
+  const porArea = new Map();
+  for (const t of tasks) {
+    const area = t.areaName || 'Sem área';
+    if (!porArea.has(area)) porArea.set(area, new Map());
+    const proj = t.projectName || 'Sem projeto';
+    const m = porArea.get(area);
+    if (!m.has(proj)) m.set(proj, []);
+    m.get(proj).push(t);
+  }
+  for (const [area, projetos] of porArea) {
+    out.push(`## ${area}`, '');
+    for (const [proj, lista] of projetos) {
+      out.push(`### 📁 ${proj}`);
+      for (const t of lista) {
+        const feito = t.status === 'done';
+        const prio = ((Number(t.urgency) || 0) >= 7 || (Number(t.importance) || 0) >= 7) ? '🔴 ' : '';
+        const titulo = feito ? `~~${t.title || '(sem título)'}~~` : (t.title || '(sem título)');
+        const prazo = t.due_date ? ` (até ${t.due_date})` : '';
+        out.push(`- [${feito ? 'x' : ' '}] ${prio}${titulo}${prazo}`);
+        const desc = String(t.description || '').replace(/\r?\n/g, ' ').trim();
+        if (desc) out.push(`  - Descrição: ${desc.slice(0, 100)}${desc.length > 100 ? '…' : ''}`);
+        const tags = Array.isArray(t.tags) ? t.tags : [];
+        if (tags.length) out.push(`  - Tags: ${tags.map(x => `#${x}`).join(' ')}`);
+      }
+      out.push('');
+    }
+  }
+  return out.join('\n');
+}
+
+// GET /api/export/tasks?format=json|csv|md&scope=all|mine
+//
+// SCOPING (não existia — o export devolvia a base inteira a qualquer sessão
+// válida, enquanto o botão dizia "Exportar MINHAS tarefas"). Agora:
+//   · não-owner ................. sempre só as suas, ?scope=all é ignorado
+//   · owner ..................... as suas por omissão; ?scope=all traz tudo
+// "Minhas" = a mesma definição da listagem: atribuídas a mim, criadas por mim,
+// ou onde sou co-responsável (task_assignees, migration 0052).
+async function handleExportTasks(request, env, user) {
+  const url = new URL(request.url);
+  // POST { format, scope, ids } — usado pelo botão da página de Tarefas para
+  // exportar exactamente o que está no ecrã depois dos filtros. Os `ids` são
+  // um RECORTE do que o âmbito já autorizou, nunca uma forma de alargá-lo.
+  let corpo = null;
+  if (request.method === 'POST') corpo = (await readJson(request)) || {};
+  const formato = String((corpo && corpo.format) || url.searchParams.get('format') || 'json').toLowerCase();
+  const querTudo = (corpo ? corpo.scope : url.searchParams.get('scope')) === 'all';
+  const idsPedidos = corpo && Array.isArray(corpo.ids) && corpo.ids.length
+    ? new Set(corpo.ids.map(String)) : null;
+  const podeTudo = user && user.role === 'owner' && canDo(user.granular, 'tasks', 'view_all');
+  const tudo = querTudo && podeTudo;
+
+  const extras = await ensureTaskExtras(env);
+  const select = extras ? TASK_SELECT_FULL : TASK_SELECT;
+  const conds = [];
+  const binds = [];
+  // Subtarefas ficam de fora: são linhas de `tasks` e apareceriam soltas ao
+  // lado da tarefa-mãe, duplicando o que já vai dentro dela.
+  if (extras) conds.push(NOT_SUBTASK);
+  if (!tudo) {
+    conds.push(extras
+      ? '(t.assigned_to = ? OR t.created_by = ? OR EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?))'
+      : '(t.assigned_to = ? OR t.created_by = ?)');
+    binds.push(...(extras ? [user.id, user.id, user.id] : [user.id, user.id]));
+  }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')} ` : '';
+  const { results } = await env.DB.prepare(
+    `${select} ${where}ORDER BY t.created_at DESC`
+  ).bind(...binds).all();
+  let tasks = (results || []).map(shapeTask);
+  // Recorte em memória (e não um IN (...) no SQL) para não esbarrar no limite
+  // de parâmetros do D1 com uma lista grande de ids.
+  if (idsPedidos) tasks = tasks.filter(t => idsPedidos.has(String(t.id)));
+
+  const hoje = new Date().toISOString().slice(0, 10);
+  const sufixo = idsPedidos ? 'filtradas' : (tudo ? 'todas' : 'minhas');
+  if (formato === 'csv') {
+    return downloadText(buildTasksCsv(tasks), `aide-tasks-${sufixo}-${hoje}.csv`, 'text/csv; charset=utf-8');
+  }
+  if (formato === 'md' || formato === 'markdown') {
+    return downloadText(buildTasksMarkdown(tasks, hoje), `aide-tasks-${sufixo}-${hoje}.md`, 'text/markdown; charset=utf-8');
+  }
+  return downloadJson({
+    source: 'AIDE',
+    exported_at: new Date().toISOString(),
+    scope: tudo ? 'all' : 'mine',
+    count: tasks.length,
+    tasks: tasks.map(exportTaskToLifegame),
+  }, `aide-tasks-${sufixo}-${hoje}.json`);
+}
+
+// ── Import de tarefas (JSON ou CSV) ───────────────────────────────────────
+// POST /api/import/tasks
+//   Content-Type: application/json  → { tasks:[...] } | { tarefas:[...] } | [...]
+//   Content-Type: text/csv          → CSV cru no corpo (com ou sem BOM)
+//
+// UM pedido para o lote inteiro. O "Importar Lista" antigo fazia um POST
+// /api/tasks POR LINHA: 200 títulos = 200 pedidos, sem transação e sem forma
+// de saber quais falharam.
+//
+// Upsert por aideTaskId: já existe → UPDATE (sincroniza), não existe → INSERT.
+// Assim, reimportar um export do próprio AIDE actualiza em vez de duplicar.
+
+// Divisor de CSV que respeita aspas e separadores dentro delas. Aceita `,`
+// (formato do Lifegame) e `;` (o que o Excel PT grava por omissão).
+function parseCsv(texto) {
+  const limpo = String(texto || '').replace(/^﻿/, '');
+  const cabecalho = (limpo.split(/\r?\n/)[0] || '');
+  const sep = (cabecalho.split(';').length > cabecalho.split(',').length) ? ';' : ',';
+  const linhas = [];
+  let campo = '', linha = [], aspas = false;
+  for (let i = 0; i < limpo.length; i++) {
+    const c = limpo[i];
+    if (aspas) {
+      if (c === '"' && limpo[i + 1] === '"') { campo += '"'; i++; }
+      else if (c === '"') aspas = false;
+      else campo += c;
+    } else if (c === '"') aspas = true;
+    else if (c === sep) { linha.push(campo); campo = ''; }
+    else if (c === '\n') { linha.push(campo); linhas.push(linha); linha = []; campo = ''; }
+    else if (c !== '\r') campo += c;
+  }
+  if (campo.length || linha.length) { linha.push(campo); linhas.push(linha); }
+  return linhas.filter(l => l.some(c => String(c).trim() !== ''));
+}
+
+// Cabeçalhos aceites, PT e EN, para o CSV não exigir uma ordem exacta.
+const CSV_ALIAS = {
+  id: 'id', 'aidetaskid': 'aideTaskId', 'título': 'title', titulo: 'title', title: 'title',
+  notas: 'notes', notes: 'notes', 'descrição': 'description', descricao: 'description',
+  description: 'description', status: 'status', 'área': 'area', area: 'area',
+  projeto: 'project', project: 'project', prioridade: 'priority', priority: 'priority',
+  'urgência': 'urgency', urgencia: 'urgency', urgency: 'urgency',
+  'importância': 'importance', importancia: 'importance', importance: 'importance',
+  'data limite': 'realDeadline', datalimite: 'realDeadline', realdeadline: 'realDeadline',
+  duedate: 'dueDate', 'due date': 'dueDate', tags: 'tags', energia: 'energy', energy: 'energy',
+};
+
+function csvToTasks(texto) {
+  const linhas = parseCsv(texto);
+  if (!linhas.length) return [];
+  // O CSV do Lifegame/AIDE começa com uma linha de bloco ("TAREFAS"): salta-a.
+  let inicio = 0;
+  if (linhas[0].length <= 2 && /^(TAREFAS|PROJETOS)$/i.test(String(linhas[0][0] || '').trim())) inicio = 1;
+  const cab = linhas[inicio].map(h => CSV_ALIAS[String(h).trim().toLowerCase()] || String(h).trim());
+  return linhas.slice(inicio + 1).map((l) => {
+    const o = {};
+    cab.forEach((k, i) => { if (k) o[k] = l[i]; });
+    if (typeof o.tags === 'string') o.tags = o.tags.split(/[\s,;]+/).filter(Boolean);
+    if (typeof o.priority === 'string') o.priority = /^(alta|high|true|sim|1)$/i.test(o.priority.trim());
+    return o;
+  });
+}
+
+async function handleImportTasks(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!canDo(user.granular, 'tasks', 'create')) {
+    return json({ error: 'Sem permissão para criar tarefas' }, 403);
+  }
+  const tipo = (request.headers.get('Content-Type') || '').toLowerCase();
+  let entrada = [];
+  try {
+    if (tipo.includes('csv') || tipo.includes('text/plain')) {
+      entrada = csvToTasks(await request.text());
+    } else {
+      const body = await readJson(request);
+      if (!body) return json({ error: 'JSON inválido' }, 400);
+      entrada = Array.isArray(body) ? body
+              : (Array.isArray(body.tasks) ? body.tasks
+              : (Array.isArray(body.tarefas) ? body.tarefas : null));
+      if (!entrada) return json({ error: 'Esperado { tasks: [...] } ou um array' }, 400);
+    }
+  } catch (e) {
+    return json({ error: 'Falha a ler o ficheiro', detail: String((e && e.message) || e).slice(0, 200) }, 400);
+  }
+  if (!entrada.length) return json({ error: 'Nenhuma tarefa encontrada' }, 400);
+  if (entrada.length > 2000) return json({ error: 'Lote demasiado grande (máx. 2000)' }, 413);
+
+  await ensureLifegameColumns(env);
+
+  // Áreas e projectos resolvidos por NOME (o ficheiro traz nomes, não ids).
+  // Uma leitura de cada, não uma por tarefa.
+  const nomeChave = (s) => String(s || '').trim().toLowerCase();
+  const projetos = new Map();
+  const areas = new Map();
+  try {
+    const { results } = await env.DB.prepare('SELECT id, name, area_id FROM projects').all();
+    for (const p of results || []) projetos.set(nomeChave(p.name), p);
+  } catch { /* sem projectos */ }
+  try {
+    const { results } = await env.DB.prepare('SELECT id, name FROM areas').all();
+    for (const a of results || []) areas.set(nomeChave(a.name), a);
+  } catch { /* migration 0015 não aplicada */ }
+
+  const agora = Math.floor(Date.now() / 1000);
+  let importadas = 0, actualizadas = 0, ignoradas = 0;
+  const erros = [];
+
+  for (const [i, t] of entrada.entries()) {
+    const titulo = String((t && (t.title || t.titulo)) || '').trim();
+    if (!titulo) { ignoradas++; erros.push({ linha: i + 1, error: 'sem título' }); continue; }
+    try {
+      const descricao = String(t.description || t.notes || t.notas || t.descricao || '');
+      const statusLg = String(t.status || '').toLowerCase();
+      const status = LG_TO_AIDE_STATUS[statusLg] || (TASK_STATUSES.includes(statusLg) ? statusLg : 'backlog');
+      const prioritaria = t.priority === true || /^(alta|high|true)$/i.test(String(t.prioridade || t.priority || ''));
+      const urgencia = Number(t.urgency ?? t.urgencia) || (prioritaria ? 8 : 5);
+      const importancia = Number(t.importance ?? t.importancia) || (prioritaria ? 8 : 5);
+      const energia = Number(t.energy ?? t.energia) || 5;
+      const prazo = t.realDeadline || t.dueDate || t.dataLimite || t.due_date || null;
+      const tags = JSON.stringify(Array.isArray(t.tags) ? t.tags : []);
+      // Órfã quando o nome não casa — de propósito: inventar uma área ou um
+      // projecto a partir de um nome de outro sistema criava lixo silencioso.
+      const proj = projetos.get(nomeChave(t.project || t.projeto || t.projectName)) || null;
+      const areaNome = nomeChave(t.area || t.areaName);
+      const area = areas.get(areaNome) || null;
+      const projectId = proj ? proj.id : null;
+
+      const externo = t.aideTaskId || t.id || null;
+      const existente = externo
+        ? await env.DB.prepare('SELECT id FROM tasks WHERE id = ?').bind(String(externo)).first()
+        : null;
+
+      if (existente) {
+        await env.DB.prepare(
+          `UPDATE tasks SET title=?, description=?, status=?, urgency=?, importance=?,
+             energy=?, due_date=?, tags=?, project_id=COALESCE(?, project_id), updated_at=?
+           WHERE id=?`
+        ).bind(titulo, descricao, status, urgencia, importancia, energia,
+               prazo, tags, projectId, agora, existente.id).run();
+        actualizadas++;
+      } else {
+        const novoId = crypto.randomUUID();
+        await env.DB.prepare(
+          `INSERT INTO tasks (id, title, description, project_id, assigned_to, created_by,
+             urgency, importance, energy, status, due_date, tags, comments, subtasks,
+             time_entries, favorited, drive_attachments, source, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'[]','[]','[]',0,'[]',?,?,?)`
+        ).bind(novoId, titulo, descricao, projectId, user.id, user.id,
+               urgencia, importancia, energia, status, prazo, tags,
+               String(t.source || 'import'), agora, agora).run();
+        // area_id não é coluna de `tasks` — a área vem do projecto. Quando o
+        // ficheiro traz área mas não projecto, fica registado no log para o
+        // utilizador saber por que a tarefa aparece sem área.
+        if (area && !proj) erros.push({ linha: i + 1, aviso: `área "${t.area}" ignorada: tarefa sem projecto` });
+        importadas++;
+      }
+    } catch (e) {
+      ignoradas++;
+      erros.push({ linha: i + 1, title: titulo.slice(0, 60), error: String((e && e.message) || e).slice(0, 200) });
+    }
+  }
+  return json({
+    ok: true, total: entrada.length,
+    imported: importadas, updated: actualizadas, skipped: ignoradas,
+    errors: erros.slice(0, 50),
+  });
 }
 
 async function handleExportNotes(env) {

@@ -26,6 +26,7 @@ import {
   User,
   Users,
   Settings,
+  Download,
   LogOut,
 } from 'lucide-react';
 import { useStore } from '../store';
@@ -37,6 +38,7 @@ import TimerIndicator from './timer/TimerIndicator';
 import TimerCheckMonitor from './timer/TimerCheckMonitor';
 import NotificationBell from './notifications/NotificationBell';
 import GlobalSearch from './search/GlobalSearch';
+import ExportTasksModal from './tasks/ExportTasksModal';
 
 // Nav único e ordenado (sidebar + bottom nav). `feature` = permissão (owner vê
 // tudo); `fixed: true` = só owner + assistente fixo. `group` agrupa visualmente
@@ -96,6 +98,7 @@ export default function Layout({ children }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const [bridgePending, setBridgePending] = useState(0);
   const [dexPending, setDexPending] = useState(0);
+  const [showExport, setShowExport] = useState(false);
   const menuRef = useRef(null);
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
@@ -281,7 +284,10 @@ export default function Layout({ children }) {
                     <span className="flex-1">Configurações</span>
                   </button>
                 )}
-                {/* Importar Dados — todos (owner + fixo + externo) */}
+                {/* Importar Dados — todos (owner + fixo + externo).
+                    NOTA: leva a /import, que é o importador de ORGANIZAÇÕES e
+                    CONTACTOS de mercado. Para tarefas é o botão "Importar" na
+                    página de Tarefas. */}
                 <button
                   type="button"
                   onClick={() => go('/import')}
@@ -289,6 +295,16 @@ export default function Layout({ children }) {
                 >
                   <Upload className="h-4 w-4" />
                   <span className="flex-1">Importar Dados</span>
+                </button>
+                {/* Exportar Tarefas — todos. O âmbito ("todas" vs "minhas") é
+                    que é owner-only, e quem o decide é o servidor. */}
+                <button
+                  type="button"
+                  onClick={() => { setMenuOpen(false); setShowExport(true); }}
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
+                >
+                  <Download className="h-4 w-4" />
+                  <span className="flex-1">Exportar Tarefas</span>
                 </button>
                 {/* Revisar Bridge — owner only, com badge de pendências */}
                 {isOwner && (
@@ -487,6 +503,8 @@ export default function Layout({ children }) {
           </div>
         </div>
       )}
+
+      {showExport && <ExportTasksModal isOwner={isOwner} onClose={() => setShowExport(false)} />}
     </div>
   );
 }

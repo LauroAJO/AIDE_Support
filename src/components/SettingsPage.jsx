@@ -99,7 +99,10 @@ export default function SettingsPage() {
       ]);
       const parts = [];
       if (tasks && tasks.error) parts.push(`tarefas: erro (${String(tasks.error).slice(0, 80)})`);
-      else if (tasks) parts.push(`tarefas: ${tasks.inserted || 0} novas, ${tasks.updated || 0} atualizadas (de ${tasks.fetched || 0})`);
+      else if (tasks) parts.push(
+        `tarefas: ${tasks.inserted || 0} novas, ${tasks.updated || 0} atualizadas (de ${tasks.fetched || 0})`
+        + (tasks.completions_closed ? ` · ${tasks.completions_closed} fechada(s) pelo Lifegame` : '')
+      );
       if (people && people.error) parts.push(`pessoas: erro (${String(people.error).slice(0, 80)})`);
       else if (people) parts.push(`pessoas: ${people.inserted || 0} novas, ${people.updated || 0} atualizadas (de ${people.fetched || 0})`);
       setSyncMsg(parts.join(' · '));

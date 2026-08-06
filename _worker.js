@@ -2045,6 +2045,15 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
     }
     const dueChanged = (existing.due_date || null) !== (merged.due_date || null);
     if (dueChanged) await notifyTaskDue(env, ctx, shaped);
+    // Bridge — conclusão AIDE → Lifegame. Só na TRANSIÇÃO para done (o mesmo
+    // `justCompleted` da recorrência), e só se a tarefa veio de lá. Em
+    // waitUntil: a resposta do PUT não espera pela rede, e uma falha do
+    // Lifegame nunca transforma uma conclusão bem-sucedida num erro.
+    if (justCompleted && existing.lifegame_id) {
+      const notify = notifyLifegameTaskComplete(env, { id: taskId, lifegame_id: existing.lifegame_id });
+      if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(notify);
+      else await notify;
+    }
     // @-mention notifications for newly added comments
     if (body.comments !== undefined) {
       await notifyCommentMentions(env, ctx, user, shaped, parseJsonArray(existing.comments), shaped.comments);
@@ -4800,6 +4809,84 @@ async function handleBridgePeopleStagingReject(request, env, user) {
   }
 }
 
+// Conclusão AIDE → Lifegame. Chamada quando uma tarefa com lifegame_id passa
+// a status='done' aqui (PUT /api/tasks/:id). O Lifegame marca-a como done com
+// source_completion='bridge', o que a exclui do completedAideTasks que ele
+// devolve — é assim que o ciclo não volta para trás (ver applyLifegameCompletions).
+//
+// NUNCA lança: a conclusão da tarefa na AIDE não pode falhar porque o Lifegame
+// está em baixo, sem secret configurado, ou a responder 500.
+async function notifyLifegameTaskComplete(env, task) {
+  if (!task || !task.lifegame_id) return { skipped: 'not_a_lifegame_task' };
+  try {
+    const config = await getBridgeConfig(env);
+    if (!config || !config.lifegame_url || !config.bridge_secret) {
+      return { skipped: 'bridge_not_configured' };
+    }
+    const r = await lifegameFetch(config, '/api/bridge/tasks/complete', {
+      method: 'POST',
+      body: JSON.stringify({ lifegame_id: task.lifegame_id, aideTaskId: task.id }),
+    });
+    await logBridge(env, {
+      direction: 'outbound', entity_type: 'task_completion',
+      entity_id: String(task.id),
+      status: r.ok ? 'success' : 'error',
+      payload: JSON.stringify({ lifegame_id: task.lifegame_id }),
+      error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 200)}` : ''}`,
+    }).catch(() => {});
+    if (!r.ok) console.error('[Bridge] Falha ao avisar o Lifegame:', r.status, r.body && r.body.slice(0, 200));
+    return { ok: r.ok, status: r.status };
+  } catch (e) {
+    console.error('[Bridge] Erro ao avisar o Lifegame:', (e && e.message) || e);
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+// Conclusão Lifegame → AIDE. Lê o `completedAideTasks` que o GET
+// /api/bridge/tasks do Lifegame passou a devolver e fecha aqui as tarefas
+// correspondentes.
+//
+// Escreve DIRETO em `tasks`, sem passar pelo PUT /api/tasks/:id — de propósito.
+// O PUT é que dispara notifyLifegameTaskComplete; passar por lá devolveria a
+// conclusão ao Lifegame que a originou (ver FIX 5). O `AND status != 'done'`
+// torna isto idempotente: um segundo pull da mesma lista não faz nada.
+//
+// NOTA: a tabela `tasks` não tem coluna done_at (ver migrations/0002_tasks.sql)
+// — o `doneAt` que vem do Lifegame não tem onde ser gravado. Marcamos o
+// updated_at (unixepoch, formato desta tabela), que é o que os relatórios de
+// concluídas já usam ("WHERE status='done' AND updated_at >= ?").
+async function applyLifegameCompletions(env, completedAideTasks) {
+  const list = Array.isArray(completedAideTasks) ? completedAideTasks : [];
+  if (!list.length) return { closed: 0 };
+  const now = Math.floor(Date.now() / 1000);
+  let closed = 0;
+  for (const c of list) {
+    const aideTaskId = c && c.aideTaskId != null ? String(c.aideTaskId) : null;
+    if (!aideTaskId) continue;
+    try {
+      const res = await env.DB.prepare(
+        "UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ? AND status != 'done'"
+      ).bind(now, aideTaskId).run();
+      const changes = (res && res.meta && res.meta.changes) || 0;
+      if (changes > 0) {
+        closed += 1;
+        await logBridge(env, {
+          direction: 'inbound', entity_type: 'task_completion',
+          entity_id: aideTaskId, status: 'success',
+          payload: JSON.stringify({ lifegame_id: c.id || null, doneAt: c.doneAt || null }),
+        }).catch(() => {});
+      }
+    } catch (e) {
+      await logBridge(env, {
+        direction: 'inbound', entity_type: 'task_completion',
+        entity_id: aideTaskId, status: 'error',
+        error: String((e && e.message) || e).slice(0, 200),
+      }).catch(() => {});
+    }
+  }
+  return { closed };
+}
+
 // Helper centralizado para chamadas ao Lifegame com logging detalhado.
 // Retorna { ok, status, body, url } sempre — nunca lança.
 async function lifegameFetch(config, urlPath, options = {}) {
@@ -5444,6 +5531,17 @@ async function handleBridgeImport(env, config, entity) {
   await ensureLifegameColumns(env);
   await cacheLifegamePayload(env, entity, items);
 
+  // Bridge — conclusão Lifegame → AIDE. Vem no mesmo GET /api/bridge/tasks,
+  // num campo à parte de `tasks`: são tarefas que NASCERAM aqui (têm
+  // aideTaskId), por isso o Lifegame não as devolve na lista normal (seria
+  // eco) mas devolve a conclusão delas. Corre antes do upsert para que uma
+  // tarefa que apareça nos dois sítios já esteja fechada.
+  let completionsClosed = 0;
+  if (entity === 'tasks') {
+    const r2 = await applyLifegameCompletions(env, data && data.completedAideTasks);
+    completionsClosed = r2.closed;
+  }
+
   let inserted = 0, updated = 0, staged = 0, skippedEcho = 0;
   const errors = [];
   for (const item of items) {
@@ -5476,7 +5574,7 @@ async function handleBridgeImport(env, config, entity) {
 
   await logBridge(env, {
     direction: 'inbound', entity_type: entity, status: errors.length ? 'error' : 'success',
-    payload: `import: ${staged} em revisão, ${inserted} novos, ${updated} atualizados, ${skippedEcho} eco ignorados, ${errors.length} erros`,
+    payload: `import: ${staged} em revisão, ${inserted} novos, ${updated} atualizados, ${skippedEcho} eco ignorados, ${completionsClosed} concluídas pelo Lifegame, ${errors.length} erros`,
     error: errors.length ? errors.slice(0, 3).map((e) => `${e.id}: ${e.error}`).join('; ') : null,
   });
 
@@ -5485,6 +5583,7 @@ async function handleBridgeImport(env, config, entity) {
     staged,
     updated,
     inserted,
+    completions_closed: completionsClosed,
     skipped_echo: skippedEcho,
     errors_count: errors.length,
     errors: errors.slice(0, 10),

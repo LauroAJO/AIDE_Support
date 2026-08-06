@@ -3,7 +3,10 @@ main = "worker.js"
 compatibility_date = "2024-01-01"
 
 [triggers]
-crons = ["0 8 * * *"]   # Diariamente às 08:00 UTC (10:00 hora NL no verão)
+crons = [
+  "0 8 * * *",     # Diariamente 08:00 UTC (10:00 NL no verão) → /api/cron/run
+  "*/5 * * * *",   # 5 em 5 min → /api/cron/bridge-sync (conclusões do Lifegame)
+]
 
 # Standalone Worker (NÃO Pages) — o Pages não suporta [triggers].
 # Secrets (Cloudflare Dashboard → Workers → aide-cron → Settings → Variables):

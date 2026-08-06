@@ -58,6 +58,8 @@ async function handleAPI(request, env, ctx) {
 
   // Cron run — auth handled inside (owner session OR X-Cron-Secret).
   if (path === '/api/cron/run') return handleCronRun(request, env, ctx);
+  // Bridge poll (5 em 5 min) — mesma auth. Ver FIX_BRIDGE_AUTOSYNC.
+  if (path === '/api/cron/bridge-sync') return handleCronBridgeSync(request, env);
 
   // Hub — ingestão externa: NÃO usa sessão, autentica por API key
   // (Authorization: ApiKey <chave>). Tem de vir antes do gate de sessão.
@@ -4887,6 +4889,37 @@ async function applyLifegameCompletions(env, completedAideTasks) {
   return { closed };
 }
 
+// Poll das conclusões do Lifegame (FIX_BRIDGE_AUTOSYNC). Corre a cada 5 min,
+// disparado pelo worker satélite `aide-cron` em POST /api/cron/bridge-sync —
+// o Pages NÃO dispara `scheduled`, por isso não há cron dentro deste worker.
+//
+// Puxa SÓ as conclusões. Não faz staging de tarefas novas de propósito: isso é
+// curadoria e enchia a fila de revisão de 5 em 5 minutos. Quem quer importar
+// tarefas continua a usar o botão "Importar do Lifegame".
+async function pollLifegameCompletions(env) {
+  const config = await getBridgeConfig(env);
+  if (!config || !config.lifegame_url || !config.bridge_secret) {
+    return { skipped: 'bridge_not_configured', closed: 0 };
+  }
+  if (!config.sync_enabled) {
+    return { skipped: 'sync_disabled', closed: 0 };
+  }
+  const r = await lifegameFetch(config, '/api/bridge/tasks');
+  if (!r.ok) {
+    await logBridge(env, {
+      direction: 'inbound', entity_type: 'task_completion', status: 'error',
+      error: `poll HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 200)}` : ''}`,
+    }).catch(() => {});
+    return { error: `http_${r.status}`, closed: 0 };
+  }
+  let data; try { data = JSON.parse(r.body); } catch { data = {}; }
+  const list = Array.isArray(data && data.completedAideTasks) ? data.completedAideTasks : [];
+  if (!list.length) return { fetched: 0, closed: 0 };
+  const { closed } = await applyLifegameCompletions(env, list);
+  if (closed > 0) console.log(`[Bridge] poll: ${closed} conclusão(ões) do Lifegame aplicadas`);
+  return { fetched: list.length, closed };
+}
+
 // Helper centralizado para chamadas ao Lifegame com logging detalhado.
 // Retorna { ok, status, body, url } sempre — nunca lança.
 async function lifegameFetch(config, urlPath, options = {}) {
@@ -6105,6 +6138,33 @@ async function handleCronRun(request, env, ctx) {
   if (!authorized) return json({ error: 'Não autorizado' }, 401);
   const result = await runDailyNotifications(env);
   return json({ ok: true, message: 'Cron executado manualmente', result });
+}
+
+// POST /api/cron/bridge-sync — puxa as conclusões do Lifegame (a cada 5 min,
+// pelo worker satélite aide-cron). Mesma auth do /api/cron/run: X-Cron-Secret
+// ou sessão de owner. Separado do /run de propósito: aquele é a rotina DIÁRIA
+// de notificações e não pode passar a correr 288×/dia.
+//
+// Nunca devolve 500 por falha do Lifegame: o satélite só reporta e volta a
+// tentar daí a 5 minutos, e o applyLifegameCompletions é idempotente.
+async function handleCronBridgeSync(request, env) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const cronSecret = request.headers.get('X-Cron-Secret');
+  let authorized = !!(env.CRON_SECRET && cronSecret === env.CRON_SECRET);
+  if (!authorized) {
+    const user = await getUserFromRequest(request, env);
+    authorized = !!(user && user.role === 'owner');
+  }
+  if (!authorized) return json({ error: 'Não autorizado' }, 401);
+  try {
+    const result = await pollLifegameCompletions(env);
+    // ok:false quando o Lifegame recusou/falhou — o satélite loga e volta a
+    // tentar daí a 5 min. Continua a ser HTTP 200: não é erro DESTE serviço.
+    return json({ ok: !result.error, ...result });
+  } catch (e) {
+    console.error('[Bridge] poll falhou:', (e && e.message) || e);
+    return json({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+  }
 }
 
 // ---------------------------------------------------------------------------

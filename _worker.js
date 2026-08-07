@@ -5009,6 +5009,123 @@ async function handleBridgeStagingCount(env, user) {
   return json({ tasks, people, total, pending: total });
 }
 
+// --- Recorrência vinda do Lifegame ------------------------------------------
+// O Lifegame manda cinco campos de recorrência no payload da bridge (ver o
+// _worker.js dele, GET /api/bridge/tasks). O `upsertLifegameTask` guarda o
+// payload INTEIRO em bridge_task_staging.raw_payload, mas o INSERT do approve
+// listava 20 colunas e nenhuma era de recorrência: uma tarefa recorrente do
+// Lifegame era aprovada aqui como tarefa NORMAL e nunca se repetia.
+// (Diagnóstico em LifeGame/_AUDITORIAS/FIX_RECORRENTES.txt §8.)
+//
+// LÊ-SE DO raw_payload E NÃO DE COLUNAS NOVAS NO STAGING, de propósito: o
+// raw_payload JÁ TEM os campos em todas as linhas por rever que estão na fila
+// neste momento. Colunas novas só se preencheriam em pushes futuros, e as
+// tarefas que estão à espera de aprovação teriam de ser reenviadas do Lifegame
+// para não entrarem erradas. Assim o patch corrige também o que já lá está.
+//
+// TRADUÇÃO DE VOCABULÁRIO — os dois lados não têm o mesmo modelo:
+//
+//   Lifegame                      AIDE (migration 0046)
+//   ─────────────────────────     ─────────────────────────────────────────
+//   is_recurring (boolean)    →   is_recurring (INTEGER 0/1)
+//   recurrence_type           →   recurrence_type ('daily'|'weekly'|'monthly')
+//   recurrence_days (str JSON)→   recurrence_days (TEXT, string JSON [0-6])
+//   —                         →   recurrence_interval (1: o Lifegame não tem
+//                                 conceito de "a cada N semanas")
+//   recurrence_day_of_month   →   SEM COLUNA — fica só no raw_payload
+//   next_occurrence           →   SEM COLUNA — fica só no raw_payload
+//
+// As duas últimas não se perdem, mas também não são usadas: o mensal da AIDE
+// conta a partir da data de CONCLUSÃO (calcNextDate: `base.setMonth(+1)`), não
+// de um dia fixo do mês. Uma recorrente mensal "dia 15" do Lifegame comporta-se
+// aqui como "+1 mês a contar de quando a fechei". Está assim de propósito, é
+// uma limitação do modelo da AIDE e não deste patch.
+const AIDE_RECURRENCE_TYPES = ['daily', 'weekly', 'monthly'];
+
+function parseStagedRecurrence(rawPayload) {
+  // O default é o estado "não recorrente" EXPLÍCITO (0 e não null): as colunas
+  // têm DEFAULT 0/'' mas o INSERT liga-as por posição, e um null aqui gravava
+  // null por cima do default — o `if (existing.is_recurring)` da conclusão
+  // continuaria a funcionar, mas o GET /api/tasks/recurring filtra por
+  // `is_recurring = 1` e o shapeTask faz `row.is_recurring ? 1 : 0`, logo um
+  // null espalhava-se como inconsistência silenciosa pela API fora.
+  const off = {
+    is_recurring: 0,
+    recurrence_type: '',
+    recurrence_interval: 1,
+    recurrence_days: '[]',
+  };
+  let raw;
+  try {
+    raw = JSON.parse(rawPayload || '{}');
+  } catch {
+    return off;   // payload corrompido → tarefa normal, o approve não pode falhar por isto
+  }
+  if (!raw || typeof raw !== 'object' || !raw.is_recurring) return off;
+
+  // O tipo é VALIDADO contra o vocabulário da AIDE em vez de ser copiado à
+  // letra. O calcNextDate faz `switch (recurrence_type)` e o `default:` devolve
+  // a própria data de conclusão — um tipo desconhecido não rebentava nada, mas
+  // gerava a ocorrência seguinte para HOJE, todos os dias, para sempre.
+  const type = AIDE_RECURRENCE_TYPES.includes(raw.recurrence_type)
+    ? raw.recurrence_type
+    : 'weekly';
+
+  // O Lifegame já manda `recurrence_days` como STRING JSON (é assim que a coluna
+  // da AIDE está definida e ele sabe disso), mas aceita-se o array porque
+  // versões antigas dele mandavam assim e um push antigo não pode perder os dias.
+  // Normaliza-se sempre para string JSON de inteiros 0-6 únicos: é o que o
+  // `JSON.parse(task.recurrence_days)` do calcNextDate espera, e o guard dele
+  // contra dias inválidos só evita o ciclo infinito — não corrige os dados.
+  let days = [];
+  const rawDays = raw.recurrence_days;
+  if (Array.isArray(rawDays)) days = rawDays;
+  else if (typeof rawDays === 'string' && rawDays.trim()) {
+    try { const p = JSON.parse(rawDays); if (Array.isArray(p)) days = p; } catch { days = []; }
+  }
+  days = [...new Set(days.map(Number).filter(d => Number.isInteger(d) && d >= 0 && d <= 6))].sort((a, b) => a - b);
+
+  return {
+    is_recurring: 1,
+    recurrence_type: type,
+    recurrence_interval: 1,
+    recurrence_days: JSON.stringify(days),
+  };
+}
+
+// Mesmo probe+ALTER do ensureStagingBridgeColumns: a migration 0046 pode não ter
+// corrido nesta base. Sem isto, acrescentar as colunas ao INSERT fazia rebentar
+// TODOS os approves — incluindo os de tarefas não recorrentes, que hoje passam.
+// Melhor uma tarefa sem recorrência do que a curadoria inteira em baixo.
+let _taskRecurrenceCols = null;
+async function ensureTaskRecurrenceColumns(env) {
+  if (_taskRecurrenceCols !== null) return _taskRecurrenceCols;
+  try {
+    await env.DB.prepare(
+      'SELECT is_recurring, recurrence_type, recurrence_interval, recurrence_days FROM tasks LIMIT 1'
+    ).first();
+    _taskRecurrenceCols = true;
+    return true;
+  } catch { /* colunas em falta — tenta criar */ }
+  for (const ddl of [
+    'ALTER TABLE tasks ADD COLUMN is_recurring INTEGER DEFAULT 0',
+    "ALTER TABLE tasks ADD COLUMN recurrence_type TEXT DEFAULT ''",
+    'ALTER TABLE tasks ADD COLUMN recurrence_interval INTEGER DEFAULT 1',
+    "ALTER TABLE tasks ADD COLUMN recurrence_days TEXT DEFAULT '[]'",
+  ]) {
+    try { await env.DB.prepare(ddl).run(); } catch { /* já existe */ }
+  }
+  try {
+    await env.DB.prepare(
+      'SELECT is_recurring, recurrence_type, recurrence_interval, recurrence_days FROM tasks LIMIT 1'
+    ).first();
+    _taskRecurrenceCols = true;
+  } catch {
+    _taskRecurrenceCols = false;
+  }
+  return _taskRecurrenceCols;
+}
+
 async function handleBridgeStagingApprove(request, env, user) {
   if (!requireOwner(user)) return json({ error: 'Apenas o owner' }, 403);
   const body = (await readJson(request)) || {};
@@ -5031,20 +5148,41 @@ async function handleBridgeStagingApprove(request, env, user) {
         // (que na AIDE deriva do projecto) ficava por consequência vazia.
         // Os campos só existem depois da migration 0054 — daí o fallback.
         const hasCols = await ensureStagingBridgeColumns(env);
-        await env.DB.prepare(
-          `INSERT INTO tasks
-            (id, title, description, urgency, importance, energy, status, tags, comments, subtasks, time_entries,
-             favorited, drive_attachments, project_id, front_id, due_date, source, lifegame_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', 0, '[]', ?, ?, ?, 'lifegame', ?, ?, ?)`
-        ).bind(
+        // Recorrência (migration 0046) — lida do raw_payload. Ver
+        // parseStagedRecurrence acima para a tradução Lifegame→AIDE.
+        const hasRec = await ensureTaskRecurrenceColumns(env);
+        const rec = hasRec ? parseStagedRecurrence(s.raw_payload) : null;
+
+        const cols = [
+          'id', 'title', 'description', 'urgency', 'importance', 'energy', 'status', 'tags',
+          'comments', 'subtasks', 'time_entries', 'favorited', 'drive_attachments',
+          'project_id', 'front_id', 'due_date', 'source', 'lifegame_id', 'created_at', 'updated_at',
+        ];
+        const vals = [
+          '?', '?', '?', '?', '?', '?', '?', '?',
+          "'[]'", "'[]'", "'[]'", '0', "'[]'",
+          '?', '?', '?', "'lifegame'", '?', '?', '?',
+        ];
+        const args = [
           taskId, s.title, s.description || '', s.urgency, s.importance,
           hasCols && s.energy != null ? s.energy : 5,
           s.status, s.tags || '[]',
           hasCols ? (s.project_id || null) : null,
           hasCols ? (s.front_id || null) : null,
           hasCols ? (s.due_date || null) : null,
-          s.lifegame_id, now, now
-        ).run();
+          s.lifegame_id, now, now,
+        ];
+        // Acrescentado por composição e não com um segundo INSERT literal: as
+        // duas variantes teriam de ser mantidas em paralelo, e a próxima coluna
+        // que alguém acrescentasse a uma esquecia-se na outra.
+        if (rec) {
+          cols.push('is_recurring', 'recurrence_type', 'recurrence_interval', 'recurrence_days');
+          vals.push('?', '?', '?', '?');
+          args.push(rec.is_recurring, rec.recurrence_type, rec.recurrence_interval, rec.recurrence_days);
+        }
+        await env.DB.prepare(
+          `INSERT INTO tasks (${cols.join(', ')}) VALUES (${vals.join(', ')})`
+        ).bind(...args).run();
       }
       await env.DB.prepare(
         'UPDATE bridge_task_staging SET reviewed=1, approved=1, imported_at=?, imported_task_id=? WHERE id=?'

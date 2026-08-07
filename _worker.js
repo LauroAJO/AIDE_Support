@@ -4896,6 +4896,28 @@ async function handleBridge(request, env, ctx, path) {
   const user = hasSecret ? null : await getUserFromRequest(request, env);
   if (!hasSecret && !user) return json({ error: 'Não autorizado' }, 401);
 
+  // [P7D] GET /api/bridge/health — prova de vida para o lado do Lifegame.
+  // O Lifegame chama isto a partir do /api/bridge/aide/status dele para saber
+  // se a ponte está mesmo de pé; até aqui o cartão de Integrações dele só sabia
+  // dizer "há um AIDE_URL configurado", que é verdade mesmo com a AIDE em baixo.
+  //
+  // NÃO valida o segredo aqui dentro, de propósito: o gate logo acima (a linha
+  // do `hasSecret`) já o comparou com o `bridge_secret` da D1 e já devolveu 401
+  // se não bate. Repetir a comparação aqui seria uma SEGUNDA fonte de verdade
+  // para o segredo — e a tentação seria compará-lo com `env.BRIDGE_SECRET`, que
+  // NESTE worker não existe: do lado da AIDE o segredo vive na tabela
+  // bridge_config (id='singleton'), não no env. Comparar contra undefined dava
+  // 401 sempre, e o Lifegame passava a mostrar a ponte vermelha para sempre —
+  // a mesma avaria que este P7D veio corrigir, virada ao contrário.
+  //
+  // A resposta é deliberadamente mínima. É um endpoint que atende pedidos vindos
+  // da internet a cada verificação: não leva nada sobre config, versões ou estado
+  // interno. Quem passou o gate provou que sabe o segredo; isso não é razão para
+  // lhe contar mais do que "estou viva".
+  if (path === '/api/bridge/health' && method === 'GET') {
+    return json({ ok: true, ts: Date.now() });
+  }
+
   if (path === '/api/bridge/config') {
     if (method === 'GET') return json(maskBridgeConfig(config));
     if (method === 'PUT') return handleBridgeConfigUpdate(request, env, config);

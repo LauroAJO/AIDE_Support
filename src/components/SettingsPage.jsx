@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Trash2, ExternalLink, CheckCircle2, AlertTriangle, RefreshCw, Eye, EyeOff } from 'lucide-react';
 import { useStore } from '../store';
 import { apiFetch } from '../lib/api';
@@ -37,6 +38,7 @@ async function downloadExport(path, filename) {
 }
 
 export default function SettingsPage() {
+  const navigate = useNavigate();
   const currentUser = useStore((s) => s.user);
   const [users, setUsers] = useState([]);
   const [calStatus, setCalStatus] = useState('checking');
@@ -89,24 +91,50 @@ export default function SettingsPage() {
     }
   };
 
+  // Resumo de UM lado do import (tarefas ou pessoas).
+  //
+  // O `staged` vem PRIMEIRO porque, desde a curadoria (v2.4.4), é ele o número
+  // que conta: toda a tarefa nova do Lifegame entra em `bridge_task_staging` à
+  // espera de revisão, e `upsertLifegameTask` devolve 'staged', nunca
+  // 'inserted'. A mensagem antiga só mostrava `inserted` e `updated`, por isso
+  // um import bem-sucedido de 506 tarefas anunciava "0 novas, 0 atualizadas
+  // (de 506)" — lia-se como "não aconteceu nada" precisamente quando tinha
+  // acontecido tudo. O `inserted` deixa de aparecer quando é 0: hoje ele só é
+  // diferente de zero em registos anteriores à curadoria.
+  //
+  // `skipped_echo` aparece quando existe porque é ele que explica o buraco
+  // entre `fetched` e o resto — sem isso, "de 506" continua a não fechar a
+  // conta e a mensagem volta a parecer que perdeu qualquer coisa.
+  const resumoImport = (label, r) => {
+    if (r && r.error) return `${label}: erro (${String(r.error).slice(0, 80)})`;
+    if (!r) return null;
+    const staged = r.staged || 0;
+    const partes = [
+      staged > 0 ? `${staged} para revisar em Staging` : 'sem itens novos',
+    ];
+    if (r.inserted) partes.push(`${r.inserted} inseridas direto`);
+    partes.push(`${r.updated || 0} atualizadas`);
+    if (r.skipped_echo) partes.push(`${r.skipped_echo} eco ignorado(s)`);
+    if (r.completions_closed) partes.push(`${r.completions_closed} fechada(s) pelo Lifegame`);
+    return `${label}: ${partes.join(', ')} (de ${r.fetched || 0})`;
+  };
+
   const [importing, setImporting] = useState(false);
+  // Guarda a resposta inteira, não só o texto: o aviso de "há coisas à espera
+  // de revisão" precisa do número, e o texto já foi montado.
+  const [importResult, setImportResult] = useState(null);
   const importFromLifegame = async () => {
     setImporting(true);
+    setImportResult(null);
     setSyncMsg('Importando do Lifegame...');
     try {
       const [tasks, people] = await Promise.all([
         apiFetch('/api/bridge/import/tasks', { method: 'POST' }).catch((e) => ({ error: String(e.message || e) })),
         apiFetch('/api/bridge/import/people', { method: 'POST' }).catch((e) => ({ error: String(e.message || e) })),
       ]);
-      const parts = [];
-      if (tasks && tasks.error) parts.push(`tarefas: erro (${String(tasks.error).slice(0, 80)})`);
-      else if (tasks) parts.push(
-        `tarefas: ${tasks.inserted || 0} novas, ${tasks.updated || 0} atualizadas (de ${tasks.fetched || 0})`
-        + (tasks.completions_closed ? ` · ${tasks.completions_closed} fechada(s) pelo Lifegame` : '')
-      );
-      if (people && people.error) parts.push(`pessoas: erro (${String(people.error).slice(0, 80)})`);
-      else if (people) parts.push(`pessoas: ${people.inserted || 0} novas, ${people.updated || 0} atualizadas (de ${people.fetched || 0})`);
+      const parts = [resumoImport('tarefas', tasks), resumoImport('pessoas', people)].filter(Boolean);
       setSyncMsg(parts.join(' · '));
+      setImportResult({ tasks, people });
       loadBridge();
     } catch (e) {
       setSyncMsg(`Falha na importação: ${String((e && e.message) || e).slice(0, 200)}`);
@@ -114,6 +142,12 @@ export default function SettingsPage() {
       setImporting(false);
     }
   };
+  // Só as respostas SEM erro contam: um import que falhou não tem `staged`, e
+  // `undefined || 0` mandaria o aviso desaparecer de qualquer forma — mas ser
+  // explícito evita anunciar "0 à espera" em cima de uma falha.
+  const stagedTotal =
+    ((importResult?.tasks && !importResult.tasks.error && importResult.tasks.staged) || 0)
+    + ((importResult?.people && !importResult.people.error && importResult.people.staged) || 0);
   const [syncMsg, setSyncMsg] = useState('');
   const [cronMsg, setCronMsg] = useState('');
 
@@ -458,6 +492,22 @@ export default function SettingsPage() {
               </p>
             )}
             {syncMsg && <p className="text-xs text-ink2">{syncMsg}</p>}
+            {stagedTotal > 0 && (
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {stagedTotal} {stagedTotal === 1 ? 'item aguarda revisão' : 'itens aguardam revisão'} em
+                  Staging — nada entra no AIDE antes de ser aprovado.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => navigate('/bridge/staging')}
+                  className="rounded border border-amber-400 px-2 py-0.5 font-medium hover:bg-amber-100"
+                >
+                  Ver agora
+                </button>
+              </div>
+            )}
 
             {bridgeLog.length > 0 && (
               <div className="overflow-x-auto">

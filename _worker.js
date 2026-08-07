@@ -5026,14 +5026,24 @@ async function handleBridgeStagingApprove(request, env, user) {
       const dup = await env.DB.prepare('SELECT id FROM tasks WHERE lifegame_id = ?').bind(s.lifegame_id).first();
       const taskId = dup ? dup.id : crypto.randomUUID();
       if (!dup) {
+        // v2.26 — o INSERT descartava projecto, frente, prazo e energia: a
+        // tarefa aprovada nascia solta, sem hierarquia nem data, e a área
+        // (que na AIDE deriva do projecto) ficava por consequência vazia.
+        // Os campos só existem depois da migration 0054 — daí o fallback.
+        const hasCols = await ensureStagingBridgeColumns(env);
         await env.DB.prepare(
           `INSERT INTO tasks
             (id, title, description, urgency, importance, energy, status, tags, comments, subtasks, time_entries,
-             favorited, drive_attachments, source, lifegame_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 5, ?, ?, '[]', '[]', '[]', 0, '[]', 'lifegame', ?, ?, ?)`
+             favorited, drive_attachments, project_id, front_id, due_date, source, lifegame_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', 0, '[]', ?, ?, ?, 'lifegame', ?, ?, ?)`
         ).bind(
-          taskId, s.title, s.description || '', s.urgency, s.importance, s.status,
-          s.tags || '[]', s.lifegame_id, now, now
+          taskId, s.title, s.description || '', s.urgency, s.importance,
+          hasCols && s.energy != null ? s.energy : 5,
+          s.status, s.tags || '[]',
+          hasCols ? (s.project_id || null) : null,
+          hasCols ? (s.front_id || null) : null,
+          hasCols ? (s.due_date || null) : null,
+          s.lifegame_id, now, now
         ).run();
       }
       await env.DB.prepare(
@@ -5828,6 +5838,47 @@ async function ensureLifegameColumns(env) {
   } catch {
     try { await env.DB.prepare("ALTER TABLE network_people ADD COLUMN source TEXT DEFAULT 'aide'").run(); } catch { /* já existe */ }
   }
+  // Migration 0054 — projecto/frente/prazo/energia no staging. Mesmo probe+ALTER
+  // das de cima: sem isto, um deploy do worker antes de a migração correr
+  // rebentava todos os INSERT de staging (colunas inexistentes).
+  await ensureStagingBridgeColumns(env);
+}
+
+// Devolve true quando bridge_task_staging já tem as colunas da 0054. O
+// resultado é reusado por upsertLifegameTask e pelo approve, que degradam para
+// o conjunto antigo de campos se a tabela ainda for a de 0032 — melhor uma
+// tarefa sem projecto do que um push inteiro a falhar.
+let _stagingBridgeCols = null;
+async function ensureStagingBridgeColumns(env) {
+  if (_stagingBridgeCols !== null) return _stagingBridgeCols;
+  try {
+    await env.DB.prepare(
+      'SELECT project_id, front_id, due_date, energy, lifegame_area_id FROM bridge_task_staging LIMIT 1'
+    ).first();
+    _stagingBridgeCols = true;
+    return true;
+  } catch { /* colunas em falta — tenta criar */ }
+  for (const ddl of [
+    'ALTER TABLE bridge_task_staging ADD COLUMN project_id TEXT',
+    'ALTER TABLE bridge_task_staging ADD COLUMN front_id TEXT',
+    'ALTER TABLE bridge_task_staging ADD COLUMN due_date TEXT',
+    'ALTER TABLE bridge_task_staging ADD COLUMN energy INTEGER DEFAULT 5',
+    'ALTER TABLE bridge_task_staging ADD COLUMN lifegame_area_id TEXT',
+  ]) {
+    try { await env.DB.prepare(ddl).run(); } catch { /* já existe */ }
+  }
+  try {
+    await env.DB.prepare(
+      'SELECT project_id, front_id, due_date, energy, lifegame_area_id FROM bridge_task_staging LIMIT 1'
+    ).first();
+    _stagingBridgeCols = true;
+  } catch {
+    // A tabela nem sequer existe (0032 por aplicar). Não fica em cache `false`
+    // para sempre — o módulo é reciclado a cada isolate, e uma migração
+    // posterior é apanhada no isolate seguinte.
+    _stagingBridgeCols = false;
+  }
+  return _stagingBridgeCols;
 }
 
 // v2.4.4 — curadoria: tarefas novas do Lifegame NÃO entram direto em `tasks`.
@@ -5843,25 +5894,72 @@ async function upsertLifegameTask(env, t) {
   const urgency = Math.max(0, Math.min(10, Number(t.urgency) || 5));
   const importance = Math.max(0, Math.min(10, Number(t.importance) || 5));
   const status = ['backlog', 'todo', 'doing', 'done', 'blocked'].includes(t.status) ? t.status : 'backlog';
+  const energy = Math.max(0, Math.min(10, Number(t.energy) || 5));
+
+  // v2.26 — projecto / frente / prazo. O Lifegame manda snake_case (é o que a
+  // AIDE fala); o camelCase fica aceite porque as versões antigas dele mandavam
+  // assim e um push de um deploy antigo não pode perder os campos.
+  //
+  // O projecto e a frente são VALIDADOS contra as tabelas locais antes de serem
+  // guardados. Os ids são partilhados entre as duas apps, mas partilhados não é
+  // o mesmo que garantidos: um projecto criado no Lifegame e ainda não criado
+  // aqui deixaria `tasks.front_id` a apontar para uma frente inexistente
+  // (front_id TEM foreign key, ao contrário de project_id) e o INSERT do approve
+  // rebentava. Desconhecido → null, e a tarefa entra sem projecto em vez de não
+  // entrar de todo.
+  const wantProject = t.project_id || t.projectId || null;
+  const wantFront = t.front_id || t.frontId || null;
+  const projectId = wantProject
+    ? ((await env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(wantProject).first()) ? wantProject : null)
+    : null;
+  const frontId = wantFront
+    ? ((await env.DB.prepare('SELECT id FROM fronts WHERE id = ?').bind(wantFront).first()) ? wantFront : null)
+    : null;
+  const dueDate = t.due_date || t.dueDate || null;
+  // A área não tem coluna em `tasks` (deriva do projecto). Guarda-se só no
+  // staging, como metadata para o caminho de volta.
+  const lifegameAreaId = t.lifegame_area_id || t.area_id || t.areaId || null;
 
   // Já importada (aprovada) → atualiza a task real.
   const existing = await env.DB.prepare('SELECT id FROM tasks WHERE lifegame_id = ?').bind(t.id).first();
   if (existing) {
+    // A UPDATE levava 5 campos: uma tarefa já aprovada nunca via a descrição, o
+    // prazo, a energia nem o projecto mudarem do lado do Lifegame. project_id e
+    // front_id só são escritos quando resolveram para algo real — senão um push
+    // de uma tarefa cujo projecto ainda não existe aqui APAGAVA a ligação que o
+    // utilizador já tinha feito à mão na AIDE.
     await env.DB.prepare(
-      'UPDATE tasks SET title=?, urgency=?, importance=?, status=?, tags=?, updated_at=? WHERE lifegame_id=?'
-    ).bind(title, urgency, importance, status, tags, now, t.id).run();
+      `UPDATE tasks SET title=?, description=?, urgency=?, importance=?, energy=?, status=?, tags=?,
+         due_date=?, project_id=COALESCE(?, project_id), front_id=COALESCE(?, front_id), updated_at=?
+       WHERE lifegame_id=?`
+    ).bind(title, description, urgency, importance, energy, status, tags,
+      dueDate, projectId, frontId, now, t.id).run();
     return 'updated';
   }
 
   // Nova → estaciona para revisão. UNIQUE(lifegame_id) + INSERT OR IGNORE deixa
   // idempotente: reenvios não duplicam nem reabrem uma já rejeitada.
+  const raw = JSON.stringify(t).slice(0, 100000);
+  if (await ensureStagingBridgeColumns(env)) {
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO bridge_task_staging
+        (id, lifegame_id, title, description, urgency, importance, energy, status, tags,
+         project_id, front_id, due_date, lifegame_area_id, source, raw_payload, staged_at, staged_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'lifegame', ?, ?, 'bridge')`
+    ).bind(
+      crypto.randomUUID(), t.id, title, description, urgency, importance, energy, status, tags,
+      projectId, frontId, dueDate, lifegameAreaId, raw, now
+    ).run();
+    return 'staged';
+  }
+  // Migration 0054 por aplicar — grava o conjunto antigo. Os campos novos ficam
+  // no raw_payload e não se perdem, mas não chegam à task no approve.
   await env.DB.prepare(
     `INSERT OR IGNORE INTO bridge_task_staging
       (id, lifegame_id, title, description, urgency, importance, status, tags, source, raw_payload, staged_at, staged_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'lifegame', ?, ?, 'bridge')`
   ).bind(
-    crypto.randomUUID(), t.id, title, description, urgency, importance, status, tags,
-    JSON.stringify(t).slice(0, 100000), now
+    crypto.randomUUID(), t.id, title, description, urgency, importance, status, tags, raw, now
   ).run();
   return 'staged';
 }

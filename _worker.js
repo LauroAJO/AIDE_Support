@@ -4938,6 +4938,11 @@ async function handleBridge(request, env, ctx, path) {
   if (path === '/api/bridge/receive/people') return handleBridgeReceivePeople(request, env);
   if (path === '/api/bridge/receive/timelog') return handleBridgeReceiveTimelog(request, env);
   if (path === '/api/bridge/sync-status') return handleBridgeSyncStatus(env);
+  // v2.27 — expõe bridge_mapping para o Lifegame poder traduzir, no sentido
+  // inverso (AIDE→LG), o project_id/front_id de uma tarefa aprovada de volta
+  // para o ID nativo dele. Autenticação já resolvida pelo gate `hasSecret` /
+  // `user` logo acima nesta função — igual a todas as outras rotas /api/bridge/*.
+  if (path === '/api/bridge/mapping' && method === 'GET') return handleBridgeMappingList(env);
 
   // --- Curadoria de tarefas do Lifegame (v2.4.4) ---------------------------
   // Rotas acessadas pelo owner via browser (sessão, não secret).
@@ -5588,6 +5593,20 @@ async function handleBridgeReceivePeople(request, env) {
   return json({ received });
 }
 
+// v2.27 — devolve todos os pares de bridge_mapping (migration 0055). Falha
+// graciosamente (mappings: []) se a tabela ainda não existir, em vez de
+// rebentar a rota — mesma filosofia defensiva do resto do ficheiro de bridge.
+async function handleBridgeMappingList(env) {
+  try {
+    const rows = await env.DB.prepare(
+      'SELECT id, entity_type, lifegame_id, aide_id, aide_entity_type, match_status, created_at, updated_at FROM bridge_mapping ORDER BY entity_type, lifegame_id'
+    ).all();
+    return json({ ok: true, mappings: rows.results || [] });
+  } catch (e) {
+    return json({ ok: false, mappings: [], error: String(e && e.message || e) });
+  }
+}
+
 async function handleBridgeSyncStatus(env) {
   // Walk the sync log to find each entity type's most recent success.
   const safe = async (sql, ...binds) => {
@@ -6019,6 +6038,55 @@ async function ensureStagingBridgeColumns(env) {
   return _stagingBridgeCols;
 }
 
+// v2.27 — BRIDGE MAPPING. Os IDs do LifeGame ('proj_novalt', 'a_fluxkracht')
+// nunca coincidem com os UUIDs da AIDE — por isso a validação directa abaixo
+// ('SELECT id FROM projects WHERE id = ?') falhava sempre e todas as tarefas
+// chegavam sem projecto/frente. resolveViaMapping traduz o ID do LifeGame para
+// o ID real da AIDE usando a tabela bridge_mapping (migration 0055) ANTES da
+// validação. Um lifegame_id de projecto pode mapear para um projecto OU para
+// uma frente da AIDE (ex.: proj_linkedin -> front 'LinkedIn' dentro de
+// 'Presença Digital e Profissional') — por isso aide_entity_type é lido do
+// mapping e tratado nos dois ramos.
+async function resolveViaMapping(env, lgProjectId, lgAreaId) {
+  const result = { project_id: null, front_id: null, area_id: null };
+  try {
+    if (lgProjectId) {
+      const mapping = await env.DB.prepare(
+        'SELECT aide_id, aide_entity_type FROM bridge_mapping WHERE entity_type = ? AND lifegame_id = ?'
+      ).bind('project', lgProjectId).first();
+      if (mapping) {
+        if (mapping.aide_entity_type === 'project') {
+          result.project_id = mapping.aide_id;
+          const proj = await env.DB.prepare('SELECT area_id FROM projects WHERE id = ?')
+            .bind(mapping.aide_id).first();
+          if (proj) result.area_id = proj.area_id;
+        } else if (mapping.aide_entity_type === 'front') {
+          result.front_id = mapping.aide_id;
+          const front = await env.DB.prepare('SELECT project_id FROM fronts WHERE id = ?')
+            .bind(mapping.aide_id).first();
+          if (front) {
+            result.project_id = front.project_id;
+            const proj = await env.DB.prepare('SELECT area_id FROM projects WHERE id = ?')
+              .bind(front.project_id).first();
+            if (proj) result.area_id = proj.area_id;
+          }
+        }
+      }
+    }
+    if (!result.area_id && lgAreaId) {
+      const areaMapping = await env.DB.prepare(
+        'SELECT aide_id FROM bridge_mapping WHERE entity_type = ? AND lifegame_id = ?'
+      ).bind('area', lgAreaId).first();
+      if (areaMapping) result.area_id = areaMapping.aide_id;
+    }
+  } catch (e) {
+    // bridge_mapping pode não existir ainda (migration 0055 por aplicar) —
+    // falha silenciosa e devolve tudo null, exactamente como o comportamento
+    // anterior a esta função existir.
+  }
+  return result;
+}
+
 // v2.4.4 — curadoria: tarefas novas do Lifegame NÃO entram direto em `tasks`.
 // Vão para bridge_task_staging e aguardam aprovação do owner em "Revisar Bridge".
 // Tarefas já aprovadas (que existem em `tasks` com o mesmo lifegame_id) continuam
@@ -6047,16 +6115,27 @@ async function upsertLifegameTask(env, t) {
   // entrar de todo.
   const wantProject = t.project_id || t.projectId || null;
   const wantFront = t.front_id || t.frontId || null;
-  const projectId = wantProject
-    ? ((await env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(wantProject).first()) ? wantProject : null)
-    : null;
-  const frontId = wantFront
-    ? ((await env.DB.prepare('SELECT id FROM fronts WHERE id = ?').bind(wantFront).first()) ? wantFront : null)
-    : null;
   const dueDate = t.due_date || t.dueDate || null;
   // A área não tem coluna em `tasks` (deriva do projecto). Guarda-se só no
   // staging, como metadata para o caminho de volta.
   const lifegameAreaId = t.lifegame_area_id || t.area_id || t.areaId || null;
+
+  // v2.27 — tenta traduzir o ID do LifeGame via bridge_mapping PRIMEIRO. Só se
+  // não houver mapeamento (ou a tabela ainda não existir) é que cai na
+  // validação directa antiga — que só acerta se, por coincidência, o ID vindo
+  // do LifeGame já for literalmente um ID/UUID da AIDE (ex.: reprocessamento
+  // de uma tarefa que já passou por aqui antes).
+  const mapped = await resolveViaMapping(env, wantProject, lifegameAreaId);
+  let projectId = mapped.project_id;
+  let frontId = mapped.front_id;
+  if (!projectId && wantProject) {
+    projectId = (await env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(wantProject).first())
+      ? wantProject : null;
+  }
+  if (!frontId && wantFront) {
+    frontId = (await env.DB.prepare('SELECT id FROM fronts WHERE id = ?').bind(wantFront).first())
+      ? wantFront : null;
+  }
 
   // Já importada (aprovada) → atualiza a task real.
   const existing = await env.DB.prepare('SELECT id FROM tasks WHERE lifegame_id = ?').bind(t.id).first();

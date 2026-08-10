@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Radar, Search, ExternalLink, X, Tag, FileText, Loader2, Trash2, ChevronDown,
+  Search, ExternalLink, X, Tag, FileText, Loader2, Trash2, ChevronDown, List, LayoutGrid, Building2, CalendarDays,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
@@ -68,6 +68,15 @@ function fmtDate(s) {
   return Number.isNaN(t) ? '—' : new Date(t).toISOString().slice(0, 10);
 }
 
+// v2.26.7 (Change 1) — versão curta DD/MM para a coluna "Data" da Lista
+// compacta (a data completa YYYY-MM-DD continua no card/detalhe).
+function fmtDateShort(s) {
+  const full = fmtDate(s);
+  if (full === '—') return full;
+  const [, mm, dd] = full.split('-');
+  return `${dd}/${mm}`;
+}
+
 // Itens por página. "Load more" busca a proxima pagina com o mesmo LIMIT,
 // ate hasMore virar false (offset + itens carregados >= total).
 const LIMIT = 50;
@@ -77,13 +86,12 @@ const LIMIT = 50;
 // overview) — os defaults abaixo só existem para uso isolado/testes.
 // refreshToken: incrementado pelo botão "Atualizar" global no HubContainer.
 export default function HubPage({
-  project = 'todos', onProjectChange = () => {}, refreshToken = 0,
+  project = 'todos', onProjectChange = () => {}, refreshToken = 0, onCountChange = () => {},
 }) {
   const user = useStore((s) => s.user);
   const isOwner = user?.role === 'owner';
 
   const [items, setItems] = useState([]);
-  const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -97,6 +105,10 @@ export default function HubPage({
   // Filtros
   const [minRel, setMinRel] = useState('');
   const [search, setSearch] = useState('');
+  // v2.26.6 (Bloco 5E) — toggle Lista/Cards. A tabela existente já era a
+  // "Lista" pedida pelo spec (Título/Fonte/Projeto/Relev./Coleta/Ações); só
+  // faltava a alternativa em Cards, adicionada agora.
+  const [view, setView] = useState('list'); // list | cards
 
   const [selected, setSelected] = useState(null);
   const [toast, setToast] = useState('');
@@ -128,24 +140,24 @@ export default function HubPage({
       const params = itemsParams();
       params.set('offset', '0');
 
-      // Stats do card por projeto: com um projeto selecionado, pede só o dele;
-      // em "todos" restringe ao servidor a h2/energia/ia (?only=noticias) —
-      // nunca inclui phd_vagas/emprego_vagas aqui.
-      const statsParams = new URLSearchParams();
-      if (project && project !== 'todos') statsParams.set('project_id', project);
-      else statsParams.set('only', 'noticias');
-
-      const [itemsRes, statsRes] = await Promise.all([
-        apiFetch(`/api/hub/items?${params.toString()}`),
-        apiFetch(`/api/hub/stats?${statsParams.toString()}`).catch(() => null),
-      ]);
+      // v2.26.6 (Bloco 5A/5B) — o fetch de /api/hub/stats (que alimentava o
+      // dashboard "Visão geral" removido e os StatsCards por projeto,
+      // também removidos) foi retirado daqui: nada mais consome esse dado
+      // nesta página.
+      const itemsRes = await apiFetch(`/api/hub/items?${params.toString()}`);
       const page = itemsRes.items || [];
       const totalCount = itemsRes.total || 0;
       setItems(page);
       setOffset(page.length);
       setTotal(totalCount);
       setHasMore(page.length < totalCount);
-      setStats(statsRes);
+      // v2.26.7 (contador da aba) — só reporta pro HubContainer quando os
+      // filtros estão no padrão (projeto "todos", sem relevância mínima):
+      // nesse estado totalCount É o total real de h2+energia+ia. Filtrado,
+      // deixamos de reportar para não fazer o número da aba oscilar com o
+      // que o utilizador está vendo no momento — o badge mantém o último
+      // total "de verdade" conhecido.
+      if ((!project || project === 'todos') && !minRel) onCountChange(totalCount);
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -214,110 +226,146 @@ export default function HubPage({
   };
 
   return (
-    <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
-      {/* Cabeçalho */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="flex items-center gap-2 text-2xl font-bold text-ink">
-          <Radar className="h-6 w-6 text-accent" />
-          Scraping Hub
-        </h1>
-      </div>
-
-      {/* Cards de estatísticas por projeto (h2/energia/ia, ou só o selecionado) */}
-      <StatsCards stats={stats} />
-
-      {/* Barra de filtros */}
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-3">
-        <label className="flex items-center gap-1.5 text-xs text-ink2">
-          Projeto
-          <select
-            value={project}
-            onChange={(e) => onProjectChange(e.target.value)}
-            className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
-          >
-            {PROJECTS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-ink2">
-          Relevância mín.
-          <select
-            value={minRel}
-            onChange={(e) => setMinRel(e.target.value)}
-            className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
-          >
-            <option value="">Todas</option>
-            {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}+</option>)}
-          </select>
-        </label>
-        <div className="relative flex-1 min-w-[180px]">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+    <div className="mx-auto flex h-full max-w-7xl flex-col gap-3">
+      {/* v2.26.6 (Bloco 5B/5C/5G) — título "Scraping Hub" e os cards de
+          estatísticas por projeto (StatsCards) removidos por completo (mesma
+          limpeza das outras sub-abas). A relevância/projeto/data por item já
+          aparecem na própria linha da tabela — os cards agregados eram
+          redundantes. */}
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-2.5">
+        <select
+          value={project}
+          onChange={(e) => onProjectChange(e.target.value)}
+          title="Projeto"
+          className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
+        >
+          {PROJECTS.map((p) => <option key={p.key} value={p.key}>Projeto: {p.label}</option>)}
+        </select>
+        <select
+          value={minRel}
+          onChange={(e) => setMinRel(e.target.value)}
+          title="Relevância mínima"
+          className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
+        >
+          <option value="">Relevância: todas</option>
+          {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}+</option>)}
+        </select>
+        <div className="relative min-w-[160px] flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Buscar por título ou resumo..."
-            className="h-9 w-full rounded-lg border border-line bg-surface2 pl-9 pr-3 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none"
+            className="h-8 w-full rounded-lg border border-line bg-surface2 pl-8 pr-3 text-xs text-ink placeholder:text-muted focus:border-accent focus:outline-none"
           />
+        </div>
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-surface p-0.5">
+          <button
+            type="button"
+            onClick={() => setView('list')}
+            title="Ver em lista"
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition ${
+              view === 'list' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+            }`}
+          >
+            <List className="h-3.5 w-3.5" /> Lista
+          </button>
+          <button
+            type="button"
+            onClick={() => setView('cards')}
+            title="Ver em cards"
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition ${
+              view === 'cards' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+            }`}
+          >
+            <LayoutGrid className="h-3.5 w-3.5" /> Cards
+          </button>
         </div>
       </div>
 
       {/* Exibindo X de Y itens (paginação) */}
       {!loading && !error && total > 0 && (
-        <p className="text-xs text-muted">
+        <p className="-mt-1 text-xs text-muted">
           Exibindo {items.length} de {total} itens
         </p>
       )}
 
-      {/* Tabela */}
-      <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-line bg-surface">
+      {/* Lista (tabela) / Cards */}
+      <div className={`min-h-0 flex-1 overflow-auto ${view === 'list' ? 'rounded-xl border border-line bg-surface' : ''}`}>
         {loading ? (
           <div className="py-16"><LoadingSpinner label="Carregando itens do Hub..." /></div>
         ) : error ? (
           <div className="px-4 py-8 text-center text-sm text-danger">{error}</div>
         ) : filtered.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-muted">Nenhum item encontrado.</div>
+        ) : view === 'cards' ? (
+          <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3">
+            {filtered.map((it) => (
+              <NoticiaCard
+                key={it.id}
+                item={it}
+                onOpen={() => setSelected(it)}
+                onDelete={isOwner ? () => setConfirmItem(it) : null}
+                deleting={deleting === it.id}
+              />
+            ))}
+          </div>
         ) : (
-          <table className="w-full border-collapse text-sm">
+          // v2.26.7 (Change 1 — linhas compactas): py-2 → py-1, título
+          // font-normal text-xs (era font-medium/herdava text-sm da
+          // tabela), demais colunas em text-[11px], relevância como número
+          // simples (sem badge/círculo), data em DD/MM. Ações só o ícone de
+          // remover (isOwner), sem outros botões.
+          <table className="w-full border-collapse text-[11px]">
             <thead>
-              <tr className="border-b border-line text-left text-xs text-muted">
-                <th className="px-3 py-2 font-medium">Relev.</th>
-                <th className="px-3 py-2 font-medium">Título</th>
-                <th className="px-3 py-2 font-medium">Fonte</th>
-                <th className="px-3 py-2 font-medium">Projeto</th>
-                <th className="px-3 py-2 font-medium">Coleta</th>
-                {isOwner && <th className="px-3 py-2 font-medium" />}
+              <tr className="border-b border-line text-left text-[10px] uppercase tracking-wide text-muted">
+                <th className="px-2.5 py-1 font-medium">Título</th>
+                <th className="px-2.5 py-1 font-medium">Fonte</th>
+                <th className="px-2.5 py-1 font-medium">Área</th>
+                <th className="px-2.5 py-1 font-medium">Relev.</th>
+                <th className="px-2.5 py-1 font-medium">Data</th>
+                {isOwner && <th className="px-2.5 py-1 font-medium" />}
               </tr>
             </thead>
             <tbody>
-              {filtered.map((it) => (
-                <tr key={it.id} className="border-b border-line/60 transition hover:bg-surface2">
-                  <td className="px-3 py-2"><RelevanciaBadge item={it} /></td>
-                  <td className="px-3 py-2">
+              {filtered.map((it, i) => (
+                <tr key={it.id} className={`border-b border-line/60 transition hover:bg-surface2 ${i % 2 === 1 ? 'bg-surface2/20' : ''}`}>
+                  <td className="max-w-[320px] truncate px-2.5 py-1.5">
                     <button
                       type="button"
                       onClick={() => setSelected(it)}
-                      className="text-left font-medium text-ink transition hover:text-accent"
+                      className="text-left font-normal text-xs text-ink transition hover:text-accent"
+                      title={it.title}
                     >
                       {it.title}
                     </button>
                   </td>
-                  <td className="px-3 py-2 text-ink2">{it.source_name || '—'}</td>
-                  <td className="px-3 py-2">
-                    <Badge className="bg-accent/10 text-accent">{projectLabel(it.project_id)}</Badge>
+                  <td className="px-2.5 py-1.5 text-ink2">{it.source_name || '—'}</td>
+                  <td className="px-2.5 py-1.5">
+                    {/* Badge compacto local (não o componente Badge partilhado, para
+                        não reduzir o tamanho dele em todo o resto do app — ver
+                        Change 1 do pedido: só as linhas da Lista precisam encolher). */}
+                    <span className="inline-flex items-center rounded-full bg-accent/10 px-1.5 py-0 text-[10px] font-medium text-accent">
+                      {projectLabel(it.project_id)}
+                    </span>
                   </td>
-                  <td className="px-3 py-2 text-muted">{fmtDate(it.collected_at || it.received_at)}</td>
+                  <td className="px-2.5 py-1.5 font-medium text-ink2">
+                    {it.relevancia != null ? Number(it.relevancia).toFixed(1) : '—'}
+                  </td>
+                  <td className="px-2.5 py-1.5 text-muted">{fmtDateShort(it.collected_at || it.received_at)}</td>
                   {isOwner && (
-                    <td className="px-3 py-2 text-right">
+                    <td className="px-2.5 py-1.5 text-right">
                       <button
                         type="button"
                         onClick={() => setConfirmItem(it)}
                         disabled={deleting === it.id}
-                        className="rounded-md p-1.5 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+                        className="rounded-md p-1 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
                         title="Remover item"
                       >
                         {deleting === it.id
-                          ? <Loader2 className="h-4 w-4 animate-spin" />
-                          : <Trash2 className="h-4 w-4" />}
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : <Trash2 className="h-3.5 w-3.5" />}
                       </button>
                     </td>
                   )}
@@ -372,29 +420,40 @@ export default function HubPage({
   );
 }
 
-function StatsCards({ stats }) {
-  const byProject = (stats && stats.by_project) || [];
-  if (byProject.length === 0) {
-    return (
-      <div className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-muted">
-        Sem itens recebidos ainda.
-      </div>
-    );
-  }
+// v2.26.6 (Bloco 5E/5F) — card compacto para a alternativa "Cards" da
+// Notícias (a "Lista" já existia como tabela). Mesmo padrão de compactação
+// do Bloco 5F: p-3, título text-sm, meta text-xs.
+function NoticiaCard({ item, onOpen, onDelete, deleting }) {
+  const resumo = (item.resumo || '').slice(0, 130);
+  const truncated = (item.resumo || '').length > 130;
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-      {byProject.map((p) => (
-        <div key={p.project_id} className="rounded-xl border border-line bg-surface p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-ink">{projectLabel(p.project_id)}</span>
-            <span className="text-2xl font-bold text-accent">{p.count}</span>
-          </div>
-          <div className="mt-1 space-y-0.5 text-xs text-muted">
-            <div>Relev. média: <span className="text-ink2">{p.avg_relevancia != null ? p.avg_relevancia.toFixed(1) : '—'}</span></div>
-            <div>Último: <span className="text-ink2">{fmtDate(p.last_received)}</span></div>
-          </div>
-        </div>
-      ))}
+    <div
+      onClick={onOpen}
+      className="flex cursor-pointer flex-col gap-2 rounded-xl border border-line bg-surface p-3 transition hover:border-accent/50 hover:shadow-soft"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="text-sm font-medium leading-snug text-ink">{item.title}</h3>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            disabled={deleting}
+            className="shrink-0 rounded-md p-1 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+            title="Remover item"
+          >
+            {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+          </button>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+        {item.source_name && (
+          <span className="inline-flex items-center gap-1"><Building2 className="h-3.5 w-3.5" />{item.source_name}</span>
+        )}
+        <span className="inline-flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5" />{fmtDate(item.collected_at || item.received_at)}</span>
+        <Badge className="bg-accent/10 text-accent">{projectLabel(item.project_id)}</Badge>
+        <RelevanciaBadge item={item} />
+      </div>
+      {resumo && <p className="text-xs leading-relaxed text-ink2">{resumo}{truncated && '…'}</p>}
     </div>
   );
 }

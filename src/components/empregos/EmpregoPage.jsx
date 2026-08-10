@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Briefcase, Search, ExternalLink, X, Tag, FileText,
+  Search, ExternalLink, X, Tag, FileText,
   Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2, Pencil,
   ArrowRightLeft, Trash, Link2, ClipboardList, ChevronDown, List, LayoutGrid, ArrowUp, ArrowDown,
 } from 'lucide-react';
@@ -101,6 +101,15 @@ function fmtDate(s) {
   return Number.isNaN(t) ? '—' : new Date(t).toISOString().slice(0, 10);
 }
 
+// v2.26.7 (Change 1) — versão curta DD/MM para a coluna "Data" da Lista
+// compacta (ver mesma função em HubPage.jsx/VagasPhDPage.jsx).
+function fmtDateShort(s) {
+  const full = fmtDate(s);
+  if (full === '—') return full;
+  const [, mm, dd] = full.split('-');
+  return `${dd}/${mm}`;
+}
+
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
 function Badge({ children, className = '' }) {
@@ -144,7 +153,7 @@ const LIMIT = 50;
 // refreshToken: incrementado pelo botão "Atualizar" global no HubContainer.
 // highlightShortId: vindo de /hub?vaga={short_id} (via HubContainer) — depois
 // que a lista carrega, o card correspondente ganha scroll-into-view + realce.
-export default function EmpregoPage({ refreshToken = 0, highlightShortId = null }) {
+export default function EmpregoPage({ refreshToken = 0, highlightShortId = null, onCountChange = () => {} }) {
   const user = useStore((s) => s.user);
   const isOwner = user?.role === 'owner';
 
@@ -171,7 +180,9 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
 
   // v2.26.4 — alternância Cards/Lista (Bloco 4B). Ver VagasPhDPage.jsx para o
   // mesmo padrão (implementação irmã).
-  const [view, setView] = useState('cards'); // cards | list
+  // v2.26.6 (Bloco 5E) — default trocado de 'cards' para 'list' (ver mesmo
+  // comentário em VagasPhDPage.jsx).
+  const [view, setView] = useState('list'); // cards | list
   const [sortKey, setSortKey] = useState('date'); // title | institution | city | relevancia | area | date
   const [sortDir, setSortDir] = useState('desc'); // asc | desc
 
@@ -213,7 +224,11 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
       setHasMore(page.length < totalCount);
       const projStats = statsRes && Array.isArray(statsRes.by_project)
         ? statsRes.by_project[0] : null;
-      setDbTotal(projStats ? projStats.count : 0);
+      const dbTotalCount = projStats ? projStats.count : 0;
+      setDbTotal(dbTotalCount);
+      // v2.26.7 (contador da aba) — mesmo raciocínio de VagasPhDPage.jsx:
+      // dbTotal já é o total real de emprego_vagas no banco.
+      onCountChange(dbTotalCount);
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -483,98 +498,77 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
   };
 
   return (
-    <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
-      {/* Cabeçalho */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="flex items-center gap-2 text-2xl font-bold text-ink">
-          <Briefcase className="h-6 w-6 text-accent" />
-          Empregos
-        </h1>
-        <div className="flex items-center gap-1 rounded-lg border border-line bg-surface p-0.5">
-          <button
-            type="button"
-            onClick={() => setView('cards')}
-            title="Ver em cards"
-            className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
-              view === 'cards' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
-            }`}
-          >
-            <LayoutGrid className="h-3.5 w-3.5" /> Cards
-          </button>
-          <button
-            type="button"
-            onClick={() => setView('list')}
-            title="Ver em lista"
-            className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
-              view === 'list' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
-            }`}
-          >
-            <List className="h-3.5 w-3.5" /> Lista
-          </button>
-        </div>
-      </div>
-
-      {/* Cards de estatísticas */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatCard label="Total no banco" value={dbTotal != null ? dbTotal : '—'} />
-        <StatCard label="Carregados" value={stats.carregados} />
-        <StatCard label="Novas hoje" value={stats.novasHoje} accent />
-        <StatCard label="Empresas únicas" value={stats.empresas} />
-      </div>
-
-      {/* Barra de filtros */}
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-3">
-        <div className="relative min-w-[180px] flex-1">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+    <div className="mx-auto flex h-full max-w-7xl flex-col gap-3">
+      {/* v2.26.6 (Bloco 5B/5C/5G) — mesma limpeza de VagasPhDPage.jsx: sem
+          título/stat cards, filtros + toggle numa barra só. */}
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-2.5">
+        <div className="relative min-w-[160px] flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Buscar por título ou resumo..."
-            className="h-9 w-full rounded-lg border border-line bg-surface2 pl-9 pr-3 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none"
+            className="h-8 w-full rounded-lg border border-line bg-surface2 pl-8 pr-3 text-xs text-ink placeholder:text-muted focus:border-accent focus:outline-none"
           />
         </div>
-        <label className="flex items-center gap-1.5 text-xs text-ink2">
-          Área
-          <select
-            value={area}
-            onChange={(e) => setArea(e.target.value)}
-            className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
+        <select
+          value={area}
+          onChange={(e) => setArea(e.target.value)}
+          title="Área"
+          className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
+        >
+          <option value="todos">Área: todas</option>
+          {AREAS.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
+          <option value="outros">Outros</option>
+        </select>
+        <select
+          value={city}
+          onChange={(e) => setCity(e.target.value)}
+          title="Cidade"
+          className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
+        >
+          <option value="todos">Cidade: todas</option>
+          {CITIES.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}
+          <option value="outras">Outras</option>
+        </select>
+        <select
+          value={order}
+          onChange={(e) => setOrder(e.target.value)}
+          title="Ordenar"
+          className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
+        >
+          <option value="recent">↕ Mais recente</option>
+          <option value="relevant">↕ Mais relevante</option>
+        </select>
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-surface p-0.5">
+          <button
+            type="button"
+            onClick={() => setView('list')}
+            title="Ver em lista"
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition ${
+              view === 'list' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+            }`}
           >
-            <option value="todos">Todas</option>
-            {AREAS.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
-            <option value="outros">Outros</option>
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-ink2">
-          Cidade
-          <select
-            value={city}
-            onChange={(e) => setCity(e.target.value)}
-            className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
+            <List className="h-3.5 w-3.5" /> Lista
+          </button>
+          <button
+            type="button"
+            onClick={() => setView('cards')}
+            title="Ver em cards"
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition ${
+              view === 'cards' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+            }`}
           >
-            <option value="todos">Todas</option>
-            {CITIES.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}
-            <option value="outras">Outras</option>
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-ink2">
-          Ordenar
-          <select
-            value={order}
-            onChange={(e) => setOrder(e.target.value)}
-            className="rounded-lg border border-line bg-surface2 px-2 py-1.5 text-xs text-ink"
-          >
-            <option value="recent">Mais recente</option>
-            <option value="relevant">Mais relevante</option>
-          </select>
-        </label>
+            <LayoutGrid className="h-3.5 w-3.5" /> Cards
+          </button>
+        </div>
       </div>
 
-      {/* Exibindo X de Y itens (paginação) */}
+      {/* Exibindo X de Y · Z empresas (substitui os 4 stat cards) */}
       {!loading && !error && total > 0 && (
-        <p className="text-xs text-muted">
-          Exibindo {items.length} de {total} vagas
+        <p className="-mt-1 text-xs text-muted">
+          Exibindo {items.length} de {total} vagas · {stats.empresas} {stats.empresas === 1 ? 'empresa' : 'empresas'}
         </p>
       )}
 
@@ -633,7 +627,7 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
             onLinkTask={(it) => setLinkingItem(it)}
           />
         ) : (
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3">
             {filtered.map((it) => (
               <EmpregoCard
                 key={it.id}
@@ -739,14 +733,6 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
   );
 }
 
-function StatCard({ label, value, accent = false }) {
-  return (
-    <div className="rounded-xl border border-line bg-surface p-4">
-      <div className="text-xs font-medium text-muted">{label}</div>
-      <div className={`mt-1 text-3xl font-bold ${accent ? 'text-accent' : 'text-ink'}`}>{value}</div>
-    </div>
-  );
-}
 
 // Botão "Adicionar à Carreira" com estados saving/done. Reutilizado no card e no modal.
 function AddButton({ state, onAdd, full = false }) {
@@ -784,7 +770,7 @@ function EmpregoCard({
     <div
       ref={cardRef}
       onClick={onOpen}
-      className={`flex cursor-pointer flex-col gap-3 rounded-xl border bg-surface p-4 transition hover:border-accent/50 hover:shadow-soft ${
+      className={`flex cursor-pointer flex-col gap-2 rounded-xl border bg-surface p-3 transition hover:border-accent/50 hover:shadow-soft ${
         highlighted ? 'border-accent ring-2 ring-accent' : selected ? 'border-accent' : 'border-line'
       }`}
     >
@@ -797,7 +783,7 @@ function EmpregoCard({
             onChange={onToggleSelect}
             className="mt-1 h-4 w-4 shrink-0 accent-accent"
           />
-          <h3 className="flex items-center gap-1.5 font-semibold leading-snug text-ink">
+          <h3 className="flex items-center gap-1.5 text-sm font-medium leading-snug text-ink">
             {title}
             {item.edited_at && <Pencil className="h-3 w-3 shrink-0 text-muted" title="Editado manualmente" />}
           </h3>
@@ -839,21 +825,22 @@ function EmpregoCard({
       </div>
 
       {resumo && (
-        <p className="text-sm leading-relaxed text-ink2">
+        <p className="text-xs leading-relaxed text-ink2">
           {resumo}{truncated && '…'}
         </p>
       )}
 
-      <div className="mt-auto flex items-center gap-2 pt-1">
+      <div className="mt-auto flex items-center gap-1.5 pt-1">
         {item.url && (
           <a
             href={item.url}
             target="_blank"
             rel="noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2"
+            title="Ver vaga original"
+            className="rounded-lg border border-line bg-surface p-1.5 text-ink2 transition hover:bg-surface2"
           >
-            <ExternalLink className="h-4 w-4" /> Ver vaga
+            <ExternalLink className="h-3.5 w-3.5" />
           </a>
         )}
         <div className="flex-1" />
@@ -861,28 +848,28 @@ function EmpregoCard({
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onCopyLink(); }}
-            className="rounded-lg border border-line bg-surface p-2 text-ink2 transition hover:bg-surface2"
+            className="rounded-lg border border-line bg-surface p-1.5 text-ink2 transition hover:bg-surface2"
             title="Copiar link"
           >
-            <Link2 className="h-4 w-4" />
+            <Link2 className="h-3.5 w-3.5" />
           </button>
         )}
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onLinkTask(); }}
-          className="rounded-lg border border-line bg-surface p-2 text-ink2 transition hover:bg-surface2"
+          className="rounded-lg border border-line bg-surface p-1.5 text-ink2 transition hover:bg-surface2"
           title="Vincular à Tarefa"
         >
-          <ClipboardList className="h-4 w-4" />
+          <ClipboardList className="h-3.5 w-3.5" />
         </button>
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onMove(); }}
           disabled={moving}
-          className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-medium text-ink2 transition hover:bg-surface2 disabled:opacity-50"
+          className="rounded-lg border border-line bg-surface p-1.5 text-ink2 transition hover:bg-surface2 disabled:opacity-50"
           title="Mover para PhD"
         >
-          {moving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRightLeft className="h-4 w-4" />} PhD
+          {moving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRightLeft className="h-3.5 w-3.5" />}
         </button>
         <AddButton state={state} onAdd={onAdd} />
       </div>
@@ -895,12 +882,15 @@ function EmpregoCard({
 // campo de status — ver comentário irmão em VagasPhDPage.jsx). Aqui a coluna
 // de localização usa Cidade (mais específica para vagas de emprego) em vez
 // de País.
+// v2.26.7 (Change 1 — linhas compactas): mesma redução aplicada em
+// VagasPhDPage.jsx (ver comentário lá — mesma ressalva sobre a coluna
+// Ações não ter um botão "remover" para reduzir a "só a lixeira").
 function SortHeader({ label, sortKey, active, dir, onSort, className = '' }) {
   return (
     <th
       scope="col"
       onClick={() => onSort(sortKey)}
-      className={`cursor-pointer select-none whitespace-nowrap px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted hover:text-ink ${className}`}
+      className={`cursor-pointer select-none whitespace-nowrap px-2.5 py-1 text-left text-[10px] font-semibold uppercase tracking-wide text-muted hover:text-ink ${className}`}
     >
       <span className="inline-flex items-center gap-1">
         {label}
@@ -920,7 +910,7 @@ function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, add
   }
   return (
     <div className="overflow-auto rounded-xl border border-line bg-surface">
-      <table className="w-full border-collapse text-sm">
+      <table className="w-full border-collapse text-[11px]">
         <thead className="border-b border-line bg-surface2/60">
           <tr>
             <SortHeader label="Título" sortKey="title" active={sortKey === 'title'} dir={sortDir} onSort={onSort} />
@@ -929,7 +919,7 @@ function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, add
             <SortHeader label="Relevância" sortKey="relevancia" active={sortKey === 'relevancia'} dir={sortDir} onSort={onSort} />
             <SortHeader label="Área" sortKey="area" active={sortKey === 'area'} dir={sortDir} onSort={onSort} />
             <SortHeader label="Data" sortKey="date" active={sortKey === 'date'} dir={sortDir} onSort={onSort} />
-            <th scope="col" className="whitespace-nowrap px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted">Ações</th>
+            <th scope="col" className="whitespace-nowrap px-2.5 py-1 text-right text-[10px] font-semibold uppercase tracking-wide text-muted">Ações</th>
           </tr>
         </thead>
         <tbody>
@@ -941,17 +931,21 @@ function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, add
                 onClick={() => onOpen(it)}
                 className={`cursor-pointer border-b border-line/60 last:border-0 hover:bg-surface2/50 ${i % 2 === 1 ? 'bg-surface2/20' : ''}`}
               >
-                <td className="max-w-[280px] truncate px-3 py-2 font-medium text-ink" title={effectiveTitle(it)}>
+                <td className="max-w-[280px] truncate px-2.5 py-1 font-normal text-xs text-ink" title={effectiveTitle(it)}>
                   {effectiveTitle(it)}
                 </td>
-                <td className="max-w-[160px] truncate px-3 py-2 text-ink2" title={it.source_name || ''}>
+                <td className="max-w-[160px] truncate px-2.5 py-1 text-ink2" title={it.source_name || ''}>
                   {it.source_name || '—'}
                 </td>
-                <td className="px-3 py-2"><CityBadge code={it._city} /></td>
-                <td className="px-3 py-2 text-ink2">{it.relevancia != null ? Number(it.relevancia).toFixed(1) : '—'}</td>
-                <td className="px-3 py-2"><Badge className="bg-accent/10 text-accent">{areaLabel(it)}</Badge></td>
-                <td className="whitespace-nowrap px-3 py-2 text-ink2">{fmtDate(it.collected_at || it.received_at)}</td>
-                <td className="px-3 py-2">
+                <td className="px-2.5 py-1"><CityBadge code={it._city} /></td>
+                <td className="px-2.5 py-1 font-medium text-ink2">{it.relevancia != null ? Number(it.relevancia).toFixed(1) : '—'}</td>
+                <td className="px-2.5 py-1">
+                  <span className="inline-flex items-center rounded-full bg-accent/10 px-1.5 py-0 text-[10px] font-medium text-accent">
+                    {areaLabel(it)}
+                  </span>
+                </td>
+                <td className="whitespace-nowrap px-2.5 py-1 text-muted">{fmtDateShort(it.collected_at || it.received_at)}</td>
+                <td className="px-2.5 py-1">
                   <div className="flex items-center justify-end gap-1">
                     {it.url && (
                       <a
@@ -960,22 +954,22 @@ function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, add
                         rel="noreferrer"
                         onClick={(e) => e.stopPropagation()}
                         title="Ver vaga original"
-                        className="rounded-md p-1.5 text-ink2 transition hover:bg-surface2 hover:text-accent"
+                        className="rounded-md p-1 text-ink2 transition hover:bg-surface2 hover:text-accent"
                       >
-                        <ExternalLink className="h-4 w-4" />
+                        <ExternalLink className="h-3.5 w-3.5" />
                       </a>
                     )}
                     <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); onLinkTask(it); }}
                       title="Vincular à Tarefa"
-                      className="rounded-md p-1.5 text-ink2 transition hover:bg-surface2 hover:text-accent"
+                      className="rounded-md p-1 text-ink2 transition hover:bg-surface2 hover:text-accent"
                     >
-                      <ClipboardList className="h-4 w-4" />
+                      <ClipboardList className="h-3.5 w-3.5" />
                     </button>
                     {state === 'done' ? (
-                      <span title="Adicionada à Carreira" className="rounded-md p-1.5 text-emerald-600">
-                        <CheckCircle2 className="h-4 w-4" />
+                      <span title="Adicionada à Carreira" className="rounded-md p-1 text-emerald-600">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
                       </span>
                     ) : (
                       <button
@@ -983,9 +977,9 @@ function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, add
                         onClick={(e) => { e.stopPropagation(); onAdd(it); }}
                         disabled={state === 'saving'}
                         title="Adicionar à Carreira"
-                        className="rounded-md p-1.5 text-ink2 transition hover:bg-accent/10 hover:text-accent disabled:opacity-50"
+                        className="rounded-md p-1 text-ink2 transition hover:bg-accent/10 hover:text-accent disabled:opacity-50"
                       >
-                        {state === 'saving' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                        {state === 'saving' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
                       </button>
                     )}
                   </div>

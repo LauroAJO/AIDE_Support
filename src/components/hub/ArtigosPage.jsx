@@ -85,7 +85,7 @@ function RelevanceDots({ value }) {
 }
 
 // refreshToken: incrementado pelo botão "Atualizar" global no HubContainer.
-export default function ArtigosPage({ refreshToken = 0 }) {
+export default function ArtigosPage({ refreshToken = 0, onCountChange = () => {} }) {
   const user = useStore((s) => s.user);
   const isOwner = user?.role === 'owner';
 
@@ -120,7 +120,13 @@ export default function ArtigosPage({ refreshToken = 0 }) {
       params.set('order_by', 'received_at');
       params.set('limit', '200');
       const res = await apiFetch(`/api/hub/items?${params.toString()}`);
-      setItems(res.items || []);
+      const page = res.items || [];
+      setItems(page);
+      // v2.26.7 (contador da aba) — res.total é o total real no banco (o
+      // limit=200 acima só limita o que é carregado, não a contagem);
+      // fallback pra items.length se a API não devolver total por algum
+      // motivo.
+      onCountChange(res.total != null ? res.total : page.length);
     } catch (e) {
       setError(String(e.message || e));
     } finally {

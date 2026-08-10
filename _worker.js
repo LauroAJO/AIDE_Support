@@ -5139,6 +5139,9 @@ async function handleBridgeStagingApprove(request, env, user) {
   const now = Math.floor(Date.now() / 1000);
   let approved = 0;
   const errors = [];
+  // BRIDGE_STATUS_FIX — config lida uma vez fora do loop: handleBridgeStagingApprove
+  // pode aprovar dezenas de ids de uma vez, e getBridgeConfig faz uma leitura D1.
+  const bridgeConfig = await getBridgeConfig(env).catch(() => null);
   for (const id of ids) {
     try {
       const s = await env.DB.prepare('SELECT * FROM bridge_task_staging WHERE id = ?').bind(id).first();
@@ -5158,6 +5161,14 @@ async function handleBridgeStagingApprove(request, env, user) {
         const hasRec = await ensureTaskRecurrenceColumns(env);
         const rec = hasRec ? parseStagedRecurrence(s.raw_payload) : null;
 
+        // BRIDGE_STATUS_FIX (FIX 1) — antes, aprovar copiava s.status cru para a
+        // tarefa nova. Como a maioria das tarefas do LifeGame nasce e vive em
+        // 'backlog', a tarefa aprovada continuava em 'backlog' na AIDE — parecia
+        // que aprovar não tinha feito nada. 'backlog' promove para 'todo' (pronta
+        // para ser trabalhada); 'doing'/'done' (já em progresso ou concluídas)
+        // chegam corretos e não são tocados. Ver _AUDITORIAS/BRIDGE_STATUS_INVESTIGACAO.txt.
+        const insertStatus = s.status === 'backlog' ? 'todo' : s.status;
+
         const cols = [
           'id', 'title', 'description', 'urgency', 'importance', 'energy', 'status', 'tags',
           'comments', 'subtasks', 'time_entries', 'favorited', 'drive_attachments',
@@ -5171,7 +5182,7 @@ async function handleBridgeStagingApprove(request, env, user) {
         const args = [
           taskId, s.title, s.description || '', s.urgency, s.importance,
           hasCols && s.energy != null ? s.energy : 5,
-          s.status, s.tags || '[]',
+          insertStatus, s.tags || '[]',
           hasCols ? (s.project_id || null) : null,
           hasCols ? (s.front_id || null) : null,
           hasCols ? (s.due_date || null) : null,
@@ -5193,6 +5204,29 @@ async function handleBridgeStagingApprove(request, env, user) {
         'UPDATE bridge_task_staging SET reviewed=1, approved=1, imported_at=?, imported_task_id=? WHERE id=?'
       ).bind(now, taskId, id).run();
       approved += 1;
+
+      // BRIDGE_STATUS_FIX (FIX 2) — avisa o LifeGame de que esta tarefa foi
+      // aprovada na AIDE, para a UI de lá poder mostrar um badge "Ativa no
+      // AIDE". Best-effort: uma falha aqui NÃO desfaz a aprovação (já gravada
+      // acima) nem some para o chamador — só fica registada em bridge_sync_log.
+      if (bridgeConfig && bridgeConfig.lifegame_url && bridgeConfig.bridge_secret && s.lifegame_id) {
+        try {
+          const r = await lifegameFetch(bridgeConfig, '/api/bridge/tasks/approved', {
+            method: 'POST',
+            body: JSON.stringify({ lifegameTaskId: s.lifegame_id, aideTaskId: taskId }),
+          });
+          await logBridge(env, {
+            direction: 'outbound', entity_type: 'task_approved', entity_id: s.lifegame_id,
+            status: r.ok ? 'success' : 'error',
+            error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 200)}` : ''}`,
+          });
+        } catch (notifyErr) {
+          await logBridge(env, {
+            direction: 'outbound', entity_type: 'task_approved', entity_id: s.lifegame_id,
+            status: 'error', error: String((notifyErr && notifyErr.message) || notifyErr).slice(0, 200),
+          }).catch(() => {});
+        }
+      }
     } catch (e) {
       errors.push({ id, error: String((e && e.message) || e).slice(0, 200) });
     }
@@ -6099,7 +6133,12 @@ async function upsertLifegameTask(env, t) {
   const description = t.description || '';
   const urgency = Math.max(0, Math.min(10, Number(t.urgency) || 5));
   const importance = Math.max(0, Math.min(10, Number(t.importance) || 5));
-  const status = ['backlog', 'todo', 'doing', 'done', 'blocked'].includes(t.status) ? t.status : 'backlog';
+  // BRIDGE_STATUS_FIX (FIX 3) — 'blocked' saiu do whitelist: não existe em
+  // TASK_STATUSES (linha ~1357), não tem STATUS_LABELS/STATUS_COLORS em
+  // src/lib/tasks.js, e o KanbanBoard.jsx só itera estas 4 colunas — uma
+  // tarefa com status='blocked' ficava invisível no board. Alinhado com o
+  // whitelist canónico. Ver _AUDITORIAS/BRIDGE_STATUS_INVESTIGACAO.txt.
+  const status = TASK_STATUSES.includes(t.status) ? t.status : 'backlog';
   const energy = Math.max(0, Math.min(10, Number(t.energy) || 5));
 
   // v2.26 — projecto / frente / prazo. O Lifegame manda snake_case (é o que a

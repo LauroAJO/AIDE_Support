@@ -1,7 +1,7 @@
 {
   "name": "aide-support",
   "private": true,
-  "version": "2.26.5",
+  "version": "II.1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

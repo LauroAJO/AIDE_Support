@@ -1,0 +1,46 @@
+#!/bin/sh
+# ============================================================================
+# AIDE — pre-commit: impõe bump de versão (package.json) em commits de código
+# ============================================================================
+# Mesma regra do sistema de Arcos aplicada no LifeGame (instruções permanentes
+# do projeto): se este commit altera arquivo(s) de código-fonte (.js/.jsx/.mjs/
+# .cjs, excluindo package-lock.json e diretórios gerados), package.json TEM
+# que estar no mesmo commit — senão o commit é bloqueado.
+#
+# NOTA: o package.json do AIDE hoje usa seu próprio esquema (ex: "0.1.0", com
+# commits de feature historicamente marcados só na mensagem, tipo "v2.25.19"),
+# não o sistema de Arcos do LifeGame — mas a checagem aqui é genérica: só exige
+# que package.json tenha sido tocado junto com código, qualquer que seja o
+# esquema de versão usado dentro dele.
+#
+# Bypass legítimo (commit só de doc/config, sem código): git commit --no-verify
+#
+# Instalado à mão em .git/hooks/pre-commit — NÃO é versionado pelo git, só
+# protege esta máquina. Ver _AUDITORIAS/GIT_HOOK_VERSIONAMENTO_IMPLEMENTADO.txt
+# para a limitação completa e a sugestão de husky.
+# ============================================================================
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# Arquivos de código-fonte: .js/.jsx/.mjs/.cjs em qualquer lugar do repo,
+# excluindo lockfile e diretórios gerados/dependências.
+CODE_CHANGED=$(printf '%s\n' "$STAGED" | grep -E '\.(js|jsx|mjs|cjs)$' | grep -Ev '(^|/)(package-lock\.json|dist/|node_modules/|\.wrangler/)')
+
+# package.json alterado neste commit?
+VERSION_CHANGED=$(printf '%s\n' "$STAGED" | grep -x 'package.json')
+
+if [ -n "$CODE_CHANGED" ] && [ -z "$VERSION_CHANGED" ]; then
+  echo ""
+  echo "❌ Commit bloqueado: alterações de código detectadas sem atualização de versão em package.json."
+  echo ""
+  echo "   Siga o sistema de versionamento documentado nas instruções do projeto."
+  echo "   Arquivos de código staged sem bump de versão:"
+  printf '%s\n' "$CODE_CHANGED" | sed 's/^/     - /'
+  echo ""
+  echo "   Se este commit é intencionalmente sem versionamento (ex: só documentação/config),"
+  echo "   use: git commit --no-verify"
+  echo ""
+  exit 1
+fi
+
+exit 0

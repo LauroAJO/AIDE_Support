@@ -351,6 +351,13 @@ async function handleAPI(request, env, ctx) {
 
   // Carreira (Etapa 2) — oportunidades, documentos, metas.
   if (path === '/api/career/opportunities') return handleCareerOpportunities(request, env, user);
+  // v2.26.3 — Bloco 3, Parte B: histórico de mudanças de uma oportunidade
+  // (opportunity_audit_log, migration 0056). Rota específica ANTES da genérica
+  // de item — /api/career/opportunities/:id/audit também bateria em
+  // path.startsWith('/api/career/opportunities/') e cairia no handler errado.
+  if (path.match(/^\/api\/career\/opportunities\/[^/]+\/audit$/)) {
+    return handleOpportunityAuditList(env, path.split('/')[4]);
+  }
   if (path.startsWith('/api/career/opportunities/')) return handleCareerOpportunityItem(request, env, user, path.split('/')[4]);
   if (path === '/api/career/documents') return handleCareerDocuments(request, env, user);
   if (path.startsWith('/api/career/documents/')) return handleCareerDocumentItem(request, env, user, path.split('/')[4]);
@@ -1677,11 +1684,17 @@ async function handleTasksCollection(request, env, user, ctx) {
       ).bind(...binds).all();
       return json((results || []).map(shapeTask));
     }
-    const onlyFav = new URL(request.url).searchParams.get('favorited') === 'true';
+    const taskListParams = new URL(request.url).searchParams;
+    const onlyFav = taskListParams.get('favorited') === 'true';
+    // v2.26.3 — Bloco 3: usado pelo modal de Carreira para achar a tarefa
+    // vinculada a uma oportunidade (mostrar/editar responsável) sem precisar
+    // buscar a lista inteira de tarefas no cliente.
+    const opportunityIdParam = taskListParams.get('opportunity_id');
     const conds = [];
     const binds = [];
     if (extras) conds.push(NOT_SUBTASK);
     if (onlyFav) conds.push('t.favorited = 1');
+    if (opportunityIdParam) { conds.push('t.opportunity_id = ?'); binds.push(opportunityIdParam); }
     if (assignedOnly) {
       conds.push(mineCond);
       binds.push(...mineBinds);
@@ -1925,6 +1938,22 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
         await env.DB.prepare('UPDATE tasks SET opportunity_id = ? WHERE id = ?')
           .bind(body.opportunity_id || null, taskId).run();
       } catch { /* migration 0026 not applied */ }
+    }
+
+    // v2.26.3 — Bloco 3, Parte A: sincronização tarefa → oportunidade. Usa o
+    // opportunity_id efetivo desta request (o que acabou de ser setado acima,
+    // OU o que a tarefa já tinha) — uma tarefa recém-vinculada já sincroniza
+    // no mesmo PUT que a vinculou, sem precisar de uma segunda chamada.
+    const effectiveOpportunityId = body.opportunity_id !== undefined
+      ? (body.opportunity_id || null) : existing.opportunity_id;
+    if (effectiveOpportunityId) {
+      const taskForSync = { opportunity_id: effectiveOpportunityId };
+      if (merged.status !== existing.status) {
+        await syncOpportunityFromTaskStatus(env, user, taskForSync, merged.status);
+      }
+      if ((merged.assigned_to || null) !== (existing.assigned_to || null)) {
+        await syncOpportunityAssigneeFromTask(env, user, taskForSync, merged.assigned_to);
+      }
     }
     // Taxa da tarefa (rate_type/rate_value) — migration 0014_payment_v2.
     // Updated separately para tolerar bancos onde a migração não foi aplicada.
@@ -10192,6 +10221,124 @@ async function createHubCareerTask(env, user, opportunity) {
   }
 }
 
+// v2.26.3 — Bloco 3: sincronização bidirecional vaga↔tarefa + auditoria.
+//
+// Status reais do Kanban de Carreira (careerShared.jsx): to_organize <
+// preparing < applied < in_process < (dead | mapped). dead/mapped são
+// terminais (fora do Kanban ativo — Bloco 2). O spec original deste bloco
+// assumia outro conjunto de status ('identified'/'researching'/'submitted'/
+// 'interview'/'offer'/'rejected') que não existe neste código — a tabela
+// abaixo foi adaptada para os status reais; ver relatório do Bloco 3.
+const OPP_STATUS_RANK = { to_organize: 0, preparing: 1, applied: 2, in_process: 3, dead: 4, mapped: 4 };
+
+// Oportunidade → tarefa: to_organize não mexe na tarefa vinculada (ainda não
+// há o que fazer); preparing/applied/in_process mantêm a tarefa 'doing'
+// (trabalho ativo); dead/mapped fecham a tarefa ('done'). Retorna null quando
+// o status da vaga não implica mudança na tarefa.
+function taskStatusForOpportunityStatus(oppStatus) {
+  if (oppStatus === 'preparing' || oppStatus === 'applied' || oppStatus === 'in_process') return 'doing';
+  if (oppStatus === 'dead' || oppStatus === 'mapped') return 'done';
+  return null;
+}
+
+// Atualiza a(s) tarefa(s) vinculada(s) (tasks.opportunity_id = opportunityId)
+// para acompanhar a mudança de status da oportunidade. Best-effort: uma falha
+// aqui não desfaz a mudança de status da oportunidade, que já foi gravada.
+async function syncTaskFromOpportunityStatus(env, opportunityId, newOppStatus) {
+  const targetStatus = taskStatusForOpportunityStatus(newOppStatus);
+  if (!targetStatus || !opportunityId) return;
+  try {
+    await env.DB.prepare(
+      'UPDATE tasks SET status = ?, updated_at = ? WHERE opportunity_id = ? AND status != ?'
+    ).bind(targetStatus, Math.floor(Date.now() / 1000), opportunityId, targetStatus).run();
+  } catch { /* best-effort */ }
+}
+
+// Tarefa → oportunidade: só avança, nunca regride automaticamente (mesma
+// regra pedida no spec original). 'done' empurra para 'applied' (candidatura
+// enviada); 'todo'/'doing' empurram só de 'to_organize' para 'preparing'
+// (começou a trabalhar nisso). 'backlog' não mexe na oportunidade.
+async function syncOpportunityFromTaskStatus(env, user, task, newTaskStatus) {
+  if (!task.opportunity_id) return;
+  const opp = await env.DB.prepare('SELECT id, status FROM career_opportunities WHERE id = ?')
+    .bind(task.opportunity_id).first();
+  if (!opp) return;
+  const rank = OPP_STATUS_RANK[opp.status] ?? 0;
+  let target = null;
+  if (newTaskStatus === 'done' && rank < OPP_STATUS_RANK.applied) target = 'applied';
+  else if ((newTaskStatus === 'todo' || newTaskStatus === 'doing') && rank < OPP_STATUS_RANK.preparing) target = 'preparing';
+  if (!target || target === opp.status) return;
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare('UPDATE career_opportunities SET status = ?, updated_at = ? WHERE id = ?')
+      .bind(target, now, opp.id).run();
+    await logOpportunityAudit(env, {
+      opportunity_id: opp.id, user_id: user && user.id, action: 'status_change',
+      field_name: 'status', old_value: opp.status, new_value: target,
+    });
+  } catch { /* best-effort */ }
+}
+
+// Responsável: tarefa → oportunidade e oportunidade → tarefa (chamada dos
+// dois lados — ver PUT /api/tasks/:id e PUT/PATCH /api/career/opportunities/:id).
+async function syncOpportunityAssigneeFromTask(env, user, task, newAssignedTo) {
+  if (!task.opportunity_id) return;
+  const opp = await env.DB.prepare('SELECT id, assigned_to FROM career_opportunities WHERE id = ?')
+    .bind(task.opportunity_id).first();
+  if (!opp || (opp.assigned_to || null) === (newAssignedTo || null)) return;
+  try {
+    await env.DB.prepare('UPDATE career_opportunities SET assigned_to = ?, updated_at = ? WHERE id = ?')
+      .bind(newAssignedTo || null, Math.floor(Date.now() / 1000), opp.id).run();
+    await logOpportunityAudit(env, {
+      opportunity_id: opp.id, user_id: user && user.id, action: 'assignee_change',
+      field_name: 'assigned_to', old_value: opp.assigned_to || '', new_value: newAssignedTo || '',
+    });
+  } catch { /* best-effort */ }
+}
+
+async function syncTaskAssigneeFromOpportunity(env, opportunityId, newAssignedTo) {
+  if (!opportunityId) return;
+  try {
+    await env.DB.prepare(
+      'UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE opportunity_id = ? AND (assigned_to IS NULL OR assigned_to != ?)'
+    ).bind(newAssignedTo || null, Math.floor(Date.now() / 1000), opportunityId, newAssignedTo || '').run();
+  } catch { /* best-effort */ }
+}
+
+// v2.26.3 — Bloco 3, Parte B. INSERT tolerante: se migration 0056 ainda não
+// rodou, a tabela não existe e isto falha em silêncio — mesma filosofia
+// defensiva do resto do arquivo (ex.: resolveViaMapping para migration 0055).
+async function logOpportunityAudit(env, { opportunity_id, user_id, action, field_name, old_value, new_value }) {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO opportunity_audit_log
+        (id, opportunity_id, user_id, action, field_name, old_value, new_value, created_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(
+      crypto.randomUUID(), opportunity_id, user_id || null, action || 'field_update',
+      field_name || '', String(old_value ?? ''), String(new_value ?? ''),
+      Math.floor(Date.now() / 1000)
+    ).run();
+  } catch { /* migration 0056 pode não ter rodado ainda */ }
+}
+
+async function handleOpportunityAuditList(env, opportunityId) {
+  if (!opportunityId) return json({ error: 'ID ausente' }, 400);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT a.*, u.name AS user_name FROM opportunity_audit_log a
+         LEFT JOIN users u ON u.id = a.user_id
+        WHERE a.opportunity_id = ?
+        ORDER BY a.created_at DESC`
+    ).bind(opportunityId).all();
+    return json({ ok: true, entries: results || [] });
+  } catch (e) {
+    // Tabela pode não existir ainda (migration 0056 por aplicar) — mesmo
+    // padrão de falha graciosa usado em handleBridgeMappingList.
+    return json({ ok: false, entries: [], error: String((e && e.message) || e) });
+  }
+}
+
 async function handleCareerOpportunityItem(request, env, user, id) {
   if (!id) return json({ error: 'ID ausente' }, 400);
   if (request.method === 'GET') {
@@ -10244,6 +10391,23 @@ async function handleCareerOpportunityItem(request, env, user, id) {
     } catch (e) {
       return json({ error: 'Falha ao atualizar oportunidade', detail: String(e) }, 500);
     }
+    // v2.26.3 — Bloco 3: sincroniza a tarefa vinculada e regista auditoria
+    // quando status ou responsável mudam pelo editor completo (PUT).
+    const newAssignedTo = pick('assigned_to', existing.assigned_to);
+    if (body.status !== undefined && newStatus !== existing.status) {
+      await syncTaskFromOpportunityStatus(env, id, newStatus);
+      await logOpportunityAudit(env, {
+        opportunity_id: id, user_id: user.id, action: 'status_change',
+        field_name: 'status', old_value: existing.status, new_value: newStatus,
+      });
+    }
+    if (body.assigned_to !== undefined && (newAssignedTo || null) !== (existing.assigned_to || null)) {
+      await syncTaskAssigneeFromOpportunity(env, id, newAssignedTo);
+      await logOpportunityAudit(env, {
+        opportunity_id: id, user_id: user.id, action: 'assignee_change',
+        field_name: 'assigned_to', old_value: existing.assigned_to || '', new_value: newAssignedTo || '',
+      });
+    }
     const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
     return json(shapeOpportunity(row));
   }
@@ -10276,6 +10440,15 @@ async function handleCareerOpportunityItem(request, env, user, id) {
       await env.DB.prepare(`UPDATE career_opportunities SET ${sets.join(', ')} WHERE id = ?`).bind(...args).run();
     } catch (e) {
       return json({ error: 'Falha ao atualizar oportunidade', detail: String(e) }, 500);
+    }
+    // v2.26.3 — mesmo hook de sync/auditoria do PUT, para o caminho PATCH
+    // (é o que o botão "Coleta concluída" do Bloco 2 usa, entre outros).
+    if (body.status !== undefined && body.status !== existing.status) {
+      await syncTaskFromOpportunityStatus(env, id, body.status);
+      await logOpportunityAudit(env, {
+        opportunity_id: id, user_id: user.id, action: 'status_change',
+        field_name: 'status', old_value: existing.status, new_value: body.status,
+      });
     }
     const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
     return json(shapeOpportunity(row));

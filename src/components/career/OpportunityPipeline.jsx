@@ -454,6 +454,7 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
         <OpportunityModal
           id={modalId}
           orgs={orgs}
+          usersById={usersById}
           onClose={() => setModalId(null)}
           onChanged={load}
           onEditFull={(data) => { setModalId(null); setEditor({ mode: 'edit', form: { ...data, tags: parseTags(data.tags) } }); }}
@@ -704,7 +705,7 @@ function ArchiveView({ items, onRestore, onDelete, onOpen, deleting }) {
   );
 }
 
-function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
+function OpportunityModal({ id, orgs, usersById, onClose, onChanged, onEditFull }) {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -715,6 +716,28 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
   // ficam guardadas em logLines e são re-anexadas ao salvar (ver saveNotes).
   const [logLines, setLogLines] = useState([]);
   const [logEntries, setLogEntries] = useState([]);
+
+  // v2.26.3 — Bloco 3, Parte B: "Histórico" (opportunity_audit_log),
+  // colapsável e carregado só quando aberto pela primeira vez.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [auditEntries, setAuditEntries] = useState(null); // null = ainda não carregado
+  const [auditLoading, setAuditLoading] = useState(false);
+  const fetchAudit = async () => {
+    setAuditLoading(true);
+    try {
+      const r = await apiFetch(`/api/career/opportunities/${id}/audit`);
+      setAuditEntries((r && r.entries) || []);
+    } catch {
+      setAuditEntries([]);
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+  const toggleHistory = async () => {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    if (next) await fetchAudit();
+  };
 
   const reload = async () => {
     setLoading(true);
@@ -739,6 +762,15 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
     await apiFetch(`/api/career/opportunities/${id}`, { method: 'PUT', body: JSON.stringify(body) });
     await reload();
     onChanged && onChanged();
+  };
+
+  // v2.26.3 — mudar o responsável aqui atualiza a oportunidade (PUT já
+  // sincroniza a tarefa vinculada no backend — ver syncTaskAssigneeFromOpportunity
+  // em _worker.js) e regista no Histórico. Invalida o cache do Histórico se
+  // já estiver aberto, para o novo evento aparecer sem fechar/reabrir.
+  const changeAssignee = async (userId) => {
+    await patch({ assigned_to: userId || null });
+    if (historyOpen) await fetchAudit();
   };
 
   const saveNotes = async () => {
@@ -839,6 +871,28 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
                 </select>
               </Field>
 
+              {/* v2.26.3 — Bloco 3: responsável, sincronizado com a tarefa
+                  vinculada (opportunity_id) nos dois sentidos — ver
+                  syncOpportunityAssigneeFromTask/syncTaskAssigneeFromOpportunity
+                  em _worker.js. */}
+              <Field label="Responsável">
+                <div className="flex items-center gap-2">
+                  {data.assigned_to && usersById && usersById[data.assigned_to] && (
+                    <Avatar user={usersById[data.assigned_to]} size={22} />
+                  )}
+                  <select
+                    value={data.assigned_to || ''}
+                    onChange={(e) => changeAssignee(e.target.value || null)}
+                    className="input"
+                  >
+                    <option value="">— Ninguém —</option>
+                    {Object.values(usersById || {}).map((u) => (
+                      <option key={u.id} value={u.id}>{u.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </Field>
+
               {/* Prioridade + fit como sliders */}
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <SliderRow label="Prioridade" value={data.priority} onCommit={(v) => patch({ priority: v })} />
@@ -882,6 +936,52 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
                   </ul>
                 </div>
               )}
+
+              {/* v2.26.3 — Bloco 3, Parte B: "Auditoria" (opportunity_audit_log),
+                  colapsável e carregada só ao abrir. Chamei de "Auditoria" (não
+                  "Histórico" — o spec original usava esse nome) porque a seção
+                  logo acima já se chama "Histórico" há muito tempo (extraída de
+                  `notes`, não da tabela nova) — dois "Histórico" no mesmo modal
+                  confundiria mais do que ajudaria. */}
+              <div className="rounded-lg border border-line">
+                <button
+                  type="button"
+                  onClick={toggleHistory}
+                  className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted hover:bg-surface2"
+                >
+                  Auditoria
+                  <span className="text-[10px] normal-case text-ink2">{historyOpen ? '▲ ocultar' : '▼ mostrar'}</span>
+                </button>
+                {historyOpen && (
+                  <div className="border-t border-line px-3 py-2">
+                    {auditLoading && <p className="text-xs text-muted">Carregando...</p>}
+                    {!auditLoading && auditEntries && auditEntries.length === 0 && (
+                      <p className="text-xs text-muted">Nenhuma mudança registada ainda.</p>
+                    )}
+                    {!auditLoading && auditEntries && auditEntries.length > 0 && (
+                      <ul className="space-y-1.5">
+                        {auditEntries.map((e) => (
+                          <li key={e.id} className="text-xs text-ink2">
+                            <span className="font-medium text-ink">{e.user_name || 'Alguém'}</span>{' '}
+                            {e.action === 'status_change' && (
+                              <>mudou status: {OPP_STATUS_LABELS[e.old_value] || e.old_value || '—'} → <span className="font-medium text-ink">{OPP_STATUS_LABELS[e.new_value] || e.new_value}</span></>
+                            )}
+                            {e.action === 'assignee_change' && (
+                              <>mudou o responsável: {(usersById && usersById[e.old_value]?.name) || 'ninguém'} → <span className="font-medium text-ink">{(usersById && usersById[e.new_value]?.name) || 'ninguém'}</span></>
+                            )}
+                            {e.action === 'field_update' && (
+                              <>alterou {e.field_name || 'um campo'}</>
+                            )}
+                            <span className="ml-1.5 text-muted">
+                              — {e.created_at ? new Date(e.created_at * 1000).toLocaleString('pt-BR') : ''}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="mt-5 flex flex-wrap items-center justify-end gap-2">

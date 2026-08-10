@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, Star, ChevronRight, ChevronDown, Briefcase, Repeat } from 'lucide-react';
+import { AlertTriangle, Star, ChevronRight, ChevronDown, Briefcase, Repeat, Search } from 'lucide-react';
 import AvatarStack from '../shared/AvatarStack';
 import { useStore } from '../../store';
 import {
@@ -33,9 +33,15 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
   const assignees = taskAssignees(task);
   const [expanded, setExpanded] = useState(false);
   // Etapa 6 — nome da oportunidade vinculada, resolvido a partir do store.
-  const opportunityTitle = useStore((s) =>
-    task.opportunity_id ? (s.careerOpportunities.find((o) => o.id === task.opportunity_id)?.title || null) : null,
+  // v2.26.2 — quando a oportunidade vinculada está em "Mapear" (extract_knowledge)
+  // ou já foi arquivada como mapeada (status='mapped'), a tarefa é de coleta de
+  // informação, não de candidatura real — o card mostra um badge diferente
+  // ("🔍 Mapeamento") em vez do "→ nome da vaga" padrão.
+  const linkedOpportunity = useStore((s) =>
+    task.opportunity_id ? s.careerOpportunities.find((o) => o.id === task.opportunity_id) : null,
   );
+  const opportunityTitle = linkedOpportunity?.title || null;
+  const isMapping = !!linkedOpportunity && (!!linkedOpportunity.extract_knowledge || linkedOpportunity.status === 'mapped');
 
   return (
     // role=button (not a real <button>) so the favorite <button> can nest validly.
@@ -133,7 +139,13 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
         {warn && <AlertTriangle className="h-3.5 w-3.5" style={{ color: '#F59E0B' }} />}
       </div>
 
-      {opportunityTitle && (
+      {opportunityTitle && isMapping && (
+        <div className="mt-2 flex items-center gap-1 truncate text-[11px] font-medium text-teal-600" title={`Mapeamento: ${opportunityTitle}`}>
+          <Search className="h-3 w-3 shrink-0" />
+          <span className="truncate">🔍 Mapeamento — {opportunityTitle}</span>
+        </div>
+      )}
+      {opportunityTitle && !isMapping && (
         <div className="mt-2 flex items-center gap-1 truncate text-[11px] font-medium text-accent" title={`Carreira: ${opportunityTitle}`}>
           <Briefcase className="h-3 w-3 shrink-0" />
           <span className="truncate">→ {opportunityTitle}</span>

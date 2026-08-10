@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus, X, ExternalLink, Loader2, Building2, User, CalendarClock, CheckSquare, Trash2, Star,
+  Search, CheckCircle2, Archive as ArchiveIcon, RotateCcw,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -17,6 +18,7 @@ import {
 import {
   StarRating, TrackBadge, OppTypeBadge, parseTags,
   PIPELINE_COLUMNS, TRACK_LABELS, OPP_TYPE_LABELS, OPP_STATUS_LABELS, OPP_STATUS_ORDER,
+  ARCHIVE_STATUSES,
   trackColor, deadlineColor, deadlineCountdown, daysUntil, priorityDot, PRIORITY_LABELS,
   trackForType, parseStatusLog, joinNotesWithLog,
 } from './careerShared';
@@ -86,6 +88,9 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
 
   const [loading, setLoading] = useState(true);
   const [trackFilter, setTrackFilter] = useState('all');
+  // v2.26.2 — [Pipeline] [Arquivo] toggle. 'archive' mostra status IN
+  // ARCHIVE_STATUSES ('mapped' + 'dead'), fora do Kanban ativo.
+  const [view, setView] = useState('pipeline');
   const [ecExpanded, setEcExpanded] = useState({}); // colKey -> bool
   const [sortBy, setSortBy] = useState({});          // colKey -> chave de SORT_OPTIONS
   const [orgs, setOrgs] = useState([]);
@@ -143,15 +148,29 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
     [opps, trackFilter],
   );
 
-  // Por coluna: cards visíveis (sem EC) + cards com Extrair Conhecimento
-  // ocultos por padrão — dentro de cada grupo, prioritários (is_priority=1)
-  // vêm antes, e só então a ordenação escolhida no select da coluna decide.
-  // `total` conta só os cards normais (sem EC) — o contador de EC fica no
-  // botão de expandir, separado.
+  // v2.26.2 — itens arquivados ('mapped' ou 'dead') saem do Kanban ativo e só
+  // aparecem na aba Arquivo. Sem isso, um item 'mapped' cairia no fallback de
+  // columnKeyForStatus (que devolve 'to_organize' para status desconhecido) e
+  // voltaria a poluir a primeira coluna — exatamente o problema que "Coleta
+  // concluída" deveria resolver.
+  const pipelineOpps = useMemo(
+    () => filtered.filter((o) => !ARCHIVE_STATUSES.includes(o.status)),
+    [filtered],
+  );
+  const archiveOpps = useMemo(
+    () => filtered.filter((o) => ARCHIVE_STATUSES.includes(o.status)),
+    [filtered],
+  );
+
+  // Por coluna: cards visíveis (sem Mapear) + cards em Mapear ocultos por
+  // padrão — dentro de cada grupo, prioritários (is_priority=1) vêm antes, e
+  // só então a ordenação escolhida no select da coluna decide. `total` conta
+  // só os cards normais (sem Mapear) — o contador de Mapear fica no botão de
+  // expandir, separado.
   const byColumn = useMemo(() => {
     const map = {};
     PIPELINE_COLUMNS.forEach((c) => {
-      const items = filtered.filter((o) => columnKeyForStatus(o.status) === c.key);
+      const items = pipelineOpps.filter((o) => columnKeyForStatus(o.status) === c.key);
       const sortKey = sortBy[c.key] || 'recent';
       const normal = items.filter((o) => !o.extract_knowledge);
       const ec = items.filter((o) => !!o.extract_knowledge);
@@ -162,7 +181,7 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
       map[c.key] = { visible: byPriority(normal), ecHidden: byPriority(ec), total: normal.length };
     });
     return map;
-  }, [filtered, sortBy]);
+  }, [pipelineOpps, sortBy]);
 
   // Move um card para o status alvo da coluna (otimista + PUT).
   const moveTo = async (id, newStatus) => {
@@ -176,7 +195,9 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
     }
   };
 
-  // Liga/desliga o toggle "Extrair Conhecimento" de um card (otimista + PATCH).
+  // Liga/desliga o toggle "Mapear" de um card (otimista + PATCH). O campo no
+  // banco continua chamado extract_knowledge (não renomeado — ver nota de
+  // desvio no relatório do Bloco 2); só o texto voltado ao usuário virou "Mapear".
   const toggleExtract = async (id) => {
     const opp = opps.find((o) => o.id === id);
     if (!opp) return;
@@ -186,6 +207,45 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
       await apiFetch(`/api/career/opportunities/${id}`, { method: 'PATCH', body: JSON.stringify({ extract_knowledge: next }) });
     } catch {
       load(); // reverte recarregando se falhar
+    }
+  };
+
+  // v2.26.2 — "Coleta concluída": arquiva o card (status='mapped', some do
+  // Kanban ativo) e, se houver uma tarefa vinculada (opportunity_id = id)
+  // ainda não concluída, marca-a como concluída também. Não existe endpoint
+  // "tarefas por opportunity_id" — varre a lista completa (já com o escopo de
+  // permissão do usuário aplicado pelo backend). Best-effort: uma falha ao
+  // atualizar a tarefa não desfaz o arquivamento da oportunidade.
+  const markCollected = async (id) => {
+    const opp = opps.find((o) => o.id === id);
+    if (!opp) return;
+    setOpps(opps.map((o) => (o.id === id ? { ...o, status: 'mapped' } : o)));
+    try {
+      await apiFetch(`/api/career/opportunities/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'mapped' }) });
+      try {
+        const allTasks = await apiFetch('/api/tasks');
+        const linked = (allTasks || []).find((t) => t.opportunity_id === id && t.status !== 'done');
+        if (linked) {
+          await apiFetch(`/api/tasks/${linked.id}`, { method: 'PUT', body: JSON.stringify({ status: 'done' }) });
+        }
+      } catch { /* best-effort — não bloqueia o arquivamento da oportunidade */ }
+      showToast('✅ Mapeamento concluído — movido para Arquivo');
+      load();
+    } catch (e) {
+      showToast(`Falha ao concluir mapeamento: ${String(e.message || e).slice(0, 80)}`);
+      load();
+    }
+  };
+
+  // v2.26.2 — restaura um item arquivado de volta ao Kanban ativo, na
+  // primeira coluna (to_organize). Usado só pela aba Arquivo.
+  const restoreOpp = async (id) => {
+    setOpps(opps.map((o) => (o.id === id ? { ...o, status: 'to_organize' } : o)));
+    try {
+      await apiFetch(`/api/career/opportunities/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'to_organize' }) });
+      showToast('Oportunidade restaurada para o Pipeline');
+    } catch {
+      load();
     }
   };
 
@@ -241,26 +301,55 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
 
   return (
     <div className="flex h-full flex-col gap-3">
-      {/* Barra: filtro por trilha + nova oportunidade */}
+      {/* Barra: Pipeline/Arquivo + filtro por trilha + nova oportunidade */}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap gap-1.5">
-          {TRACK_FILTERS.map((t) => {
-            const active = trackFilter === t.key;
-            const c = trackColor(t.key);
-            return (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => setTrackFilter(t.key)}
-                className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
-                  active ? 'text-white' : 'border border-line bg-surface text-ink2 hover:bg-surface2'
-                }`}
-                style={active ? { backgroundColor: c.hex } : undefined}
-              >
-                {t.label}
-              </button>
-            );
-          })}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* v2.26.2 — aba Arquivo: itens 'mapped' (mapeamento concluído) e
+              'dead' (vagas mortas) saem do Kanban ativo e ficam aqui. */}
+          <div className="flex overflow-hidden rounded-lg border border-line">
+            <button
+              type="button"
+              onClick={() => setView('pipeline')}
+              className={`px-3 py-1.5 text-xs font-medium transition ${
+                view === 'pipeline' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+              }`}
+            >
+              Pipeline
+            </button>
+            <button
+              type="button"
+              onClick={() => setView('archive')}
+              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium transition ${
+                view === 'archive' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+              }`}
+            >
+              <ArchiveIcon className="h-3.5 w-3.5" /> Arquivo
+              {archiveOpps.length > 0 && (
+                <span className={`rounded-full px-1.5 text-[10px] ${view === 'archive' ? 'bg-white/25' : 'bg-surface2'}`}>
+                  {archiveOpps.length}
+                </span>
+              )}
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {TRACK_FILTERS.map((t) => {
+              const active = trackFilter === t.key;
+              const c = trackColor(t.key);
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setTrackFilter(t.key)}
+                  className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition ${
+                    active ? 'text-white' : 'border border-line bg-surface text-ink2 hover:bg-surface2'
+                  }`}
+                  style={active ? { backgroundColor: c.hex } : undefined}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -273,7 +362,16 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
         </div>
       </div>
 
-      {/* Kanban */}
+      {view === 'archive' ? (
+        <ArchiveView
+          items={archiveOpps}
+          onRestore={restoreOpp}
+          onDelete={(item) => setConfirmItem(item)}
+          onOpen={(id) => setModalId(id)}
+          deleting={deleting}
+        />
+      ) : (
+      /* Kanban */
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto pb-2">
         {PIPELINE_COLUMNS.map((col) => {
           const header = trackColor(trackFilter);
@@ -290,6 +388,7 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
             onDragEnd: () => setDraggingId(null),
             onClick: () => setModalId(o.id),
             onToggleExtract: () => toggleExtract(o.id),
+            onMarkCollected: () => markCollected(o.id),
             onTogglePriority: () => togglePriority(o.id),
             onDelete: () => setConfirmItem(o),
             onMove: (status) => moveTo(o.id, status),
@@ -330,13 +429,13 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
                       onClick={() => setEcExpanded((m) => ({ ...m, [col.key]: !m[col.key] }))}
                       className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-line px-2 py-1.5 text-[11px] font-medium text-ink2 transition hover:bg-surface2"
                     >
-                      📚 {ecHidden.length} em Extrair Conhecimento {expanded ? '▲' : '▼'}
+                      🔍 {ecHidden.length} em Mapear {expanded ? '▲' : '▼'}
                     </button>
                     {expanded && (
                       <>
                         <div className="flex items-center gap-2 py-0.5">
                           <div className="h-px flex-1 bg-line" />
-                          <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Extrair Conhecimento</span>
+                          <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Mapear</span>
                           <div className="h-px flex-1 bg-line" />
                         </div>
                         {ecHidden.map((o) => <OpportunityCard {...cardProps(o)} />)}
@@ -349,6 +448,7 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
           );
         })}
       </div>
+      )}
 
       {modalId && (
         <OpportunityModal
@@ -391,14 +491,14 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
   );
 }
 
-function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onTogglePriority, onDelete, onMove, deleting }) {
+function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onMarkCollected, onTogglePriority, onDelete, onMove, deleting }) {
   const c = trackColor(opp.track);
   const dl = deadlineColor(opp.deadline);
   const countdown = deadlineCountdown(opp.deadline);
   const extracting = !!opp.extract_knowledge;
   const priority = !!opp.is_priority;
   const currentCol = columnKeyForStatus(opp.status);
-  // Cards em "Extraindo" mantêm o fundo neutro; nos demais, o fundo de urgência
+  // Cards em "Mapeando" mantêm o fundo neutro; nos demais, o fundo de urgência
   // do prazo (bg-red-50 / bg-amber-50) substitui o bg-surface padrão.
   const cardBg = extracting ? 'bg-surface2' : (dl.bg || 'bg-surface');
   return (
@@ -415,7 +515,7 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
     >
       {extracting && (
         <span className="absolute -right-1.5 -top-1.5 rounded-full bg-violet-600 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm">
-          📚 Extraindo
+          🔍 Mapeando
         </span>
       )}
       <div className="flex items-start justify-between gap-2">
@@ -457,16 +557,31 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
         <StarRating value={opp.fit_score} size={12} />
         {assignee && <Avatar user={{ name: assignee.name, avatar: assignee.avatar }} size={20} />}
       </div>
+      {/* v2.26.2 — "Mapear" virou um chip compacto (ícone + rótulo curto) em
+          vez de um botão largo com o texto inteiro "Extrair Conhecimento" —
+          era grande demais e poluía visualmente o card (bug #1 do Bloco 2).
+          "Coleta concluída" só aparece quando o card já está em Mapear. */}
       <div className="mt-1.5 flex items-center gap-1.5">
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onToggleExtract(); }}
-          className={`flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
+          title={extracting ? 'Marcado para mapear — clique para desmarcar' : 'Marcar para mapear (só fonte de informação, não candidatura)'}
+          className={`flex items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
             extracting ? 'bg-violet-600 text-white hover:opacity-90' : 'border border-line text-ink2 hover:bg-surface2'
           }`}
         >
-          📚 Extrair Conhecimento
+          <Search className="h-3 w-3" /> {extracting ? 'Mapear ✓' : 'Mapear'}
         </button>
+        {extracting && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onMarkCollected(); }}
+            title="Coleta concluída — arquiva esta oportunidade e conclui a tarefa vinculada"
+            className="flex items-center justify-center gap-1 rounded-md bg-emerald-600 px-2 py-1 text-[11px] font-medium text-white transition hover:opacity-90"
+          >
+            <CheckCircle2 className="h-3 w-3" /> Coleta concluída
+          </button>
+        )}
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onTogglePriority(); }}
@@ -502,6 +617,89 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
           <option key={c2.key} value={c2.dropStatus}>{c2.label}</option>
         ))}
       </select>
+    </div>
+  );
+}
+
+// v2.26.2 — Aba Arquivo: lista (não Kanban) dos itens com status 'mapped'
+// (mapeamento concluído) ou 'dead' (vaga morta). Colunas conforme o pedido do
+// Bloco 2: título | tipo | data | organização, com [Ver] [Restaurar] [Remover].
+function ArchiveView({ items, onRestore, onDelete, onOpen, deleting }) {
+  if (items.length === 0) {
+    return (
+      <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-line">
+        <p className="text-sm text-muted">Nada no arquivo ainda — itens mapeados ou vagas mortas aparecem aqui.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-line">
+      <table className="w-full text-left text-sm">
+        <thead className="sticky top-0 bg-surface2 text-xs uppercase tracking-wide text-muted">
+          <tr>
+            <th className="px-3 py-2 font-medium">Título</th>
+            <th className="px-3 py-2 font-medium">Tipo</th>
+            <th className="px-3 py-2 font-medium">Status</th>
+            <th className="px-3 py-2 font-medium">Data</th>
+            <th className="px-3 py-2 font-medium">Organização</th>
+            <th className="px-3 py-2 font-medium">Ações</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((o, i) => (
+            <tr
+              key={o.id}
+              className={`border-t border-line ${i % 2 === 1 ? 'bg-surface2/40' : 'bg-surface'} hover:bg-surface2/70`}
+            >
+              <td className="max-w-[260px] truncate px-3 py-2 font-medium text-ink" title={o.title}>{o.title}</td>
+              <td className="px-3 py-2"><OppTypeBadge type={o.type} /></td>
+              <td className="px-3 py-2">
+                <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+                  o.status === 'mapped' ? 'bg-violet-100 text-violet-700' : 'bg-surface2 text-ink2'
+                }`}
+                >
+                  {OPP_STATUS_LABELS[o.status] || o.status}
+                </span>
+              </td>
+              <td className="px-3 py-2 text-ink2">
+                {o.updated_at ? new Date(o.updated_at * 1000).toLocaleDateString('pt-BR') : '—'}
+              </td>
+              <td className="max-w-[180px] truncate px-3 py-2 text-ink2" title={o.organization_name || ''}>
+                {o.organization_name || '—'}
+              </td>
+              <td className="px-3 py-2">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onOpen(o.id)}
+                    title="Ver detalhe"
+                    className="rounded p-1 text-ink2 transition hover:bg-surface2"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRestore(o.id)}
+                    title="Restaurar para o Pipeline"
+                    className="rounded p-1 text-ink2 transition hover:bg-surface2"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDelete(o)}
+                    disabled={deleting === o.id}
+                    title="Remover permanentemente"
+                    className="rounded p-1 text-muted transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -559,6 +757,13 @@ function OpportunityModal({ id, orgs, onClose, onChanged, onEditFull }) {
           title: `Carreira: ${data.title}`,
           description: [data.organization_name, data.url].filter(Boolean).join(' · '),
           due_date: data.deadline || '',
+          // v2.26.2 — antes este POST não passava opportunity_id, então a
+          // tarefa criada aqui nunca ficava de facto vinculada à oportunidade
+          // (o filtro "Tarefas de carreira" e o badge de mapeamento no
+          // TaskCard dependem desse campo). Corrigido: é o prerequisito para
+          // o badge "🔍 Mapeamento" da tarefa (pedido neste mesmo Bloco 2)
+          // ter alguma tarefa real para aparecer.
+          opportunity_id: data.id,
         }),
       });
       setTaskMsg('Tarefa criada ✓');

@@ -82,6 +82,14 @@ export const OPP_STATUS_LABELS = {
 
 export const OPP_STATUS_ORDER = ['to_organize', 'preparing', 'applied', 'in_process', 'dead'];
 
+// v2.26.2 — 'mapped' é um status de arquivo (fora do Kanban ativo), alcançado
+// só pelo botão "Coleta concluída" — por isso não entra em OPP_STATUS_ORDER
+// (que alimenta o select manual de status no editor/modal). Ambos 'mapped' e
+// 'dead' aparecem juntos na aba Arquivo — 'dead' já era o "arquivo" de facto
+// desta app antes de existir uma aba dedicada para isso.
+OPP_STATUS_LABELS.mapped = 'Mapeada';
+export const ARCHIVE_STATUSES = ['mapped', 'dead'];
+
 // --- Documentos --------------------------------------------------------------
 export const DOC_TYPE_LABELS = {
   cv: 'CV',

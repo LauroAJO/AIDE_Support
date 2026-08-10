@@ -230,6 +230,13 @@ function ParentTaskNote({ parentTaskId, onOpenTask }) {
 // uses the existing TaskEditor slide-in (opened via onEdit).
 export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, onOpenTask }) {
   const currentUser = useStore((s) => s.user);
+  // v2.26.2 — mesma lógica do TaskCard: tarefa vinculada a uma oportunidade em
+  // "Mapear" (extract_knowledge) ou já arquivada como mapeada (status='mapped')
+  // é de coleta de informação, não de candidatura — mostra um aviso no detalhe.
+  const linkedOpportunity = useStore((s) =>
+    task?.opportunity_id ? s.careerOpportunities.find((o) => o.id === task.opportunity_id) : null,
+  );
+  const isMapping = !!linkedOpportunity && (!!linkedOpportunity.extract_knowledge || linkedOpportunity.status === 'mapped');
   // O modal é read-only + ações rápidas que persistem na hora; o ÚNICO texto
   // que se perdia ao fechar era o comentário em digitação — por isso ele tem
   // rascunho próprio. Chave separada da do TaskEditor de propósito: aquela
@@ -335,6 +342,11 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
               </div>
             )}
             <h2 className="text-xl font-bold text-ink">{task.title}</h2>
+            {isMapping && (
+              <p className="mt-0.5 text-[11px] font-medium text-teal-600">
+                🔍 Esta tarefa é de mapeamento (coleta de informação), não candidatura.
+              </p>
+            )}
             <div className="mt-2 flex items-center gap-2">
               <span className="rounded px-2 py-0.5 text-xs font-medium text-white" style={{ background: STATUS_COLORS[task.status] }}>
                 {STATUS_LABELS[task.status]}

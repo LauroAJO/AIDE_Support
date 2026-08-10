@@ -4953,6 +4953,10 @@ async function handleBridge(request, env, ctx, path) {
   // não pela UI. Autenticação já resolvida pelo gate `hasSecret` / `user` logo
   // acima nesta função — igual a todas as outras rotas /api/bridge/*.
   if (path === '/api/bridge/tasks/resend-approved' && method === 'POST') return handleBridgeResendApproved(request, env);
+  // BRIDGE_RESEND_ALL — mesmo padrão de autenticação (gate hasSecret/user já
+  // resolvido acima), versão em massa do endpoint de cima. Sem stagingId —
+  // varre sozinho todas as linhas já importadas. Ver handleBridgeResendAllApproved.
+  if (path === '/api/bridge/tasks/resend-all-approved' && method === 'POST') return handleBridgeResendAllApproved(env);
 
   // --- Curadoria de tarefas do Lifegame (v2.4.4) ---------------------------
   // Rotas acessadas pelo owner via browser (sessão, não secret).
@@ -5252,6 +5256,38 @@ async function handleBridgeStagingApprove(request, env, user) {
 // pular essas linhas com 'já importado' e NUNCA tentar notificar de novo, nem
 // depois do deploy do fix. Ver _AUDITORIAS/BADGE_AIDE_ATIVO_INVESTIGACAO.txt,
 // Ponto 6 (P6_MAS_ATENCAO_AO_REGISTRO_JA_APROVADO).
+// BRIDGE_RESEND_ALL — extraído de dentro de handleBridgeResendApproved para ser
+// reusado também pelo endpoint em massa (handleBridgeResendAllApproved), sem
+// duplicar a lógica de notificação em dois lugares. Não valida stagingRow —
+// isso é responsabilidade de quem chama (cada chamador tem sua própria forma
+// de decidir o que é "elegível" antes de disparar isto). bridgeConfig também é
+// recebido pronto, para o caminho em massa não ler bridge_config a cada linha.
+async function resendApprovalNotification(env, bridgeConfig, stagingRow) {
+  const s = stagingRow;
+  try {
+    const r = await lifegameFetch(bridgeConfig, '/api/bridge/tasks/approved', {
+      method: 'POST',
+      body: JSON.stringify({ lifegameTaskId: s.lifegame_id, aideTaskId: s.imported_task_id }),
+    });
+    await logBridge(env, {
+      direction: 'outbound', entity_type: 'task_approved', entity_id: s.lifegame_id,
+      status: r.ok ? 'success' : 'error',
+      error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 200)}` : ''}`,
+    });
+    return {
+      ok: r.ok, stagingId: s.id, lifegameTaskId: s.lifegame_id, aideTaskId: s.imported_task_id,
+      status: r.status, response: r.body ? r.body.slice(0, 500) : null,
+    };
+  } catch (notifyErr) {
+    const errMsg = String((notifyErr && notifyErr.message) || notifyErr).slice(0, 200);
+    await logBridge(env, {
+      direction: 'outbound', entity_type: 'task_approved', entity_id: s.lifegame_id,
+      status: 'error', error: errMsg,
+    }).catch(() => {});
+    return { ok: false, stagingId: s.id, lifegameTaskId: s.lifegame_id, aideTaskId: s.imported_task_id, status: 0, error: errMsg };
+  }
+}
+
 async function handleBridgeResendApproved(request, env) {
   const body = (await readJson(request)) || {};
   const stagingId = body.stagingId;
@@ -5267,31 +5303,52 @@ async function handleBridgeResendApproved(request, env) {
     return json({ error: 'bridge_config incompleto (lifegame_url/bridge_secret) — não é possível notificar', stagingId }, 400);
   }
 
-  // Mesma lógica de handleBridgeStagingApprove (linha ~5212-5229): mesmo
-  // lifegameFetch, mesmo payload, mesmo logBridge — só que fora do loop de
-  // aprovação em massa, para esta linha isolada.
-  try {
-    const r = await lifegameFetch(bridgeConfig, '/api/bridge/tasks/approved', {
-      method: 'POST',
-      body: JSON.stringify({ lifegameTaskId: s.lifegame_id, aideTaskId: s.imported_task_id }),
-    });
-    await logBridge(env, {
-      direction: 'outbound', entity_type: 'task_approved', entity_id: s.lifegame_id,
-      status: r.ok ? 'success' : 'error',
-      error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 200)}` : ''}`,
-    });
-    return json({
-      ok: r.ok, stagingId, lifegameTaskId: s.lifegame_id, aideTaskId: s.imported_task_id,
-      status: r.status, response: r.body ? r.body.slice(0, 500) : null,
-    }, r.ok ? 200 : 502);
-  } catch (notifyErr) {
-    const errMsg = String((notifyErr && notifyErr.message) || notifyErr).slice(0, 200);
-    await logBridge(env, {
-      direction: 'outbound', entity_type: 'task_approved', entity_id: s.lifegame_id,
-      status: 'error', error: errMsg,
-    }).catch(() => {});
-    return json({ ok: false, stagingId, lifegameTaskId: s.lifegame_id, error: errMsg }, 502);
+  // Mesma lógica de handleBridgeStagingApprove (linha ~5212-5229), agora
+  // extraída em resendApprovalNotification (ver acima) para ser reusada
+  // também pelo caminho em massa.
+  const result = await resendApprovalNotification(env, bridgeConfig, s);
+  return json(result, result.ok ? 200 : 502);
+}
+
+// BRIDGE_RESEND_ALL — versão em massa do endpoint acima. Sem body (ou body
+// vazio/ignorado). Varre TODA staging row já importada (imported_task_id
+// preenchido) e reenvia a notificação para cada uma, em sequência (não
+// paralelo — evita bombardear o LifeGame com dezenas de POSTs simultâneos),
+// com um pequeno delay entre chamadas. Pensado para a janela de transição de
+// quando o FIX 2 (notificação no approve) ainda não existia: tarefas
+// aprovadas antes disso nunca notificaram o LifeGame e nunca vão notificar
+// sozinhas (handleBridgeStagingApprove pula linhas já importadas). Ver
+// _AUDITORIAS/BADGE_AIDE_ATIVO_INVESTIGACAO.txt, Ponto 6.
+async function handleBridgeResendAllApproved(env) {
+  const bridgeConfig = await getBridgeConfig(env).catch(() => null);
+  if (!bridgeConfig || !bridgeConfig.lifegame_url || !bridgeConfig.bridge_secret) {
+    return json({ error: 'bridge_config incompleto (lifegame_url/bridge_secret) — não é possível notificar' }, 400);
   }
+
+  const rows = (await env.DB.prepare(
+    "SELECT * FROM bridge_task_staging WHERE imported_task_id IS NOT NULL AND imported_task_id != ''"
+  ).all()).results || [];
+
+  const detalhes = [];
+  let sucesso = 0;
+  let falha = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const s = rows[i];
+    // Linhas sem lifegame_id não deveriam existir (import sempre grava os
+    // dois juntos), mas por segurança pulamos sem contar como falha de rede —
+    // é um dado inconsistente, não uma falha de notificação.
+    if (!s.lifegame_id) {
+      detalhes.push({ stagingId: s.id, skipped: true, reason: 'sem lifegame_id' });
+      continue;
+    }
+    const result = await resendApprovalNotification(env, bridgeConfig, s);
+    detalhes.push(result);
+    if (result.ok) sucesso += 1; else falha += 1;
+    // Delay entre chamadas (não na última, para não atrasar a resposta à toa).
+    if (i < rows.length - 1) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  return json({ total: rows.length, sucesso, falha, detalhes });
 }
 
 async function handleBridgeStagingReject(request, env, user) {

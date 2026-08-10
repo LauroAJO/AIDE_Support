@@ -4956,7 +4956,7 @@ async function handleBridge(request, env, ctx, path) {
   // BRIDGE_RESEND_ALL — mesmo padrão de autenticação (gate hasSecret/user já
   // resolvido acima), versão em massa do endpoint de cima. Sem stagingId —
   // varre sozinho todas as linhas já importadas. Ver handleBridgeResendAllApproved.
-  if (path === '/api/bridge/tasks/resend-all-approved' && method === 'POST') return handleBridgeResendAllApproved(env);
+  if (path === '/api/bridge/tasks/resend-all-approved' && method === 'POST') return handleBridgeResendAllApproved(env, request);
 
   // --- Curadoria de tarefas do Lifegame (v2.4.4) ---------------------------
   // Rotas acessadas pelo owner via browser (sessão, não secret).
@@ -5311,7 +5311,7 @@ async function handleBridgeResendApproved(request, env) {
 }
 
 // BRIDGE_RESEND_ALL — versão em massa do endpoint acima. Sem body (ou body
-// vazio/ignorado). Varre TODA staging row já importada (imported_task_id
+// vazio/ignorado). Varre staging rows já importadas (imported_task_id
 // preenchido) e reenvia a notificação para cada uma, em sequência (não
 // paralelo — evita bombardear o LifeGame com dezenas de POSTs simultâneos),
 // com um pequeno delay entre chamadas. Pensado para a janela de transição de
@@ -5319,15 +5319,32 @@ async function handleBridgeResendApproved(request, env) {
 // aprovadas antes disso nunca notificaram o LifeGame e nunca vão notificar
 // sozinhas (handleBridgeStagingApprove pula linhas já importadas). Ver
 // _AUDITORIAS/BADGE_AIDE_ATIVO_INVESTIGACAO.txt, Ponto 6.
-async function handleBridgeResendAllApproved(env) {
+//
+// BRIDGE_RESEND_PAGINACAO — com 151 linhas, uma invocação processando tudo
+// de uma vez batia no teto de "Too many subrequests" do Workers (cada
+// resendApprovalNotification faz pelo menos 1 subrequest — o fetch ao
+// LifeGame — e o INSERT do logBridge não conta como subrequest, mas o
+// fetch conta; ~50 chamadas e a invocação morre, e como o SELECT não tinha
+// LIMIT/OFFSET, rodar de novo reprocessava a lista inteira do zero e parava
+// sempre no mesmo ponto). Aceita ?limit=N&offset=M na querystring — default
+// limit=40 (abaixo do teto de 50, com margem para a leitura de bridgeConfig
+// e outras subrequests que a invocação já faz). Resposta ganhou hasMore e
+// nextOffset para o chamador saber que precisa repetir com o offset seguinte.
+async function handleBridgeResendAllApproved(env, request) {
   const bridgeConfig = await getBridgeConfig(env).catch(() => null);
   if (!bridgeConfig || !bridgeConfig.lifegame_url || !bridgeConfig.bridge_secret) {
     return json({ error: 'bridge_config incompleto (lifegame_url/bridge_secret) — não é possível notificar' }, 400);
   }
 
+  const url = new URL(request.url);
+  const limitParam = parseInt(url.searchParams.get('limit'), 10);
+  const offsetParam = parseInt(url.searchParams.get('offset'), 10);
+  const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 40;
+  const offset = Number.isFinite(offsetParam) && offsetParam >= 0 ? offsetParam : 0;
+
   const rows = (await env.DB.prepare(
-    "SELECT * FROM bridge_task_staging WHERE imported_task_id IS NOT NULL AND imported_task_id != ''"
-  ).all()).results || [];
+    "SELECT * FROM bridge_task_staging WHERE imported_task_id IS NOT NULL AND imported_task_id != '' LIMIT ? OFFSET ?"
+  ).bind(limit, offset).all()).results || [];
 
   const detalhes = [];
   let sucesso = 0;
@@ -5348,7 +5365,11 @@ async function handleBridgeResendAllApproved(env) {
     if (i < rows.length - 1) await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  return json({ total: rows.length, sucesso, falha, detalhes });
+  const hasMore = rows.length === limit;
+  return json({
+    total: rows.length, sucesso, falha, detalhes,
+    limit, offset, hasMore, nextOffset: offset + rows.length,
+  });
 }
 
 async function handleBridgeStagingReject(request, env, user) {

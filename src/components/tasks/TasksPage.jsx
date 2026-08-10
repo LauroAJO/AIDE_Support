@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Plus, Upload, Download, AlertTriangle, X, LayoutGrid, Search, List, Columns, GitBranch, Briefcase, Repeat } from 'lucide-react';
+import { Plus, Upload, Download, AlertTriangle, X, LayoutGrid, List, Columns, GitBranch } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { downloadTasksExport, EXPORT_FORMATS } from '../../lib/exportTasks';
@@ -14,15 +14,7 @@ import TaskModal from './TaskModal';
 import ImportModal from './ImportModal';
 import KanbanBoard from './KanbanBoard';
 import TaskTreeView from './TaskTreeView';
-
-const STATUS_TABS = [
-  ['all', 'Todas'],
-  ['favorites', '⭐ Favoritas'],
-  ['backlog', 'Backlog'],
-  ['todo', 'A Fazer'],
-  ['doing', 'Fazendo'],
-  ['done', 'Concluídas'],
-];
+import TaskFiltersBar from './TaskFiltersBar';
 
 export default function TasksPage() {
   const user = useStore((s) => s.user);
@@ -35,7 +27,6 @@ export default function TasksPage() {
   const selectedTask = useStore((s) => s.selectedTask);
   const setSelectedTask = useStore((s) => s.setSelectedTask);
   const taskFilter = useStore((s) => s.taskFilter);
-  const setTaskFilter = useStore((s) => s.setTaskFilter);
   const kanbanView = useStore((s) => s.kanbanView);
   const setKanbanView = useStore((s) => s.setKanbanView);
   const taskView = useStore((s) => s.taskView);
@@ -44,10 +35,6 @@ export default function TasksPage() {
   const setAreas = useStore((s) => s.setAreas);
   const setFronts = useStore((s) => s.setFronts);
   const setCareerOpportunities = useStore((s) => s.setCareerOpportunities);
-  // Etapa 6 — filtro "Tarefas de carreira" (só tarefas com oportunidade vinculada).
-  const [careerOnly, setCareerOnly] = useState(false);
-  // v2.25.5 — filtro "Recorrentes" + toast de próxima ocorrência criada.
-  const [recurringOnly, setRecurringOnly] = useState(false);
   const [toast, setToast] = useState('');
   const showToast = (msg) => {
     setToast(msg);
@@ -57,12 +44,16 @@ export default function TasksPage() {
   // Compute locally with useMemo. Subscribing via useStore(selectFilteredTasks)
   // would return a new array every render → Zustand v5 + useSyncExternalStore
   // treats that as a perpetual state change → React #185 (max update depth).
+  // v2.26.1 — "Tarefas de carreira" e "Recorrentes" deixaram de ser estado
+  // local (careerOnly/recurringOnly) e passaram a viver em taskFilter
+  // (onlyCareer/onlyRecurring), junto dos outros filtros novos — assim
+  // aparecem certinho nos chips de "filtros ativos" da nova barra.
   const filteredBase = useMemo(
     () => selectFilteredTasks({ tasks, taskFilter, user }),
     [tasks, taskFilter, user]
   );
 
-  // Apply the tree filter (sidebar) and the career filter on top of the base filter.
+  // Apply the tree filter (sidebar/dropdown de Área) sobre o filtro base.
   const filtered = useMemo(() => {
     let list = filteredBase;
     if (treeFilter.areaId || treeFilter.projectId || treeFilter.frontId) {
@@ -73,10 +64,8 @@ export default function TasksPage() {
         return true;
       });
     }
-    if (careerOnly) list = list.filter((t) => t.opportunity_id);
-    if (recurringOnly) list = list.filter((t) => t.is_recurring);
     return list;
-  }, [filteredBase, treeFilter, careerOnly, recurringOnly]);
+  }, [filteredBase, treeFilter]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -139,9 +128,6 @@ export default function TasksPage() {
     setSearchParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, tasks]);
-
-  const otherUser = users.find((u) => u.id !== user?.id);
-  const otherName = otherUser?.name ? otherUser.name.split(' ')[0] : 'Alice';
 
   const noDateCount = tasks.filter(needsDate).length;
 
@@ -345,79 +331,8 @@ export default function TasksPage() {
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-          <div className="flex flex-wrap gap-1">
-            {STATUS_TABS.map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setTaskFilter({ status: value })}
-                className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${
-                  taskFilter.status === value
-                    ? 'bg-accent text-white'
-                    : 'bg-surface2 text-ink2 hover:text-ink'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="relative flex-1 sm:min-w-[180px]">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-            <input
-              type="text"
-              value={taskFilter.search}
-              onChange={(e) => setTaskFilter({ search: e.target.value })}
-              placeholder="Buscar por título..."
-              className="input pl-8"
-            />
-          </div>
-        </div>
-
-        {/* Assign filter */}
-        <div className="mt-2 flex gap-1">
-          {[
-            ['all', 'Todas'],
-            ['me', 'Eu'],
-            ['other', otherName],
-          ].map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setTaskFilter({ assignedTo: value })}
-              className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${
-                taskFilter.assignedTo === value
-                  ? 'bg-ink text-white'
-                  : 'bg-surface2 text-ink2 hover:text-ink'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-          <button
-            type="button"
-            onClick={() => setCareerOnly((v) => !v)}
-            title="Mostrar só tarefas vinculadas a oportunidades de carreira"
-            className={`ml-2 flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition ${
-              careerOnly ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'
-            }`}
-          >
-            <Briefcase className="h-3.5 w-3.5" />
-            Tarefas de carreira
-          </button>
-          <button
-            type="button"
-            onClick={() => setRecurringOnly((v) => !v)}
-            title="Mostrar só tarefas recorrentes"
-            className={`flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition ${
-              recurringOnly ? 'bg-accent text-white' : 'bg-surface2 text-ink2 hover:text-ink'
-            }`}
-          >
-            <Repeat className="h-3.5 w-3.5" />
-            Recorrentes
-          </button>
-        </div>
+      {/* Filters — v2.26.1: barra compacta com dropdowns (ver TaskFiltersBar) */}
+      <TaskFiltersBar />
 
         {/* Alert banner */}
         {noDateCount > 0 && !alertDismissed && (

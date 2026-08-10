@@ -20,7 +20,18 @@ export const useStore = create((set) => ({
   projects: [],
   users: [],
   selectedTask: null,
-  taskFilter: { status: 'all', search: '', assignedTo: 'all' },
+  // v2.26.1 — filtro de tarefas redesenhado (dropdowns compactos). assignedTo
+  // passou de 'all'|'me'|'other' (binário, só suportava 2 pessoas) para
+  // 'all'|'unassigned'|<userId> — com 3+ utilizadores (Lauro/Alice/Milene),
+  // 'other' colapsava todo mundo que não era "eu" num único balde, então
+  // filtrar por Alice também mostrava tarefas da Milene (e vice-versa), e não
+  // havia opção nenhuma para escolher a Milene especificamente.
+  taskFilter: {
+    status: 'all', search: '', assignedTo: 'all',
+    tags: [], onlyFavorited: false, onlyRecurring: false, onlyCareer: false,
+    dateFilter: 'all', // 'all' | 'withDate' | 'withoutDate'
+    minUrgency: 0, minImportance: 0,
+  },
   kanbanView: false,
 
   // Phase 2 — timer & planning
@@ -186,9 +197,10 @@ export const useStore = create((set) => ({
 }));
 
 // Derived: tasks filtered by the current taskFilter.
-// assignedTo: 'all' | 'me' (current user) | 'other' (the other user).
+// assignedTo: 'all' | 'unassigned' | <userId> (v2.26.1 — era 'all'|'me'|'other';
+// ver comentário no default de taskFilter acima para o porquê da mudança).
 export const selectFilteredTasks = (state) => {
-  const { tasks, taskFilter, user } = state;
+  const { tasks, taskFilter } = state;
   const q = taskFilter.search.trim().toLowerCase();
   return tasks.filter((t) => {
     if (taskFilter.status === 'favorites') {
@@ -203,15 +215,38 @@ export const selectFilteredTasks = (state) => {
       return false;
     }
     if (q && !t.title.toLowerCase().includes(q)) return false;
-    // v2.25.19 — "Eu"/"Outro" passam a considerar TODOS os responsáveis
-    // (principal + co-responsáveis da junction task_assignees), não só
-    // assigned_to. Sem isso, uma tarefa em que sou co-responsável some do
-    // filtro "Eu" mesmo sendo minha.
+    // v2.25.19 — considera TODOS os responsáveis (principal + co-responsáveis
+    // da junction task_assignees), não só assigned_to. Sem isso, uma tarefa em
+    // que sou co-responsável some do filtro "Eu" mesmo sendo minha.
     const ids = taskAssigneeIds(t);
-    if (taskFilter.assignedTo === 'me' && !ids.includes(user?.id)) return false;
-    if (taskFilter.assignedTo === 'other' && (!ids.length || ids.every((id) => id === user?.id))) {
-      return false;
+    if (taskFilter.assignedTo === 'unassigned') {
+      if (ids.length) return false;
+    } else if (taskFilter.assignedTo && taskFilter.assignedTo !== 'all') {
+      // Um id de utilizador específico — filtro direto por pertencer à lista
+      // de responsáveis dessa tarefa (não mais um balde binário "eu"/"outro").
+      if (!ids.includes(taskFilter.assignedTo)) return false;
     }
+    if (taskFilter.tags && taskFilter.tags.length) {
+      const taskTags = t.tags || [];
+      if (!taskFilter.tags.some((tag) => taskTags.includes(tag))) return false;
+    }
+    if (taskFilter.onlyFavorited && !t.favorited) return false;
+    if (taskFilter.onlyRecurring && !t.is_recurring) return false;
+    if (taskFilter.onlyCareer && !t.opportunity_id) return false;
+    if (taskFilter.dateFilter === 'withDate' && !(t.due_date || t.delivery_date)) return false;
+    if (taskFilter.dateFilter === 'withoutDate' && (t.due_date || t.delivery_date)) return false;
+    if (taskFilter.minUrgency && Number(t.urgency || 0) < taskFilter.minUrgency) return false;
+    if (taskFilter.minImportance && Number(t.importance || 0) < taskFilter.minImportance) return false;
     return true;
   });
+};
+
+// v2.26.1 — lista única de tags em uso nas tarefas carregadas, para popular o
+// dropdown "Tags" do filtro sem precisar de um endpoint dedicado.
+export const selectAllTaskTags = (state) => {
+  const set = new Set();
+  for (const t of state.tasks) {
+    for (const tag of t.tags || []) set.add(tag);
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
 };

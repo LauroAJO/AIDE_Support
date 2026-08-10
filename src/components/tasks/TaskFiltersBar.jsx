@@ -16,9 +16,9 @@
 // dois lugares, é mais simples e não perde funcionalidade. Ver relatório do
 // Bloco 1 para detalhe.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Search, ChevronDown, X, Briefcase, Repeat, Star, CalendarDays, CalendarX } from 'lucide-react';
-import { useStore, selectAllTaskTags } from '../../store';
+import { useStore } from '../../store';
 
 const STATUS_OPTIONS = [
   ['all', 'Todas'],
@@ -99,7 +99,27 @@ export default function TaskFiltersBar() {
   const treeFilter = useStore((s) => s.taskTreeFilter);
   const setTaskTreeFilter = useStore((s) => s.setTaskTreeFilter);
   const clearTaskTreeFilter = useStore((s) => s.clearTaskTreeFilter);
-  const allTags = useStore(selectAllTaskTags);
+  // FIX 0 (v2.26.5) — `useStore(selectAllTaskTags)` chamava um selector que
+  // devolve um array NOVO a cada execução (Array.from(set).sort(...)). Com
+  // Zustand v5 + useSyncExternalStore, uma referência nova a cada render é
+  // lida como "o estado mudou" — o componente re-renderiza, o selector roda
+  // de novo, devolve outro array novo, re-renderiza de novo... loop infinito
+  // → "Maximum update depth exceeded" (React #185), que é exatamente o erro
+  // que travava a aba Tarefas. O comentário em TasksPage.jsx já alertava para
+  // esse padrão (por isso `selectFilteredTasks` lá é sempre envolto em
+  // useMemo) — mas o mesmo cuidado não foi aplicado aqui quando o dropdown de
+  // Tags foi criado. Correção: subscrever só a `tasks` (referência estável
+  // entre renders, só muda quando o array de tarefas do store muda de fato) e
+  // derivar `allTags` localmente com useMemo, com a mesma lógica de
+  // selectAllTaskTags.
+  const tasks = useStore((s) => s.tasks);
+  const allTags = useMemo(() => {
+    const set = new Set();
+    for (const t of tasks) {
+      for (const tag of t.tags || []) set.add(tag);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [tasks]);
   const [tagSearch, setTagSearch] = useState('');
 
   const statusLabel = STATUS_OPTIONS.find(([v]) => v === taskFilter.status)?.[1] || 'Status';

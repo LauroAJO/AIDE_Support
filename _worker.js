@@ -4944,6 +4944,16 @@ async function handleBridge(request, env, ctx, path) {
   // `user` logo acima nesta função — igual a todas as outras rotas /api/bridge/*.
   if (path === '/api/bridge/mapping' && method === 'GET') return handleBridgeMappingList(env);
 
+  // BRIDGE_RESEND_APPROVED — endpoint administrativo pontual, sem UI. Reenvia
+  // a notificação AIDE→LifeGame (POST /api/bridge/tasks/approved) para uma
+  // staging row já aprovada ANTES de o BRIDGE_STATUS_FIX (FIX 2) existir —
+  // essas tarefas ficaram com imported_task_id preenchido mas nunca notificaram
+  // o LifeGame, então nunca ganharam o badge "Ativa no AIDE". Chamado à mão via
+  // curl/Postman pelo usuário (ver _AUDITORIAS/BRIDGE_RESEND_APPROVED_IMPLEMENTADO.txt),
+  // não pela UI. Autenticação já resolvida pelo gate `hasSecret` / `user` logo
+  // acima nesta função — igual a todas as outras rotas /api/bridge/*.
+  if (path === '/api/bridge/tasks/resend-approved' && method === 'POST') return handleBridgeResendApproved(request, env);
+
   // --- Curadoria de tarefas do Lifegame (v2.4.4) ---------------------------
   // Rotas acessadas pelo owner via browser (sessão, não secret).
   if (path === '/api/bridge/staging' && method === 'GET') return handleBridgeStagingList(request, env, user);
@@ -5232,6 +5242,56 @@ async function handleBridgeStagingApprove(request, env, user) {
     }
   }
   return json({ approved, errors });
+}
+
+// BRIDGE_RESEND_APPROVED — reexecuta, isoladamente para UMA staging row já
+// aprovada, exatamente o mesmo bloco de notificação que handleBridgeStagingApprove
+// dispara dentro do loop de aprovação em massa (linha ~5208-5229 logo acima).
+// Existe porque tarefas aprovadas ANTES do FIX 2 (notificação AIDE→LifeGame)
+// já têm imported_task_id preenchido — o que faz handleBridgeStagingApprove
+// pular essas linhas com 'já importado' e NUNCA tentar notificar de novo, nem
+// depois do deploy do fix. Ver _AUDITORIAS/BADGE_AIDE_ATIVO_INVESTIGACAO.txt,
+// Ponto 6 (P6_MAS_ATENCAO_AO_REGISTRO_JA_APROVADO).
+async function handleBridgeResendApproved(request, env) {
+  const body = (await readJson(request)) || {};
+  const stagingId = body.stagingId;
+  if (!stagingId) return json({ error: 'stagingId é obrigatório' }, 400);
+
+  const s = await env.DB.prepare('SELECT * FROM bridge_task_staging WHERE id = ?').bind(stagingId).first();
+  if (!s) return json({ error: 'staging row não encontrada', stagingId }, 400);
+  if (!s.lifegame_id) return json({ error: 'staging row sem lifegame_id — nunca foi ligada a uma tarefa do LifeGame', stagingId }, 400);
+  if (!s.imported_task_id) return json({ error: 'staging row ainda não foi aprovada (imported_task_id vazio) — use /api/bridge/staging/approve primeiro', stagingId }, 400);
+
+  const bridgeConfig = await getBridgeConfig(env).catch(() => null);
+  if (!bridgeConfig || !bridgeConfig.lifegame_url || !bridgeConfig.bridge_secret) {
+    return json({ error: 'bridge_config incompleto (lifegame_url/bridge_secret) — não é possível notificar', stagingId }, 400);
+  }
+
+  // Mesma lógica de handleBridgeStagingApprove (linha ~5212-5229): mesmo
+  // lifegameFetch, mesmo payload, mesmo logBridge — só que fora do loop de
+  // aprovação em massa, para esta linha isolada.
+  try {
+    const r = await lifegameFetch(bridgeConfig, '/api/bridge/tasks/approved', {
+      method: 'POST',
+      body: JSON.stringify({ lifegameTaskId: s.lifegame_id, aideTaskId: s.imported_task_id }),
+    });
+    await logBridge(env, {
+      direction: 'outbound', entity_type: 'task_approved', entity_id: s.lifegame_id,
+      status: r.ok ? 'success' : 'error',
+      error: r.ok ? null : `HTTP ${r.status}${r.body ? ` — ${r.body.slice(0, 200)}` : ''}`,
+    });
+    return json({
+      ok: r.ok, stagingId, lifegameTaskId: s.lifegame_id, aideTaskId: s.imported_task_id,
+      status: r.status, response: r.body ? r.body.slice(0, 500) : null,
+    }, r.ok ? 200 : 502);
+  } catch (notifyErr) {
+    const errMsg = String((notifyErr && notifyErr.message) || notifyErr).slice(0, 200);
+    await logBridge(env, {
+      direction: 'outbound', entity_type: 'task_approved', entity_id: s.lifegame_id,
+      status: 'error', error: errMsg,
+    }).catch(() => {});
+    return json({ ok: false, stagingId, lifegameTaskId: s.lifegame_id, error: errMsg }, 502);
+  }
 }
 
 async function handleBridgeStagingReject(request, env, user) {

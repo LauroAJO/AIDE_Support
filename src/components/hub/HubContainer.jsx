@@ -44,6 +44,14 @@ function fmtDate(s) {
   return Number.isNaN(t) ? null : new Date(t).toISOString().slice(0, 10);
 }
 
+// v2.26.4 (Bloco 4A) — cabeçalho do Hub compactado. Desvio do spec: o spec
+// descrevia a barra de subabas como tendo "ícones grandes (BookOpen,
+// GraduationCap, Briefcase) com texto grande embaixo" — mas o código já
+// estava compacto ali (ícones h-4 w-4 + rótulo inline, linhas 161-185). O
+// elemento realmente "grande" do cabeçalho é este dashboard de overview: 5
+// cards com contagem em text-xl e padding px-3 py-2. Reduzido para
+// text-lg/px-2.5 py-1.5 (card) e o gap vertical do container (gap-4 → gap-3)
+// para diminuir a altura total do cabeçalho, mantendo a mesma informação.
 function OverviewCard({ projectId, stat, onClick }) {
   const meta = PROJECT_META[projectId];
   const last = stat ? fmtDate(stat.last_received) : null;
@@ -51,10 +59,10 @@ function OverviewCard({ projectId, stat, onClick }) {
     <button
       type="button"
       onClick={onClick}
-      className={`flex flex-col items-start gap-0.5 rounded-lg border border-line border-l-4 ${meta.border} bg-surface px-3 py-2 text-left transition hover:bg-surface2`}
+      className={`flex flex-col items-start gap-0.5 rounded-lg border border-line border-l-4 ${meta.border} bg-surface px-2.5 py-1.5 text-left transition hover:bg-surface2`}
     >
       <span className="text-[11px] font-medium text-ink2">{meta.label}</span>
-      <span className="text-xl font-bold text-ink">{stat ? stat.count : 0}</span>
+      <span className="text-lg font-bold text-ink">{stat ? stat.count : 0}</span>
       <span className="text-[10px] text-muted">{last ? `Atualizado ${last}` : 'Sem itens'}</span>
     </button>
   );
@@ -132,7 +140,7 @@ export default function HubContainer() {
   );
 
   return (
-    <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
+    <div className="mx-auto flex h-full max-w-7xl flex-col gap-3">
       {/* Dashboard geral — sempre visível, independente da subaba ativa */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-muted">

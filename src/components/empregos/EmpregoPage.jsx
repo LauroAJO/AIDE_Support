@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Briefcase, Search, ExternalLink, X, Tag, FileText,
   Loader2, Plus, CheckCircle2, MapPin, Building2, CalendarDays, Trash2, Pencil,
-  ArrowRightLeft, Trash, Link2, ClipboardList, ChevronDown,
+  ArrowRightLeft, Trash, Link2, ClipboardList, ChevronDown, List, LayoutGrid, ArrowUp, ArrowDown,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useStore } from '../../store';
@@ -169,6 +169,12 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
   const [area, setArea] = useState('todos');
   const [order, setOrder] = useState('recent'); // recent | relevant
 
+  // v2.26.4 — alternância Cards/Lista (Bloco 4B). Ver VagasPhDPage.jsx para o
+  // mesmo padrão (implementação irmã).
+  const [view, setView] = useState('cards'); // cards | list
+  const [sortKey, setSortKey] = useState('date'); // title | institution | city | relevancia | area | date
+  const [sortDir, setSortDir] = useState('desc'); // asc | desc
+
   const [selected, setSelected] = useState(null);
   const [toast, setToast] = useState('');
   // Guarda ids já adicionados à Carreira nesta sessão (feedback visual).
@@ -316,6 +322,33 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
     return list;
   }, [items, search, city, area, order]);
 
+  // ── Ordenação da Lista (independente do `order` do modo Cards) ────────────
+  const toggleSort = (key) => {
+    if (sortKey === key) { setSortDir((d) => (d === 'asc' ? 'desc' : 'asc')); return; }
+    setSortKey(key);
+    setSortDir(key === 'title' || key === 'institution' || key === 'city' ? 'asc' : 'desc');
+  };
+  const sortedForList = useMemo(() => {
+    const val = (it) => {
+      switch (sortKey) {
+        case 'title': return (effectiveTitle(it) || '').toLowerCase();
+        case 'institution': return (it.source_name || '').toLowerCase();
+        case 'city': return cityMeta(it._city).label.toLowerCase();
+        case 'relevancia': return Number(it.relevancia) || 0;
+        case 'area': return (areaLabel(it) || '').toLowerCase();
+        case 'date':
+        default: return String(it.collected_at || it.received_at || '');
+      }
+    };
+    const list = [...filtered].sort((a, b) => {
+      const va = val(a); const vb = val(b);
+      if (va < vb) return sortDir === 'asc' ? -1 : 1;
+      if (va > vb) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return list;
+  }, [filtered, sortKey, sortDir]);
+
   // ── Adicionar à Carreira ──────────────────────────────────────────────────
   const addToCareer = async (item) => {
     if (added[item.id] === 'saving' || added[item.id] === 'done') return;
@@ -457,6 +490,28 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
           <Briefcase className="h-6 w-6 text-accent" />
           Empregos
         </h1>
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-surface p-0.5">
+          <button
+            type="button"
+            onClick={() => setView('cards')}
+            title="Ver em cards"
+            className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+              view === 'cards' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+            }`}
+          >
+            <LayoutGrid className="h-3.5 w-3.5" /> Cards
+          </button>
+          <button
+            type="button"
+            onClick={() => setView('list')}
+            title="Ver em lista"
+            className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition ${
+              view === 'list' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
+            }`}
+          >
+            <List className="h-3.5 w-3.5" /> Lista
+          </button>
+        </div>
       </div>
 
       {/* Cards de estatísticas */}
@@ -566,6 +621,17 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null 
               ? 'Nenhuma vaga recebida ainda. Assim que o Intelligence Hub enviar vagas de emprego, elas aparecerão aqui.'
               : 'Nenhuma vaga corresponde aos filtros.'}
           </div>
+        ) : view === 'list' ? (
+          <EmpregosListTable
+            items={sortedForList}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={toggleSort}
+            onOpen={(it) => setSelected(it)}
+            onAdd={(it) => addToCareer(it)}
+            added={added}
+            onLinkTask={(it) => setLinkingItem(it)}
+          />
         ) : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {filtered.map((it) => (
@@ -820,6 +886,115 @@ function EmpregoCard({
         </button>
         <AddButton state={state} onAdd={onAdd} />
       </div>
+    </div>
+  );
+}
+
+// v2.26.4 (Bloco 4B) — modo Lista: mesma abordagem de VagasPhDPage.jsx.
+// Coluna "Área" no lugar de "Status" pelo mesmo motivo (hub_items não tem
+// campo de status — ver comentário irmão em VagasPhDPage.jsx). Aqui a coluna
+// de localização usa Cidade (mais específica para vagas de emprego) em vez
+// de País.
+function SortHeader({ label, sortKey, active, dir, onSort, className = '' }) {
+  return (
+    <th
+      scope="col"
+      onClick={() => onSort(sortKey)}
+      className={`cursor-pointer select-none whitespace-nowrap px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted hover:text-ink ${className}`}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active && (dir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+      </span>
+    </th>
+  );
+}
+
+function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, added, onLinkTask }) {
+  if (items.length === 0) {
+    return (
+      <div className="rounded-xl border border-line bg-surface px-4 py-12 text-center text-sm text-muted">
+        Nenhuma vaga corresponde aos filtros.
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-auto rounded-xl border border-line bg-surface">
+      <table className="w-full border-collapse text-sm">
+        <thead className="border-b border-line bg-surface2/60">
+          <tr>
+            <SortHeader label="Título" sortKey="title" active={sortKey === 'title'} dir={sortDir} onSort={onSort} />
+            <SortHeader label="Instituição" sortKey="institution" active={sortKey === 'institution'} dir={sortDir} onSort={onSort} />
+            <SortHeader label="Cidade" sortKey="city" active={sortKey === 'city'} dir={sortDir} onSort={onSort} />
+            <SortHeader label="Relevância" sortKey="relevancia" active={sortKey === 'relevancia'} dir={sortDir} onSort={onSort} />
+            <SortHeader label="Área" sortKey="area" active={sortKey === 'area'} dir={sortDir} onSort={onSort} />
+            <SortHeader label="Data" sortKey="date" active={sortKey === 'date'} dir={sortDir} onSort={onSort} />
+            <th scope="col" className="whitespace-nowrap px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted">Ações</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((it, i) => {
+            const state = added[it.id];
+            return (
+              <tr
+                key={it.id}
+                onClick={() => onOpen(it)}
+                className={`cursor-pointer border-b border-line/60 last:border-0 hover:bg-surface2/50 ${i % 2 === 1 ? 'bg-surface2/20' : ''}`}
+              >
+                <td className="max-w-[280px] truncate px-3 py-2 font-medium text-ink" title={effectiveTitle(it)}>
+                  {effectiveTitle(it)}
+                </td>
+                <td className="max-w-[160px] truncate px-3 py-2 text-ink2" title={it.source_name || ''}>
+                  {it.source_name || '—'}
+                </td>
+                <td className="px-3 py-2"><CityBadge code={it._city} /></td>
+                <td className="px-3 py-2 text-ink2">{it.relevancia != null ? Number(it.relevancia).toFixed(1) : '—'}</td>
+                <td className="px-3 py-2"><Badge className="bg-accent/10 text-accent">{areaLabel(it)}</Badge></td>
+                <td className="whitespace-nowrap px-3 py-2 text-ink2">{fmtDate(it.collected_at || it.received_at)}</td>
+                <td className="px-3 py-2">
+                  <div className="flex items-center justify-end gap-1">
+                    {it.url && (
+                      <a
+                        href={it.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        title="Ver vaga original"
+                        className="rounded-md p-1.5 text-ink2 transition hover:bg-surface2 hover:text-accent"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onLinkTask(it); }}
+                      title="Vincular à Tarefa"
+                      className="rounded-md p-1.5 text-ink2 transition hover:bg-surface2 hover:text-accent"
+                    >
+                      <ClipboardList className="h-4 w-4" />
+                    </button>
+                    {state === 'done' ? (
+                      <span title="Adicionada à Carreira" className="rounded-md p-1.5 text-emerald-600">
+                        <CheckCircle2 className="h-4 w-4" />
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onAdd(it); }}
+                        disabled={state === 'saving'}
+                        title="Adicionar à Carreira"
+                        className="rounded-md p-1.5 text-ink2 transition hover:bg-accent/10 hover:text-accent disabled:opacity-50"
+                      >
+                        {state === 'saving' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

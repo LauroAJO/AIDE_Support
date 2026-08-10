@@ -64,7 +64,10 @@ export function trackForType(type) {
 // --- Pipeline: 5 colunas, uma por status do banco.
 // dropStatus = status gravado quando um card é solto na coluna.
 export const PIPELINE_COLUMNS = [
-  { key: 'to_organize', label: 'Identificadas a Organizar', statuses: ['to_organize'], dropStatus: 'to_organize' },
+  // v2.26.4 (Bloco 4C) — rótulo encurtado de "Identificadas a Organizar" para
+  // "Triagem" (cabeçalho de coluna do Kanban); o valor de status interno
+  // ('to_organize') NÃO muda, só o texto exibido.
+  { key: 'to_organize', label: 'Triagem', statuses: ['to_organize'], dropStatus: 'to_organize' },
   { key: 'preparing',   label: 'Preparando',                statuses: ['preparing'],   dropStatus: 'preparing' },
   { key: 'applied',     label: 'Aplicada',                  statuses: ['applied'],     dropStatus: 'applied' },
   { key: 'in_process',  label: 'Em Processo',               statuses: ['in_process'],  dropStatus: 'in_process' },
@@ -73,7 +76,7 @@ export const PIPELINE_COLUMNS = [
 
 // Todos os status do banco, para selects de status no modal/editor.
 export const OPP_STATUS_LABELS = {
-  to_organize: 'Identificadas a Organizar',
+  to_organize: 'Triagem',
   preparing: 'Preparando',
   applied: 'Aplicada',
   in_process: 'Em Processo',

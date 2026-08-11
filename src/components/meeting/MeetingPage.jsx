@@ -206,6 +206,7 @@ function AgendaCountdown() {
 export default function MeetingPage() {
   const navigate = useNavigate();
   const tasks = useStore((s) => s.tasks);
+  const user = useStore((s) => s.user);
   const userGranular = useStore((s) => s.userGranular);
   const setTasks = useStore((s) => s.setTasks);
   const setProjects = useStore((s) => s.setProjects);
@@ -436,6 +437,7 @@ export default function MeetingPage() {
   // shared "Reunião AIDE" task. We rely on the global TimerIndicator to keep
   // activeEntry + elapsedSeconds in sync.
   const inMeeting = !!(activeEntry && activeEntry.task_title === MEETING_TASK_TITLE);
+  const isOwner = user?.role === 'owner';
 
   // Initial sync — pull the server's authoritative meeting status so a page
   // refresh mid-meeting doesn't show "Iniciar".
@@ -552,6 +554,23 @@ export default function MeetingPage() {
 
   const openMeet = () => window.open(MEET_URL, '_blank', 'noopener,noreferrer');
 
+  // apiFetch() rejeita com o corpo bruto da resposta (texto). O worker sempre
+  // manda JSON `{ error, code? }`, então tentamos extrair a mensagem legível
+  // antes de cair no texto cru.
+  const errorMessage = (e, fallback) => {
+    const raw = String((e && e.message) || e || '');
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.error) return parsed.error;
+    } catch { /* não era JSON — usa o texto cru mesmo */ }
+    return raw || fallback;
+  };
+
+  // v2.25.19 — só o owner pode ABRIR a sessão (ver handleMeetingStart no
+  // worker). `openAndStart`, usado pelo botão "Entrar na Reunião" do owner,
+  // abre a aba do Meet e já inicia a sessão no mesmo clique — cobre o pedido
+  // de "iniciar o timer no momento que eu entrar na call" sem depender de
+  // detectar a entrada real no Meet (o Google não expõe esse evento à API).
   const startMeeting = async () => {
     setError('');
     setBusy(true);
@@ -576,10 +595,15 @@ export default function MeetingPage() {
       }
       await refreshStatus();
     } catch (e) {
-      setError(String((e && e.message) || e) || 'Falha ao iniciar reunião.');
+      setError(errorMessage(e, 'Falha ao iniciar reunião.'));
     } finally {
       setBusy(false);
     }
+  };
+
+  const openAndStartMeeting = () => {
+    openMeet();
+    if (isOwner && !inMeeting) startMeeting();
   };
 
   const stopMeeting = async () => {
@@ -595,7 +619,7 @@ export default function MeetingPage() {
       else showToast('Seu tempo parado. A reunião continua para os outros.');
       await refreshStatus();
     } catch (e) {
-      setError(String((e && e.message) || e) || 'Falha ao encerrar reunião.');
+      setError(errorMessage(e, 'Falha ao encerrar reunião.'));
     } finally {
       setBusy(false);
     }
@@ -631,10 +655,13 @@ export default function MeetingPage() {
         <h1 className="text-2xl font-bold text-ink sm:text-3xl">Reunião AIDE</h1>
         <p className="mt-1 text-sm text-ink2">
           Link permanente — entre a qualquer momento
+          {isOwner && canDo(userGranular, 'meeting', 'start_stop') && !inMeeting && (
+            <> · este botão já inicia sua reunião</>
+          )}
         </p>
         <button
           type="button"
-          onClick={openMeet}
+          onClick={isOwner && canDo(userGranular, 'meeting', 'start_stop') ? openAndStartMeeting : openMeet}
           className="mx-auto mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-accent px-6 py-4 text-base font-semibold text-white transition hover:bg-accent-hover sm:w-auto"
         >
           <Video className="h-5 w-5" />
@@ -826,6 +853,16 @@ export default function MeetingPage() {
             <p className="mt-1 text-[11px] text-muted">
               Cronômetro compartilhado · seu tempo individual é o que vai para pagamento
             </p>
+            {/* v2.25.19 — assistentes só podem iniciar o PRÓPRIO tempo depois que
+                o Lauro já abriu a sessão (hasSession); o backend recusa a
+                criação de sessão nova para quem não é owner (código
+                session_not_started), então travar aqui também evita o clique
+                em vão e explica o motivo na hora. */}
+            {!isOwner && !hasSession && canDo(userGranular, 'meeting', 'start_stop') && (
+              <p className="mt-2 text-[11px] font-medium text-amber-600">
+                Aguardando o Lauro iniciar a reunião…
+              </p>
+            )}
             {error && (
               <p className="mt-2 text-xs text-danger">{error}</p>
             )}
@@ -834,7 +871,7 @@ export default function MeetingPage() {
                 <button
                   type="button"
                   onClick={startMeeting}
-                  disabled={busy}
+                  disabled={busy || (!isOwner && !hasSession)}
                   className="flex flex-1 items-center justify-center gap-1.5 rounded-lg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
                   style={{ background: '#22C55E' }}
                 >

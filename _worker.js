@@ -8016,10 +8016,20 @@ async function handleMeetingStart(request, env, user) {
     || new Date(now * 1000).toISOString().slice(0, 10);
 
   // 1) Sessão compartilhada: reusa a aberta, senão cria.
+  //
+  // Só o owner pode ABRIR uma sessão nova (v2.25.19). Antes, quem clicasse
+  // primeiro — inclusive uma assistente sozinha na sala — criava a sessão e
+  // contava tempo de reunião sem o Lauro estar na call. Uma sessão já aberta
+  // continua aceitando qualquer participante normalmente (entrar/"joined").
   let session = await getActiveMeetingSession(env);
   let joined = false;
   if (session) {
     joined = true;
+  } else if (user.role !== 'owner') {
+    return json({
+      error: 'Aguarde o Lauro iniciar a reunião.',
+      code: 'session_not_started',
+    }, 409);
   } else {
     const sid = crypto.randomUUID();
     try {

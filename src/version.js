@@ -8,4 +8,4 @@
 //   MINOR — feature completa, verificada pelo utilizador
 //   MAJOR — fim de sessão de desenvolvimento
 //   ARCO  — mudança de paradigma
-export const APP_VERSION = 'II.1.0.3';
+export const APP_VERSION = 'II.1.0.4';

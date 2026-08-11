@@ -215,6 +215,11 @@ export default function NetworkingPage() {
   const [seeding, setSeeding] = useState(false);
   const [personRoles, setPersonRoles] = useState([]); // flattened roles for the graph
   const [contactOrgLinks, setContactOrgLinks] = useState([]); // vínculos pessoa↔org do Mercado (contact_org_links)
+  // v2.26.8 (Mapa — camada de projetos) — market_projects, usado só pelo Mapa
+  // Orbital pra desenhar o 3º tipo de nó (projeto) e a aresta org↔projeto.
+  // Nome "marketProjects" (não "projects") pra não colidir com o `projects`
+  // existente, que é outra coisa (Áreas/Projetos/Frentes do AIDE, via /api/projects).
+  const [marketProjects, setMarketProjects] = useState([]);
   // Etapa 6 — IDs de pessoas que possuem perfil profissional (contact_professional).
   const [proIds, setProIds] = useState(() => new Set());
   // Mapa person_id → outreach_status (do Mercado) p/ exibir no card e no detalhe.
@@ -236,7 +241,7 @@ export default function NetworkingPage() {
 
   const loadAll = async () => {
     try {
-      const [routes, st, ar, pr, fr, ts, mc, mo, ic] = await Promise.all([
+      const [routes, st, ar, pr, fr, ts, mc, mo, ic, mkp] = await Promise.all([
         apiFetch('/api/network/routes').catch(() => ({ people: [], institutions: [], connections: [], person_roles: [] })),
         apiFetch('/api/bridge/sync-status').catch(() => null),
         apiFetch('/api/areas').catch(() => []),
@@ -246,6 +251,7 @@ export default function NetworkingPage() {
         apiFetch('/api/market/contacts').catch(() => []),
         apiFetch('/api/market/organizations').catch(() => []),
         apiFetch('/api/network/interactions/counts').catch(() => ({})),
+        apiFetch('/api/market/projects').catch(() => []),
       ]);
       setPeople(routes.people || []);
       // Consolidação v2.4: "instituições" agora vêm de market_organizations (Mercado)
@@ -255,6 +261,7 @@ export default function NetworkingPage() {
       setPersonRoles(routes.person_roles || []);
       setContactOrgLinks(routes.contactOrgLinks || []);
       setInteractionData(ic || {});
+      setMarketProjects(Array.isArray(mkp) ? mkp : []);
       setProIds(new Set((mc || []).map((c) => c.person_id)));
       const statusMap = {};
       const profMap = {};
@@ -838,6 +845,7 @@ export default function NetworkingPage() {
                   connections={Array.isArray(connections) ? connections : []}
                   personRoles={Array.isArray(personRoles) ? personRoles : []}
                   contactOrgLinks={Array.isArray(contactOrgLinks) ? contactOrgLinks : []}
+                  marketProjects={Array.isArray(marketProjects) ? marketProjects : []}
                   proStatus={proStatus}
                   interactionData={interactionData}
                   onSelect={(kind, id) => { setView('list'); setSelected({ kind, id }); }}
@@ -1752,14 +1760,20 @@ function OutreachSection({ personId, item }) {
 const PAN_STEP = 40; // deslocamento por tecla de seta (unidades de viewBox)
 // Converte os raios normalizados dos sliders (0..2) em unidades de viewBox.
 const RBASE = 460;
-function NetworkMap({ people, institutions, connections, personRoles, contactOrgLinks = [], proStatus = {}, interactionData = {}, onSelect, onViewOrg }) {
+function NetworkMap({
+  people, institutions, connections, personRoles, contactOrgLinks = [], marketProjects = [],
+  proStatus = {}, interactionData = {}, onSelect, onViewOrg,
+}) {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
   const [size, setSize] = useState({ w: 900, h: 600 });
   // Seleção (destaque + popup) — substitui o antigo "focusId".
   const [selectedNode, setSelectedNode] = useState(null); // { id, type } | null
-  // Zoom & pan.
+  // Zoom & pan. v2.26.8 — zoom máximo 5x → 10x (pedido: mapas com muitos nós
+  // precisavam aproximar mais para ler rótulos).
   const [zoom, setZoom] = useState(1);
+  const ZOOM_MAX = 10;
+  const ZOOM_MIN = 0.5;
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
@@ -1767,12 +1781,32 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
   const draggedRef = useRef(false);
   // Ajustes de layout (painel "⚙ Ajustes"): raios dos anéis ajustáveis ao vivo.
   const [showSettings, setShowSettings] = useState(false);
+  // v2.26.8 — faixa dos sliders ampliada (0.3–2.0 → 0.3–5.0 e 0.1–1.5 → 0.1–4.0)
+  // pra caber redes com muita gente sem os nós ficarem espremidos.
   const [outerRadius, setOuterRadius] = useState(0.55); // anel externo (pessoas)
   const [innerRadius, setInnerRadius] = useState(0.30);  // anel interno (organizações)
+  // v2.26.8 — anel dos projetos (market_projects), entre o de organizações e
+  // o de pessoas por padrão. Novo — não existia slider de projeto antes.
+  const [projectRadius, setProjectRadius] = useState(0.42);
+  const DEFAULT_RADII = { outer: 0.55, inner: 0.30, project: 0.42 };
   // v2.25.9 — modo de cor, filtro por tag e filtro por organização.
   const [colorMode, setColorMode] = useState('temperature'); // 'temperature' | 'sector'
   const [tagFilter, setTagFilter] = useState('');
   const [orgFilter, setOrgFilter] = useState('');
+
+  // v2.26.8 (Change 2/3 — camadas visíveis) — cada elemento visual (nó ou
+  // aresta) do mapa pode ser ligado/desligado independentemente, a pedido
+  // explícito ("todos os elementos visuais possam ser ligados ou
+  // desligados"). Nós: pessoas, organizações, projetos. Arestas: pessoa↔
+  // pessoa (sólida, colorida por força), pessoa↔organização (tracejada),
+  // organização↔projeto (pontilhada roxa). Projetos e a aresta org↔projeto
+  // vêm desligados por padrão (podem ficar densos com muitos projetos).
+  const [showPeople, setShowPeople] = useState(true);
+  const [showOrgs, setShowOrgs] = useState(true);
+  const [showProjects, setShowProjects] = useState(false);
+  const [showPersonConnections, setShowPersonConnections] = useState(true);
+  const [showOrgLinks, setShowOrgLinks] = useState(true);
+  const [showProjectLinks, setShowProjectLinks] = useState(false);
 
   const allTags = useMemo(() => {
     const s = new Set();
@@ -1834,7 +1868,10 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
   // viewBox cresce com o raio externo para nunca cortar os nós quando o usuário
   // espalha o grafo (Problema 3).
   const lauroPos = { x: 0, y: 0 };
-  const vbSize = Math.max(600, outerRadius * 1400);
+  // v2.26.8 (Change 1) — multiplicador 1400 → 2000: com o novo teto do
+  // slider (5.0), o viewBox precisa crescer mais rápido pra não cortar os
+  // nós do anel externo quando o usuário espalha bastante o grafo.
+  const vbSize = Math.max(600, outerRadius * 2000);
   const vbMin = -vbSize / 2;
   // Fator viewBox→pixels (preserveAspectRatio "xMidYMid meet" ⇒ escala uniforme
   // + letterbox). Usado para posicionar o popup e p/ o pan seguir o cursor 1:1.
@@ -1885,12 +1922,41 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
     });
   }, [institutions, innerRadius]);
 
+  // v2.26.8 (Change 3, redesenhado — ver justificativa na entrega) —
+  // projetos (market_projects) como um 3º tipo de nó, num anel próprio.
+  // Não existe aresta pessoa↔projeto: o modelo é pessoa↔organização
+  // (já existente) + organização↔projeto (nova aqui). A ligação de uma
+  // pessoa a um projeto é sempre INDIRETA, via a(s) organização(ões) a que
+  // ela está ligada — se ela está ligada a 2 organizações, herda os
+  // projetos das duas, sem precisar de uma aresta pessoa→projeto explícita.
+  const projectNodes = useMemo(() => {
+    const list = Array.isArray(marketProjects) ? marketProjects.filter((p) => p && p.id) : [];
+    const r = projectRadius * RBASE;
+    const denom = Math.max(1, list.length);
+    return list.map((p, i) => {
+      const angle = (i / denom) * Math.PI * 2 + Math.PI / 8;
+      const words = String(p.name || '').split(' ').filter(Boolean);
+      const half = Math.ceil(words.length / 2);
+      const line1 = words.slice(0, half).join(' ');
+      const line2 = words.slice(half).join(' ');
+      const longest = Math.max(line1.length, line2.length, 1);
+      const width = Math.max(46, Math.min(140, longest * 6 + 10));
+      return {
+        ...p, _kind: 'project',
+        x: r * Math.cos(angle),
+        y: r * Math.sin(angle),
+        width, height: 26, line1, line2,
+      };
+    });
+  }, [marketProjects, projectRadius]);
+
   const nodeIndex = useMemo(() => {
     const m = {};
     personNodes.forEach((n) => { if (n && n.id) m[n.id] = n; });
+    projectNodes.forEach((n) => { if (n && n.id) m[n.id] = n; });
     institutionNodes.forEach((n) => { if (n && n.id) m[n.id] = n; });
     return m;
-  }, [personNodes, institutionNodes]);
+  }, [personNodes, institutionNodes, projectNodes]);
 
   // Fallback por NOME da organização. Necessário porque a migração 0030
   // (consolidação network_institutions → market_organizations) zerou o
@@ -1943,7 +2009,7 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
     if (!el) return undefined;
     const onWheel = (e) => {
       e.preventDefault();
-      setZoom((z) => Math.min(5, Math.max(0.5, z - e.deltaY * 0.001)));
+      setZoom((z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z - e.deltaY * 0.001)));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -1956,8 +2022,8 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       switch (e.key) {
         case 'Escape': setSelectedNode(null); break;
-        case '+': case '=': e.preventDefault(); setZoom((z) => Math.min(5, z + 0.2)); break;
-        case '-': case '_': e.preventDefault(); setZoom((z) => Math.max(0.5, z - 0.2)); break;
+        case '+': case '=': e.preventDefault(); setZoom((z) => Math.min(ZOOM_MAX, z + 0.2)); break;
+        case '-': case '_': e.preventDefault(); setZoom((z) => Math.max(ZOOM_MIN, z - 0.2)); break;
         case 'ArrowUp': e.preventDefault(); setPan((p) => ({ ...p, y: p.y + PAN_STEP })); break;
         case 'ArrowDown': e.preventDefault(); setPan((p) => ({ ...p, y: p.y - PAN_STEP })); break;
         case 'ArrowLeft': e.preventDefault(); setPan((p) => ({ ...p, x: p.x + PAN_STEP })); break;
@@ -1999,22 +2065,26 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
     setSelectedNode(null);
   };
   const pickNode = (type, id) => { draggedRef.current = false; setSelectedNode({ id, type }); };
-  const zoomIn = () => setZoom((z) => Math.min(5, z + 0.2));
-  const zoomOut = () => setZoom((z) => Math.max(0.5, z - 0.2));
+  const zoomIn = () => setZoom((z) => Math.min(ZOOM_MAX, z + 0.2));
+  const zoomOut = () => setZoom((z) => Math.max(ZOOM_MIN, z - 0.2));
   const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
 
-  // "Zoom to fit": enquadra todos os nós (pessoas, orgs e o Lauro na origem)
-  // dentro do viewBox, com margem. Tudo em unidades de viewBox; o <g> aplica
-  // pan+zoom, então pan = -zoom·centro do bbox leva o centro à origem.
+  // "Zoom to fit": enquadra todos os nós VISÍVEIS (pessoas, orgs, projetos —
+  // conforme as camadas ligadas — e o Lauro na origem) dentro do viewBox, com
+  // margem. Tudo em unidades de viewBox; o <g> aplica pan+zoom, então
+  // pan = -zoom·centro do bbox leva o centro à origem.
   const zoomToFit = () => {
-    if (personNodes.length === 0 && institutionNodes.length === 0) { resetView(); return; }
+    const visiblePeople = showPeople ? personNodes : [];
+    const visibleInst = showOrgs ? institutionNodes : [];
+    const visibleProjects = showProjects ? projectNodes : [];
+    if (visiblePeople.length === 0 && visibleInst.length === 0 && visibleProjects.length === 0) { resetView(); return; }
     let minX = -30, minY = -30, maxX = 30, maxY = 30; // Lauro (r=30) na origem
-    for (const n of personNodes) {
+    for (const n of visiblePeople) {
       const rr = (n.radius || 10) + 26; // inclui o rótulo (2 linhas) abaixo do nó
       minX = Math.min(minX, n.x - rr); maxX = Math.max(maxX, n.x + rr);
       minY = Math.min(minY, n.y - rr); maxY = Math.max(maxY, n.y + rr);
     }
-    for (const n of institutionNodes) {
+    for (const n of [...visibleInst, ...visibleProjects]) {
       const hw = (n.width || 40) / 2, hh = (n.height || 32) / 2;
       minX = Math.min(minX, n.x - hw); maxX = Math.max(maxX, n.x + hw);
       minY = Math.min(minY, n.y - hh); maxY = Math.max(maxY, n.y + hh);
@@ -2022,7 +2092,7 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
     const bw = Math.max(1, maxX - minX);
     const bh = Math.max(1, maxY - minY);
     const margin = 60;
-    const z = Math.max(0.5, Math.min(5, Math.min((vbSize - 2 * margin) / bw, (vbSize - 2 * margin) / bh)));
+    const z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.min((vbSize - 2 * margin) / bw, (vbSize - 2 * margin) / bh)));
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;
     setZoom(z);
@@ -2056,12 +2126,15 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
         {/* Person ↔ Institution dashed links — DUAS fontes, deduplicadas (v2.5.5):
             1) person_roles (Networking) — org por id ou, se NULL pós-migração
                0030, resolvida por NOME (instByName);
-            2) contact_org_links (Mercado) — vínculo direto pessoa↔organização. */}
-        {(() => {
+            2) contact_org_links (Mercado) — vínculo direto pessoa↔organização.
+            v2.26.8 — camada "Vínculos institucionais" (showOrgLinks). */}
+        {showOrgLinks && (() => {
           const drawn = new Set();
           const out = [];
           const drawOrgLink = (fromId, toId, label) => {
             if (!fromId || !toId) return;
+            // fromId é sempre pessoa, toId é sempre organização nesta função.
+            if (!showPeople || !showOrgs) return;
             const key = `${fromId}-${toId}`;
             if (drawn.has(key)) return;
             drawn.add(key);
@@ -2096,8 +2169,9 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           return out;
         })()}
 
-        {/* P2P connections — strength-coded color and width, curved if pair has >1 */}
-        {connWithCurve.map((c) => {
+        {/* P2P connections — strength-coded color and width, curved if pair has >1.
+            v2.26.8 — camada "Conexões pessoa↔pessoa" (showPersonConnections). */}
+        {showPersonConnections && showPeople && connWithCurve.map((c) => {
           const a = nodeIndex[c.person_a_id];
           const b = nodeIndex[c.person_b_id];
           if (!a || !b) return null;
@@ -2132,8 +2206,32 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           );
         })}
 
+        {/* Organização ↔ Projeto — pontilhada roxa (v2.26.8, Change 3 redesenhado).
+            Não existe aresta pessoa↔projeto: a pessoa "herda" o projeto através
+            da(s) organização(ões) a que está ligada (ver comentário em
+            projectNodes acima). Camada "Conexões por projeto" — desligada por
+            padrão (pode ficar densa com muitos projetos). */}
+        {showProjectLinks && showOrgs && showProjects && projectNodes.map((p) => {
+          const a = nodeIndex[p.organization_id];
+          const b = nodeIndex[p.id];
+          if (!a || !b) return null;
+          if (!Number.isFinite(a.x) || !Number.isFinite(b.x)) return null;
+          const hi = isSelEdge(p.organization_id, p.id);
+          const dim = isDimmed(p.organization_id) && isDimmed(p.id);
+          return (
+            <line
+              key={`projlink-${p.id}`}
+              x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+              stroke="#8B5CF6" strokeWidth={hi ? 2 : 1} strokeDasharray="2 3"
+              opacity={dim ? 0.12 : (hi ? 1 : 0.6)}
+            >
+              <title>{`Projeto: ${p.name}`}</title>
+            </line>
+          );
+        })}
+
         {/* Faint guides from Lauro to every person */}
-        {personNodes.map((n) => (
+        {showPeople && personNodes.map((n) => (
           <line
             key={`lauro-${n.id}`} x1={lauroPos.x} y1={lauroPos.y} x2={n.x} y2={n.y}
             stroke="#F3F0EB" strokeWidth="1" strokeDasharray="2 5"
@@ -2148,8 +2246,9 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
         </g>
 
         {/* Organization rectangles — cor por tipo. Clique apenas foca/desfoca
-            (organizações moram no Mercado; não há detalhe de org no Networking). */}
-        {institutionNodes.map((n) => {
+            (organizações moram no Mercado; não há detalhe de org no Networking).
+            v2.26.8 — camada "Organizações" (showOrgs). */}
+        {showOrgs && institutionNodes.map((n) => {
           const { fill, stroke } = orgTypeColor(n.type);
           const dim = isDimmed(n.id);
           const sel = selId === n.id;
@@ -2167,7 +2266,7 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
               >
                 <title>{isBrazilian ? `${n.name} — 🇧🇷 Brasil` : n.name}</title>
               </rect>
-              <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize="9" fontWeight="600" opacity={dim ? 0.5 : 1} style={{ pointerEvents: 'none' }}>
+              <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize={Math.max(7, 10 / zoom)} fontWeight="600" opacity={dim ? 0.5 : 1} style={{ pointerEvents: 'none' }}>
                 <tspan x={n.x} dy={n.line2 ? -2 : 3}>{n.line1}</tspan>
                 {n.line2 && <tspan x={n.x} dy={12}>{n.line2}</tspan>}
                 <title>{n.name}</title>
@@ -2176,8 +2275,9 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           );
         })}
 
-        {/* Person circles — nome COMPLETO em 2 linhas abaixo do nó (v2.5.5) */}
-        {personNodes.map((n) => {
+        {/* Person circles — nome COMPLETO em 2 linhas abaixo do nó (v2.5.5).
+            v2.26.8 — camada "Pessoas" (showPeople). */}
+        {showPeople && personNodes.map((n) => {
           const stroke = personStrengthColor(n.connection_strength || 0);
           const filterDim = isTagFiltered(n) || isOrgFiltered(n.id);
           const selDim = isDimmed(n.id);
@@ -2215,7 +2315,7 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
               ) : (
                 <circle cx={n.x} cy={n.y} r={n.radius} {...shapeProps} />
               )}
-              <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize="9" opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
+              <text y={n.y} textAnchor="middle" fill="#1A1814" fontSize={Math.max(7, 10 / zoom)} opacity={labelOpacity} style={{ pointerEvents: 'none' }}>
                 <tspan x={n.x} dy={n.radius + 12}>{line1}</tspan>
                 {line2 && <tspan x={n.x} dy={13}>{line2}</tspan>}
               </text>
@@ -2230,7 +2330,34 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           );
         })}
 
-          {personNodes.length === 0 && institutionNodes.length === 0 && (
+        {/* Project diamonds — 3º tipo de nó (v2.26.8, Change 3 redesenhado).
+            Roxo pra combinar com a aresta org↔projeto. Clique navega pra
+            organização no Mercado (não existe página própria de projeto). */}
+        {showProjects && projectNodes.map((n) => {
+          const dim = isDimmed(n.id);
+          const sel = selId === n.id;
+          return (
+            <g key={`proj-${n.id}`} style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); pickNode('project', n.id); }}>
+              <rect
+                x={n.x - n.width / 2} y={n.y - n.height / 2} width={n.width} height={n.height}
+                rx={13} fill="#F3E8FF"
+                stroke={sel ? '#6366f1' : '#8B5CF6'} strokeWidth={sel ? 3 : 1.5}
+                strokeDasharray="2 3"
+                opacity={dim ? 0.3 : 1}
+                style={sel ? { filter: 'drop-shadow(0 0 6px #6366f1)' } : undefined}
+              >
+                <title>{n.name}</title>
+              </rect>
+              <text y={n.y} textAnchor="middle" fill="#5B21B6" fontSize={Math.max(7, 10 / zoom)} fontWeight="600" opacity={dim ? 0.5 : 1} style={{ pointerEvents: 'none' }}>
+                <tspan x={n.x} dy={n.line2 ? -2 : 3}>{n.line1}</tspan>
+                {n.line2 && <tspan x={n.x} dy={12}>{n.line2}</tspan>}
+                <title>{n.name}</title>
+              </text>
+            </g>
+          );
+        })}
+
+          {personNodes.length === 0 && institutionNodes.length === 0 && projectNodes.length === 0 && (
             <text x={0} y={80} textAnchor="middle" fill="#9E9890" fontSize="12">
               Adicione pessoas e instituições para visualizar o mapa.
             </text>
@@ -2238,23 +2365,9 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
         </g>
       </svg>
 
-      {/* Controles de cor + filtros (canto superior esquerdo, v2.25.9) */}
+      {/* Controles de filtro (canto superior esquerdo, v2.25.9). "Colorir" foi
+          movido pro painel de Ajustes no Change 5 (v2.26.8). */}
       <div className="absolute left-3 top-3 flex flex-col items-start gap-2">
-        <div className="flex items-center gap-1 rounded-lg border border-line bg-white p-1 shadow-soft">
-          <span className="px-1.5 text-[10px] font-medium text-muted">Colorir:</span>
-          <button
-            type="button" onClick={() => setColorMode('temperature')}
-            className={`rounded-md px-2 py-1 text-[11px] font-medium ${colorMode === 'temperature' ? 'bg-indigo-600 text-white' : 'text-ink2 hover:bg-surface2'}`}
-          >
-            Temperatura
-          </button>
-          <button
-            type="button" onClick={() => setColorMode('sector')}
-            className={`rounded-md px-2 py-1 text-[11px] font-medium ${colorMode === 'sector' ? 'bg-indigo-600 text-white' : 'text-ink2 hover:bg-surface2'}`}
-          >
-            Peso Setorial
-          </button>
-        </div>
         <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-line bg-white p-1.5 shadow-soft">
           <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} className="rounded-md border border-line bg-white px-1.5 py-1 text-[11px] text-ink2">
             <option value="">Tag: Todas</option>
@@ -2310,37 +2423,99 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
         </div>
 
         {showSettings && (
-          <div className="w-60 rounded-lg border border-line bg-white p-3 text-[11px] shadow-soft">
-            <p className="mb-2 text-[11px] font-semibold uppercase text-ink">Ajustes de layout</p>
+          <div className="w-64 max-h-[80vh] overflow-y-auto rounded-lg border border-line bg-white p-3 text-[11px] shadow-soft">
+            {/* v2.26.8 (Change 5) — painel reorganizado em 3 seções: Layout,
+                Camadas visíveis (Change 2/3 — todo elemento visual liga/desliga
+                independentemente) e Colorir por (movido pra cá). */}
+            <p className="mb-2 text-[11px] font-semibold uppercase text-ink">⚙ Ajustes de layout</p>
             <label className="block">
               <span className="flex items-center justify-between text-ink2">
-                <span>Raio do anel externo</span>
+                <span>Raio externo (pessoas)</span>
                 <span className="tabular-nums text-muted">{outerRadius.toFixed(2)}</span>
               </span>
               <input
-                type="range" min="0.3" max="2.0" step="0.05" value={outerRadius}
+                type="range" min="0.3" max="5.0" step="0.05" value={outerRadius}
                 onChange={(e) => setOuterRadius(Number(e.target.value))}
                 className="mt-1 w-full accent-[#6366f1]"
               />
             </label>
             <label className="mt-2 block">
               <span className="flex items-center justify-between text-ink2">
-                <span>Raio do anel interno</span>
+                <span>Raio interno (organizações)</span>
                 <span className="tabular-nums text-muted">{innerRadius.toFixed(2)}</span>
               </span>
               <input
-                type="range" min="0.1" max="1.5" step="0.05" value={innerRadius}
+                type="range" min="0.1" max="4.0" step="0.05" value={innerRadius}
                 onChange={(e) => setInnerRadius(Number(e.target.value))}
                 className="mt-1 w-full accent-[#6366f1]"
               />
             </label>
+            <label className="mt-2 block">
+              <span className="flex items-center justify-between text-ink2">
+                <span>Raio dos projetos</span>
+                <span className="tabular-nums text-muted">{projectRadius.toFixed(2)}</span>
+              </span>
+              <input
+                type="range" min="0.05" max="4.5" step="0.05" value={projectRadius}
+                onChange={(e) => setProjectRadius(Number(e.target.value))}
+                className="mt-1 w-full accent-[#8B5CF6]"
+              />
+            </label>
             <button
               type="button"
-              onClick={() => { setOuterRadius(0.55); setInnerRadius(0.30); }}
+              onClick={() => { setOuterRadius(DEFAULT_RADII.outer); setInnerRadius(DEFAULT_RADII.inner); setProjectRadius(DEFAULT_RADII.project); }}
               className="mt-2 text-[10px] text-accent hover:underline"
             >
               Restaurar padrão
             </button>
+
+            <p className="mb-2 mt-4 text-[11px] font-semibold uppercase text-ink">👁 Camadas visíveis</p>
+            <div className="space-y-1.5">
+              <label className="flex items-center gap-1.5 text-ink2">
+                <input type="checkbox" checked={showPeople} onChange={(e) => setShowPeople(e.target.checked)} className="accent-[#6366f1]" />
+                Pessoas
+              </label>
+              <label className="flex items-center gap-1.5 text-ink2">
+                <input type="checkbox" checked={showOrgs} onChange={(e) => setShowOrgs(e.target.checked)} className="accent-[#6366f1]" />
+                Organizações
+              </label>
+              <label className="flex items-center gap-1.5 text-ink2">
+                <input type="checkbox" checked={showProjects} onChange={(e) => setShowProjects(e.target.checked)} className="accent-[#8B5CF6]" />
+                Projetos
+              </label>
+              <div className="my-1 border-t border-line" />
+              <label className="flex items-center gap-1.5 text-ink2">
+                <input type="checkbox" checked={showPersonConnections} onChange={(e) => setShowPersonConnections(e.target.checked)} className="accent-[#6366f1]" />
+                Conexões pessoa↔pessoa
+              </label>
+              <label className="flex items-center gap-1.5 text-ink2">
+                <input type="checkbox" checked={showOrgLinks} onChange={(e) => setShowOrgLinks(e.target.checked)} className="accent-[#9CA3AF]" />
+                Vínculos institucionais (pessoa↔org)
+              </label>
+              <label className="flex items-center gap-1.5 text-ink2">
+                <input type="checkbox" checked={showProjectLinks} onChange={(e) => setShowProjectLinks(e.target.checked)} className="accent-[#8B5CF6]" />
+                Conexões por projeto (org↔projeto)
+              </label>
+              <p className="pl-5 text-[10px] text-muted">
+                Mostra organizações ligadas a projetos. Pessoas herdam o projeto através da(s) organização(ões) a que estão ligadas.
+              </p>
+            </div>
+
+            <p className="mb-2 mt-4 text-[11px] font-semibold uppercase text-ink">🎨 Colorir por</p>
+            <div className="flex items-center gap-1 rounded-lg border border-line bg-surface p-1">
+              <button
+                type="button" onClick={() => setColorMode('temperature')}
+                className={`flex-1 rounded-md px-2 py-1 text-[11px] font-medium ${colorMode === 'temperature' ? 'bg-indigo-600 text-white' : 'text-ink2 hover:bg-surface2'}`}
+              >
+                Temperatura
+              </button>
+              <button
+                type="button" onClick={() => setColorMode('sector')}
+                className={`flex-1 rounded-md px-2 py-1 text-[11px] font-medium ${colorMode === 'sector' ? 'bg-indigo-600 text-white' : 'text-ink2 hover:bg-surface2'}`}
+              >
+                Peso Setorial
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -2384,6 +2559,24 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
                   className="rounded-md border border-line px-2 py-1 text-[11px] text-ink2 hover:bg-surface2"
                 >
                   Fechar
+                </button>
+              </div>
+            </>
+          ) : selectedNode.type === 'project' ? (
+            // v2.26.8 — popup do nó de projeto (Change 3 redesenhado). Não há
+            // página própria de projeto; o link leva à organização coordenadora.
+            <>
+              <p className="pr-4 text-sm font-semibold text-ink">{selNode.name}</p>
+              <p className="mt-0.5 text-[11px] text-ink2">{selNode.organization_name || 'Projeto'}</p>
+              {selNode.acronym && <p className="text-[11px] text-muted">{selNode.acronym}</p>}
+              <div className="mt-2">
+                <button
+                  type="button"
+                  onClick={() => selNode.organization_id && onViewOrg && onViewOrg(selNode.organization_id)}
+                  disabled={!selNode.organization_id}
+                  className="w-full rounded-md bg-[#8B5CF6] px-2 py-1 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+                >
+                  Ver organização no Mercado →
                 </button>
               </div>
             </>
@@ -2437,6 +2630,9 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           </div>
           <div className="flex items-center gap-2"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#6366F1" strokeWidth="2" /></svg> Conexão direta</div>
           <div className="flex items-center gap-2"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#9CA3AF" strokeWidth="1.5" strokeDasharray="3 3" /></svg> Vínculo institucional</div>
+          {/* v2.26.8 (Change 3 redesenhado) — projeto como nó próprio + aresta org↔projeto */}
+          <div className="flex items-center gap-2"><span className="h-3 w-4 rounded-full bg-[#F3E8FF] border border-dashed border-[#8B5CF6]" /> Projeto</div>
+          <div className="flex items-center gap-2"><svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#8B5CF6" strokeWidth="1" strokeDasharray="2 3" /></svg> Conexão por projeto (org↔projeto)</div>
         </div>
         {/* Tipos de organização (cor do retângulo) */}
         <div className="mt-2 flex flex-wrap gap-x-2 gap-y-0.5">
@@ -2452,9 +2648,6 @@ function NetworkMap({ people, institutions, connections, personRoles, contactOrg
           <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-[#6B7280]" />Email</span>
           <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-[#22C55E]" />Interação registrada</span>
         </div>
-        {/* Projetos (market_projects) não aparecem no mapa: ligam-se só a orgs
-            via organization_id, sem relação direta com pessoas. Enhancement
-            futuro exigiria novas tabelas de relacionamento. */}
         {selectedNode && (
           <button onClick={() => setSelectedNode(null)} className="mt-2 text-[10px] text-accent hover:underline">
             Limpar seleção

@@ -14,6 +14,8 @@ import {
   ChevronRight,
   ArrowUp,
   ArrowDown,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -51,6 +53,11 @@ export default function DrivePage() {
   const [searchInput, setSearchInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [scopeError, setScopeError] = useState(false);
+  // v2.26.9 (fix — curadoria do "Meu Drive"). ANTES: a página espelhava
+  // 100% da raiz do Drive sem nenhuma forma de ocultar itens, ficando
+  // visualmente poluída. `showHidden` alterna globalmente (persiste ao
+  // navegar entre pastas); por padrão itens ocultos somem da listagem.
+  const [showHidden, setShowHidden] = useState(false);
 
   const loadFiles = async (parent, search) => {
     setLoading(true);
@@ -122,6 +129,23 @@ export default function DrivePage() {
     loadFavorites();
   };
 
+  // v2.26.9 (fix — curadoria do "Meu Drive"). Reversível — nada é excluído,
+  // é só um filtro de visualização por usuário (mesmo padrão de favoritos).
+  const toggleHidden = async (file, hide) => {
+    await apiFetch(`/api/drive/hidden/${file.googleFileId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: file.name,
+        mimeType: file.mimeType,
+        webViewLink: file.webViewLink,
+        iconLink: file.iconLink,
+        modifiedTime: file.modifiedTime,
+        is_hidden: hide,
+      }),
+    });
+    setDriveFiles(driveFiles.map((f) => (f.googleFileId === file.googleFileId ? { ...f, isHidden: hide } : f)));
+  };
+
   const moveFavorite = async (idx, dir) => {
     const j = idx + dir;
     if (j < 0 || j >= driveFavorites.length) return;
@@ -171,6 +195,18 @@ export default function DrivePage() {
             title="Atualizar"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+          {/* v2.26.9 (fix — curadoria do "Meu Drive") — alterna globalmente,
+              vale pra qualquer pasta que o usuário navegar depois. */}
+          <button
+            onClick={() => setShowHidden((v) => !v)}
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+              showHidden ? 'border-accent bg-accent/10 text-accent' : 'border-line text-ink2 hover:bg-surface2'
+            }`}
+            title={showHidden ? 'Ocultar itens ocultos novamente' : 'Mostrar itens ocultos'}
+          >
+            {showHidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+            {showHidden ? 'Ocultos visíveis' : 'Mostrar ocultos'}
           </button>
         </div>
       </div>
@@ -242,25 +278,46 @@ export default function DrivePage() {
           ) : driveFiles.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted">Nenhum item.</p>
           ) : (() => {
+            // v2.26.9 (fix — curadoria do "Meu Drive"). hiddenInFolder conta
+            // sobre TODOS os itens da pasta atual (antes do filtro), pra o
+            // aviso continuar certo mesmo quando showHidden já está ligado.
+            const hiddenInFolder = driveFiles.filter((f) => f.isHidden).length;
+            const visible = showHidden ? driveFiles : driveFiles.filter((f) => !f.isHidden);
+            if (visible.length === 0) {
+              return (
+                <div className="py-8 text-center text-sm text-muted">
+                  <p>Todos os itens desta pasta estão ocultos.</p>
+                  <button onClick={() => setShowHidden(true)} className="mt-1 text-accent hover:underline">
+                    mostrar ({hiddenInFolder})
+                  </button>
+                </div>
+              );
+            }
             const atRoot = breadcrumb.length === 1 && !driveSearch;
-            const own = atRoot ? driveFiles.filter((f) => !f.shared) : driveFiles;
-            const shared = atRoot ? driveFiles.filter((f) => f.shared) : [];
+            const own = atRoot ? visible.filter((f) => !f.shared) : visible;
+            const shared = atRoot ? visible.filter((f) => f.shared) : [];
             const renderGroup = (list) =>
               viewMode === 'grid' ? (
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
                   {list.map((f) => (
-                    <FileCard key={f.googleFileId} file={f} onOpen={enterFolder} onToggleFav={toggleFavorite} />
+                    <FileCard key={f.googleFileId} file={f} onOpen={enterFolder} onToggleFav={toggleFavorite} onToggleHidden={toggleHidden} />
                   ))}
                 </div>
               ) : (
                 <div className="divide-y divide-line rounded-xl border border-line bg-surface">
                   {list.map((f) => (
-                    <FileRow key={f.googleFileId} file={f} onOpen={enterFolder} onToggleFav={toggleFavorite} />
+                    <FileRow key={f.googleFileId} file={f} onOpen={enterFolder} onToggleFav={toggleFavorite} onToggleHidden={toggleHidden} />
                   ))}
                 </div>
               );
             return (
               <div className="space-y-4">
+                {!showHidden && hiddenInFolder > 0 && (
+                  <p className="text-[11px] text-muted">
+                    {hiddenInFolder} {hiddenInFolder === 1 ? 'item oculto' : 'itens ocultos'} nesta pasta —{' '}
+                    <button onClick={() => setShowHidden(true)} className="text-accent hover:underline">mostrar</button>
+                  </p>
+                )}
                 {atRoot && (
                   <h3 className="text-xs font-bold uppercase tracking-wide text-ink2">Meu Drive</h3>
                 )}
@@ -284,24 +341,30 @@ export default function DrivePage() {
   );
 }
 
-function FileCard({ file, onOpen, onToggleFav }) {
+function FileCard({ file, onOpen, onToggleFav, onToggleHidden }) {
   const Icon = iconFor(file.mimeType);
   const isFolder = file.mimeType === FOLDER_MIME;
   return (
-    <div className="flex flex-col rounded-xl border border-line bg-surface p-3">
+    <div className={`flex flex-col rounded-xl border border-line bg-surface p-3 ${file.isHidden ? 'opacity-50' : ''}`}>
       <div className="mb-2 flex items-start justify-between">
         {file.iconLink ? (
           <img src={file.iconLink} alt="" className="h-6 w-6" />
         ) : (
           <Icon className="h-6 w-6 text-ink2" />
         )}
-        <button onClick={() => onToggleFav(file, !file.isFavorite)} title="Favoritar">
-          <Star
-            className="h-4 w-4"
-            fill={file.isFavorite ? '#F59E0B' : 'none'}
-            style={{ color: file.isFavorite ? '#F59E0B' : '#9E9890' }}
-          />
-        </button>
+        <div className="flex items-center gap-1">
+          <button onClick={() => onToggleFav(file, !file.isFavorite)} title="Favoritar">
+            <Star
+              className="h-4 w-4"
+              fill={file.isFavorite ? '#F59E0B' : 'none'}
+              style={{ color: file.isFavorite ? '#F59E0B' : '#9E9890' }}
+            />
+          </button>
+          {/* v2.26.9 (fix — curadoria do "Meu Drive") */}
+          <button onClick={() => onToggleHidden(file, !file.isHidden)} title={file.isHidden ? 'Mostrar item' : 'Ocultar item'}>
+            {file.isHidden ? <EyeOff className="h-4 w-4 text-accent" /> : <Eye className="h-4 w-4 text-[#9E9890]" />}
+          </button>
+        </div>
       </div>
       <button
         onClick={() => (isFolder ? onOpen(file) : file.webViewLink && window.open(file.webViewLink, '_blank'))}
@@ -328,11 +391,11 @@ function FileCard({ file, onOpen, onToggleFav }) {
   );
 }
 
-function FileRow({ file, onOpen, onToggleFav }) {
+function FileRow({ file, onOpen, onToggleFav, onToggleHidden }) {
   const Icon = iconFor(file.mimeType);
   const isFolder = file.mimeType === FOLDER_MIME;
   return (
-    <div className="flex items-center gap-2 px-3 py-2">
+    <div className={`flex items-center gap-2 px-3 py-2 ${file.isHidden ? 'opacity-50' : ''}`}>
       {file.iconLink ? <img src={file.iconLink} alt="" className="h-5 w-5" /> : <Icon className="h-5 w-5 text-ink2" />}
       <button
         onClick={() => (isFolder ? onOpen(file) : file.webViewLink && window.open(file.webViewLink, '_blank'))}
@@ -352,6 +415,10 @@ function FileRow({ file, onOpen, onToggleFav }) {
           fill={file.isFavorite ? '#F59E0B' : 'none'}
           style={{ color: file.isFavorite ? '#F59E0B' : '#9E9890' }}
         />
+      </button>
+      {/* v2.26.9 (fix — curadoria do "Meu Drive") */}
+      <button onClick={() => onToggleHidden(file, !file.isHidden)} className="shrink-0" title={file.isHidden ? 'Mostrar item' : 'Ocultar item'}>
+        {file.isHidden ? <EyeOff className="h-4 w-4 text-accent" /> : <Eye className="h-4 w-4 text-[#9E9890]" />}
       </button>
       {!isFolder && file.webViewLink && (
         <button onClick={() => window.open(file.webViewLink, '_blank')} className="shrink-0 text-ink2 hover:text-accent" title="Abrir">

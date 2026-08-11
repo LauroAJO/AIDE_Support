@@ -217,6 +217,9 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/drive/favorites') return handleDriveFavorites(request, env, user);
   if (path.startsWith('/api/drive/favorites/')) return handleDriveFavoriteToggle(request, env, user, path.split('/')[4]);
   if (path === '/api/drive/sort') return handleDriveSort(request, env, user);
+  // v2.26.9 (fix — curadoria do "Meu Drive") — espelha o padrão de favorites acima.
+  if (path === '/api/drive/hidden') return handleDriveHidden(request, env, user);
+  if (path.startsWith('/api/drive/hidden/')) return handleDriveHiddenToggle(request, env, user, path.split('/')[4]);
 
   // Notes
   if (path === '/api/notes') return handleNotes(request, env, user);
@@ -3715,7 +3718,9 @@ function shapeDriveRow(r) {
     modifiedTime: r.modified_time || null,
     size: r.size || null,
     isFavorite: !!r.is_favorite,
-    sortOrder: r.sort_order || 0
+    sortOrder: r.sort_order || 0,
+    // v2.26.9 (fix — curadoria do "Meu Drive")
+    isHidden: !!r.is_hidden,
   };
 }
 
@@ -3783,6 +3788,17 @@ async function handleDriveFiles(request, env, user) {
     'SELECT google_file_id FROM drive_items_cache WHERE user_id = ? AND is_favorite = 1'
   ).bind(user.id).all();
   const favSet = new Set((favs.results || []).map((r) => r.google_file_id));
+  // v2.26.9 (fix — curadoria do "Meu Drive"). Oculto é por quem está
+  // VENDO a lista (user.id), não por quem é dono do arquivo (tokenUserId) —
+  // cada usuário cura sua própria visão, mesmo olhando o Drive de outra
+  // pessoa via pasta compartilhada.
+  let hiddenSet = new Set();
+  try {
+    const hidden = await env.DB.prepare(
+      'SELECT google_file_id FROM drive_items_cache WHERE user_id = ? AND is_hidden = 1'
+    ).bind(user.id).all();
+    hiddenSet = new Set((hidden.results || []).map((r) => r.google_file_id));
+  } catch { /* migration 0057 ainda não rodou */ }
 
   const files = [];
   for (const f of data.files || []) {
@@ -3797,7 +3813,8 @@ async function handleDriveFiles(request, env, user) {
       modifiedTime: f.modifiedTime || null,
       size: f.size || null,
       parents: f.parents || [],
-      isFavorite: favSet.has(f.id)
+      isFavorite: favSet.has(f.id),
+      isHidden: hiddenSet.has(f.id)
     });
   }
 
@@ -3824,6 +3841,7 @@ async function handleDriveFiles(request, env, user) {
             size: null,
             parents: [],
             isFavorite: favSet.has(r.google_file_id),
+            isHidden: hiddenSet.has(r.google_file_id),
             shared: true,
             sharedBy: r.grantor_name || null,
           });
@@ -3862,6 +3880,45 @@ async function handleDriveFavoriteToggle(request, env, user, fileId) {
     fav, body.sort_order || 0, Math.floor(Date.now() / 1000)
   ).run();
   return json({ ok: true, is_favorite: !!fav });
+}
+
+// v2.26.9 (fix — curadoria do "Meu Drive") — espelha exatamente o par
+// handleDriveFavorites/handleDriveFavoriteToggle acima. Mesma ressalva de
+// design já presente em drive_items_cache: google_file_id é UNIQUE na tabela
+// inteira (não composto com user_id) — um arquivo compartilhado entre dois
+// usuários usa a MESMA linha, então ocultar/favoritar não é 100% isolado por
+// usuário nesse caso raro. Pré-existente, fora do escopo deste fix.
+async function handleDriveHidden(request, env, user) {
+  if (request.method !== 'GET') return json({ error: 'Método não permitido' }, 405);
+  try {
+    const { results } = await env.DB.prepare(
+      'SELECT * FROM drive_items_cache WHERE user_id = ? AND is_hidden = 1 ORDER BY name'
+    ).bind(user.id).all();
+    return json((results || []).map(shapeDriveRow));
+  } catch {
+    return json([]); // migration 0057 ainda não rodou
+  }
+}
+
+async function handleDriveHiddenToggle(request, env, user, fileId) {
+  if (!fileId) return json({ error: 'ID ausente' }, 400);
+  if (request.method !== 'PUT') return json({ error: 'Método não permitido' }, 405);
+  const body = (await readJson(request)) || {};
+  const hidden = body.is_hidden ? 1 : 0;
+  await env.DB.prepare(
+    `INSERT INTO drive_items_cache
+      (id, google_file_id, user_id, name, mime_type, web_view_link, icon_link, modified_time, is_hidden, synced_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(google_file_id) DO UPDATE SET
+       name=excluded.name, mime_type=excluded.mime_type, web_view_link=excluded.web_view_link,
+       icon_link=excluded.icon_link, modified_time=excluded.modified_time,
+       is_hidden=excluded.is_hidden, synced_at=excluded.synced_at`
+  ).bind(
+    crypto.randomUUID(), fileId, user.id, body.name || '', body.mimeType || '',
+    body.webViewLink || null, body.iconLink || null, body.modifiedTime || null,
+    hidden, Math.floor(Date.now() / 1000)
+  ).run();
+  return json({ ok: true, is_hidden: !!hidden });
 }
 
 async function handleDriveSort(request, env, user) {

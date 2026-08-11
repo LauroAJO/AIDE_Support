@@ -1,14 +1,28 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Folder, File as FileIcon, Plus, X, Search, Trash2 } from 'lucide-react';
+import { Folder, File as FileIcon, Plus, X, Search, Trash2, Check } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
-// Symmetric Drive/Calendar sharing — either Lauro or Alice can grant the other
-// access to items in their own Google Drive/Calendar. The grantor's token is
-// used when fetching the actual content (see backend).
+// Symmetric Drive/Calendar sharing — qualquer usuário pode conceder acesso a
+// itens do próprio Drive/Calendar para QUALQUER outro usuário ativo (não só
+// "o outro", agora que existem 3+ pessoas). O token do concedente é usado
+// para buscar o conteúdo de fato (ver backend).
+//
+// v2.26.9 (fix — seletor de destinatário) — ANTES: `otherUser` era resolvido
+// via `users.find((u) => u.id !== currentUser?.id)`, ou seja, sempre a
+// PRIMEIRA pessoa da lista (Alice, por ordem alfabética/role). Com 3
+// usuários ativos isso deixava a Milene inacessível nessa tela, sem
+// nenhum erro visível — o compartilhamento sempre ia pra Alice mesmo que o
+// usuário quisesse selecionar outra pessoa (não havia como). Substituído por
+// abas "Compartilhar com:" — uma por pessoa — que escolhem o destinatário
+// ativo; as listas "o que você compartilha" ficam automaticamente filtradas
+// pela pessoa selecionada, então cada aba mostra só o que é relevante pra
+// ela (evita a lista virar uma bagunça misturando todo mundo, que era a
+// segunda reclamação de usabilidade). O backend (`_worker.js`) já aceitava
+// `grantee_user_id` explícito no POST — nenhuma mudança de backend precisou.
 export default function Sharing() {
   const currentUser = useStore((s) => s.user);
   const [users, setUsers] = useState([]);
@@ -19,6 +33,9 @@ export default function Sharing() {
   const [search, setSearch] = useState('');
   const [results, setResults] = useState([]);
   const [calPicker, setCalPicker] = useState(false);
+  // Destinatário ativo — controla tanto a aba visível quanto pra quem um novo
+  // compartilhamento é criado (addDrive/addCal). null até os usuários carregarem.
+  const [recipientId, setRecipientId] = useState(null);
 
   // Seletores read-only: Escape fecha, clique fora não (v2.25.16).
   const pickerGuard = useUnsavedGuard({
@@ -28,8 +45,8 @@ export default function Sharing() {
     isDirty: false, onClose: () => setCalPicker(false), enabled: calPicker,
   });
 
-  const otherUser = useMemo(
-    () => users.find((u) => u.id !== currentUser?.id) || null,
+  const otherUsers = useMemo(
+    () => users.filter((u) => u.id !== currentUser?.id),
     [users, currentUser]
   );
 
@@ -47,9 +64,25 @@ export default function Sharing() {
     load();
   }, []);
 
-  const sharedByMeDrive = driveRules.filter((r) => r.grantor_user_id === currentUser?.id);
+  // Escolhe um destinatário padrão assim que a lista de usuários chega (só se
+  // ainda não houver seleção, ou se a pessoa selecionada não existir mais —
+  // ex.: usuário arquivado). Não reseta a seleção do usuário a cada load().
+  useEffect(() => {
+    if (otherUsers.length === 0) { setRecipientId(null); return; }
+    setRecipientId((prev) => (prev && otherUsers.some((u) => u.id === prev) ? prev : otherUsers[0].id));
+  }, [otherUsers]);
+
+  const recipient = otherUsers.find((u) => u.id === recipientId) || null;
+  const recipientName = recipient?.name ? recipient.name.split(' ')[0] : 'a outra pessoa';
+
+  // v2.26.9 — as listas de "o que você compartilha" ficam filtradas pela
+  // pessoa selecionada na aba, pra cada aba mostrar só o que é dela (ver
+  // comentário do topo). "O que foi compartilhado com você" continua uma
+  // lista única — já mostra "por {nome}" em cada linha, então misturar
+  // concedentes diferentes ali não confunde do mesmo jeito.
+  const sharedByMeDrive = driveRules.filter((r) => r.grantor_user_id === currentUser?.id && r.grantee_user_id === recipientId);
   const sharedWithMeDrive = driveRules.filter((r) => r.grantee_user_id === currentUser?.id);
-  const sharedByMeCal = calRules.filter((r) => r.grantor_user_id === currentUser?.id);
+  const sharedByMeCal = calRules.filter((r) => r.grantor_user_id === currentUser?.id && r.grantee_user_id === recipientId);
   const sharedWithMeCal = calRules.filter((r) => r.grantee_user_id === currentUser?.id);
 
   const userName = (id) => {
@@ -67,14 +100,14 @@ export default function Sharing() {
   };
 
   const addDrive = async (f) => {
-    if (!otherUser) return;
+    if (!recipientId) return;
     await apiFetch('/api/sharing/drive', {
       method: 'POST',
       body: JSON.stringify({
         google_file_id: f.googleFileId || f.id,
         file_name: f.name,
         mime_type: f.mimeType,
-        grantee_user_id: otherUser.id,
+        grantee_user_id: recipientId,
       }),
     });
     setPicker(false);
@@ -97,14 +130,14 @@ export default function Sharing() {
     }
   };
   const addCal = async (c) => {
-    if (!otherUser) return;
+    if (!recipientId) return;
     await apiFetch('/api/sharing/calendar', {
       method: 'POST',
       body: JSON.stringify({
         google_calendar_id: c.id,
         calendar_name: c.summary,
         color: c.backgroundColor || '#6366f1',
-        grantee_user_id: otherUser.id,
+        grantee_user_id: recipientId,
       }),
     });
     setCalPicker(false);
@@ -116,19 +149,62 @@ export default function Sharing() {
     load();
   };
 
-  const otherName = otherUser?.name ? otherUser.name.split(' ')[0] : 'a outra pessoa';
+  // Seletor de destinatário — abas clicáveis, uma por pessoa. Só aparece
+  // quando há mais de uma pessoa possível (com 1 só, não há o que escolher —
+  // mostra o nome dela direto no texto, como antes). Compartilhado pelas
+  // duas seções (Drive e Calendário), já que o destinatário é o mesmo.
+  const RecipientTabs = () => {
+    if (otherUsers.length <= 1) return null;
+    return (
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        <span className="text-[11px] font-medium text-muted">Compartilhar com:</span>
+        {otherUsers.map((u) => {
+          const active = u.id === recipientId;
+          const name = u.name ? u.name.split(' ')[0] : (u.email || 'usuário');
+          const count = driveRules.filter((r) => r.grantor_user_id === currentUser?.id && r.grantee_user_id === u.id).length
+            + calRules.filter((r) => r.grantor_user_id === currentUser?.id && r.grantee_user_id === u.id).length;
+          return (
+            <button
+              key={u.id}
+              type="button"
+              onClick={() => setRecipientId(u.id)}
+              className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition ${
+                active
+                  ? 'border-accent bg-accent text-white'
+                  : 'border-line bg-surface text-ink2 hover:bg-surface2'
+              }`}
+            >
+              {active && <Check className="h-3 w-3" />}
+              {name}
+              {count > 0 && (
+                <span className={`ml-0.5 rounded-full px-1.5 text-[10px] ${active ? 'bg-white/20' : 'bg-surface2 text-muted'}`}>
+                  {count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
 
   return (
     <>
       <section className="rounded-xl border border-line bg-surface p-5">
         <h2 className="mb-1 text-base font-bold text-ink">Compartilhamento de Drive</h2>
         <p className="mb-3 text-xs text-muted">
-          Escolha pastas ou arquivos do seu Drive para compartilhar com {otherName}, e veja o que ela compartilha com você.
+          Escolha pastas ou arquivos do seu Drive para compartilhar com {recipientName}, e veja o que foi compartilhado com você.
         </p>
 
-        <h3 className="mb-1 text-xs font-semibold uppercase text-muted">O que você compartilha</h3>
-        {sharedByMeDrive.length === 0 ? (
-          <p className="mb-2 text-[11px] text-muted">Nenhum item compartilhado.</p>
+        <RecipientTabs />
+
+        <h3 className="mb-1 text-xs font-semibold uppercase text-muted">
+          O que você compartilha{recipient ? ` com ${recipientName}` : ''}
+        </h3>
+        {!recipient ? (
+          <p className="mb-2 text-[11px] text-muted">Nenhuma outra pessoa disponível ainda.</p>
+        ) : sharedByMeDrive.length === 0 ? (
+          <p className="mb-2 text-[11px] text-muted">Nenhum item compartilhado com {recipientName}.</p>
         ) : (
           <ul className="mb-2 space-y-1">
             {sharedByMeDrive.map((r) => {
@@ -137,7 +213,6 @@ export default function Sharing() {
                 <li key={r.id} className="flex items-center gap-2 rounded-lg border border-line bg-base px-2 py-1.5 text-sm">
                   <Icon className="h-4 w-4 text-ink2" />
                   <span className="flex-1 truncate text-ink">{r.file_name}</span>
-                  <span className="text-[10px] text-muted">com {userName(r.grantee_user_id)}</span>
                   <button onClick={() => removeDrive(r.id)} className="text-muted hover:text-danger" title="Remover">
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -148,10 +223,10 @@ export default function Sharing() {
         )}
         <button
           onClick={() => setPicker(true)}
-          disabled={!otherUser}
+          disabled={!recipient}
           className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2 disabled:opacity-60"
         >
-          <Plus className="h-4 w-4" /> Compartilhar pasta ou arquivo
+          <Plus className="h-4 w-4" /> Compartilhar pasta ou arquivo{recipient ? ` com ${recipientName}` : ''}
         </button>
 
         <h3 className="mb-1 mt-4 text-xs font-semibold uppercase text-muted">O que foi compartilhado com você</h3>
@@ -176,19 +251,24 @@ export default function Sharing() {
       <section className="rounded-xl border border-line bg-surface p-5">
         <h2 className="mb-1 text-base font-bold text-ink">Compartilhamento de Calendário</h2>
         <p className="mb-3 text-xs text-muted">
-          Defina quais calendários você compartilha com {otherName}.
+          Defina quais calendários você compartilha com {recipientName}.
         </p>
 
-        <h3 className="mb-1 text-xs font-semibold uppercase text-muted">O que você compartilha</h3>
-        {sharedByMeCal.length === 0 ? (
-          <p className="mb-2 text-[11px] text-muted">Nenhum calendário compartilhado.</p>
+        <RecipientTabs />
+
+        <h3 className="mb-1 text-xs font-semibold uppercase text-muted">
+          O que você compartilha{recipient ? ` com ${recipientName}` : ''}
+        </h3>
+        {!recipient ? (
+          <p className="mb-2 text-[11px] text-muted">Nenhuma outra pessoa disponível ainda.</p>
+        ) : sharedByMeCal.length === 0 ? (
+          <p className="mb-2 text-[11px] text-muted">Nenhum calendário compartilhado com {recipientName}.</p>
         ) : (
           <ul className="mb-2 space-y-1">
             {sharedByMeCal.map((r) => (
               <li key={r.id} className="flex items-center gap-2 rounded-lg border border-line bg-base px-2 py-1.5 text-sm">
                 <span className="h-2.5 w-2.5 rounded-full" style={{ background: r.color || '#6366f1' }} />
                 <span className="flex-1 truncate text-ink">{r.calendar_name}</span>
-                <span className="text-[10px] text-muted">com {userName(r.grantee_user_id)}</span>
                 <button onClick={() => removeCal(r.id)} className="text-muted hover:text-danger" title="Remover">
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
@@ -198,10 +278,10 @@ export default function Sharing() {
         )}
         <button
           onClick={openCalPicker}
-          disabled={!otherUser}
+          disabled={!recipient}
           className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm text-ink2 hover:bg-surface2 disabled:opacity-60"
         >
-          <Plus className="h-4 w-4" /> Compartilhar calendário
+          <Plus className="h-4 w-4" /> Compartilhar calendário{recipient ? ` com ${recipientName}` : ''}
         </button>
 
         <h3 className="mb-1 mt-4 text-xs font-semibold uppercase text-muted">O que foi compartilhado com você</h3>
@@ -225,7 +305,9 @@ export default function Sharing() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
           <div className="flex max-h-[70vh] w-full max-w-md flex-col rounded-xl border border-line bg-surface shadow-soft">
             <div className="flex items-center justify-between border-b border-line px-4 py-3">
-              <h3 className="text-sm font-bold text-ink">Compartilhar do Drive</h3>
+              <h3 className="text-sm font-bold text-ink">
+                Compartilhar do Drive{recipient ? ` com ${recipientName}` : ''}
+              </h3>
               <button onClick={pickerGuard.requestClose} className="text-ink2 hover:text-ink"><X className="h-5 w-5" /></button>
             </div>
             <div className="border-b border-line p-3">
@@ -265,7 +347,9 @@ export default function Sharing() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
           <div className="flex max-h-[70vh] w-full max-w-md flex-col rounded-xl border border-line bg-surface shadow-soft">
             <div className="flex items-center justify-between border-b border-line px-4 py-3">
-              <h3 className="text-sm font-bold text-ink">Compartilhar calendário</h3>
+              <h3 className="text-sm font-bold text-ink">
+                Compartilhar calendário{recipient ? ` com ${recipientName}` : ''}
+              </h3>
               <button onClick={calPickerGuard.requestClose} className="text-ink2 hover:text-ink"><X className="h-5 w-5" /></button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">

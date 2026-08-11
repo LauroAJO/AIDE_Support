@@ -587,9 +587,11 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
             onAdd={(it) => addToCareer(it)}
             added={added}
             onLinkTask={(it) => setLinkingItem(it)}
+            onDelete={isOwner ? (it) => setConfirmItem(it) : null}
+            deletingId={deleting}
           />
         ) : (
-          <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {filtered.map((it) => (
               <VagaCard
                 key={it.id}
@@ -698,12 +700,18 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
 
 
 // Botão "Adicionar à Carreira" com estados saving/done. Reutilizado no card e no modal.
-function AddButton({ state, onAdd, full = false }) {
-  const base = `flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${full ? 'w-full' : ''}`;
+// v2.26.7 (Change 2b) — variante `compact` usada só no VagaCard (Cards
+// view), para não engordar o botão de volta no card já compactado; o modal
+// de detalhe continua usando o tamanho padrão (full).
+function AddButton({ state, onAdd, full = false, compact = false }) {
+  const base = compact
+    ? `flex items-center justify-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition ${full ? 'w-full' : ''}`
+    : `flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${full ? 'w-full' : ''}`;
+  const iconClass = compact ? 'h-3 w-3' : 'h-4 w-4';
   if (state === 'done') {
     return (
       <span className={`${base} bg-emerald-100 text-emerald-700`}>
-        <CheckCircle2 className="h-4 w-4" /> Adicionada
+        <CheckCircle2 className={iconClass} /> {compact ? 'Adicionada' : 'Adicionada'}
       </span>
     );
   }
@@ -715,8 +723,8 @@ function AddButton({ state, onAdd, full = false }) {
       className={`${base} bg-accent text-white hover:opacity-90 disabled:opacity-60`}
     >
       {state === 'saving'
-        ? <><Loader2 className="h-4 w-4 animate-spin" /> Adicionando...</>
-        : <><Plus className="h-4 w-4" /> Adicionar à Carreira</>}
+        ? <><Loader2 className={`${iconClass} animate-spin`} /> {compact ? '...' : 'Adicionando...'}</>
+        : <><Plus className={iconClass} /> {compact ? 'Add' : 'Adicionar à Carreira'}</>}
     </button>
   );
 }
@@ -727,40 +735,43 @@ function VagaCard({
 }) {
   const title = effectiveTitle(item);
   const resumoFull = effectiveResumo(item);
-  const resumo = (resumoFull || '').slice(0, 150);
-  const truncated = (resumoFull || '').length > 150;
+  // v2.26.7 (Change 2b — cards mais compactos): resumo cortado bem mais
+  // curto (era 150 chars, multi-linha) e renderizado em 1 linha só
+  // (line-clamp-1) — era o maior contribuinte para a altura do card.
+  const resumo = (resumoFull || '').slice(0, 80);
+  const truncated = (resumoFull || '').length > 80;
   return (
     <div
       ref={cardRef}
       onClick={onOpen}
-      className={`flex cursor-pointer flex-col gap-2 rounded-xl border bg-surface p-3 transition hover:border-accent/50 hover:shadow-soft ${
+      className={`flex cursor-pointer flex-col gap-1.5 rounded-lg border bg-surface p-2.5 transition hover:border-accent/50 hover:shadow-soft ${
         highlighted ? 'border-accent ring-2 ring-accent' : selected ? 'border-accent' : 'border-line'
       }`}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="flex items-start gap-2">
+        <div className="flex items-start gap-1.5">
           <input
             type="checkbox"
             checked={!!selected}
             onClick={(e) => e.stopPropagation()}
             onChange={onToggleSelect}
-            className="mt-1 h-4 w-4 shrink-0 accent-accent"
+            className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-accent"
           />
-          <h3 className="flex items-center gap-1.5 text-sm font-medium leading-snug text-ink">
+          <h3 className="flex items-center gap-1.5 text-xs font-medium leading-snug text-ink">
             {title}
             {item.edited_at && <Pencil className="h-3 w-3 shrink-0 text-muted" title="Editado manualmente" />}
           </h3>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1">
           <CountryBadge code={item._country} />
           {onEdit && (
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onEdit(); }}
-              className="rounded-md p-1 text-ink2 transition hover:bg-surface2 hover:text-accent"
+              className="rounded-md p-0.5 text-ink2 transition hover:bg-surface2 hover:text-accent"
               title="Editar vaga"
             >
-              <Pencil className="h-3.5 w-3.5" />
+              <Pencil className="h-3 w-3" />
             </button>
           )}
           {onDelete && (
@@ -768,31 +779,31 @@ function VagaCard({
               type="button"
               onClick={(e) => { e.stopPropagation(); onDelete(); }}
               disabled={deleting}
-              className="rounded-md p-1 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+              className="rounded-md p-0.5 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
               title="Remover vaga"
             >
-              {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+              {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
             </button>
           )}
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted">
         {item.source_name && (
-          <span className="inline-flex items-center gap-1"><Building2 className="h-3.5 w-3.5" />{item.source_name}</span>
+          <span className="inline-flex items-center gap-1"><Building2 className="h-3 w-3" />{item.source_name}</span>
         )}
-        <span className="inline-flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5" />{fmtDate(item.collected_at || item.received_at)}</span>
-        <Badge className="bg-accent/10 text-accent">{areaLabel(item)}</Badge>
-        {item.short_id && <span className="font-mono text-[11px] text-muted">#{item.short_id}</span>}
+        <span className="inline-flex items-center gap-1"><CalendarDays className="h-3 w-3" />{fmtDateShort(item.collected_at || item.received_at)}</span>
+        <span className="inline-flex items-center rounded-full bg-accent/10 px-1.5 py-0 text-[10px] font-medium text-accent">{areaLabel(item)}</span>
+        {item.short_id && <span className="font-mono text-[10px] text-muted">#{item.short_id}</span>}
       </div>
 
       {resumo && (
-        <p className="text-xs leading-relaxed text-ink2">
+        <p className="line-clamp-1 text-[11px] leading-snug text-ink2">
           {resumo}{truncated && '…'}
         </p>
       )}
 
-      <div className="mt-auto flex items-center gap-1.5 pt-1">
+      <div className="mt-auto flex items-center gap-1 pt-0.5">
         {item.url && (
           <a
             href={item.url}
@@ -800,9 +811,9 @@ function VagaCard({
             rel="noreferrer"
             onClick={(e) => e.stopPropagation()}
             title="Ver vaga original"
-            className="rounded-lg border border-line bg-surface p-1.5 text-ink2 transition hover:bg-surface2"
+            className="rounded-md border border-line bg-surface p-1 text-ink2 transition hover:bg-surface2"
           >
-            <ExternalLink className="h-3.5 w-3.5" />
+            <ExternalLink className="h-3 w-3" />
           </a>
         )}
         <div className="flex-1" />
@@ -810,30 +821,30 @@ function VagaCard({
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onCopyLink(); }}
-            className="rounded-lg border border-line bg-surface p-1.5 text-ink2 transition hover:bg-surface2"
+            className="rounded-md border border-line bg-surface p-1 text-ink2 transition hover:bg-surface2"
             title="Copiar link"
           >
-            <Link2 className="h-3.5 w-3.5" />
+            <Link2 className="h-3 w-3" />
           </button>
         )}
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onLinkTask(); }}
-          className="rounded-lg border border-line bg-surface p-1.5 text-ink2 transition hover:bg-surface2"
+          className="rounded-md border border-line bg-surface p-1 text-ink2 transition hover:bg-surface2"
           title="Vincular à Tarefa"
         >
-          <ClipboardList className="h-3.5 w-3.5" />
+          <ClipboardList className="h-3 w-3" />
         </button>
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onMove(); }}
           disabled={moving}
-          className="rounded-lg border border-line bg-surface p-1.5 text-ink2 transition hover:bg-surface2 disabled:opacity-50"
+          className="rounded-md border border-line bg-surface p-1 text-ink2 transition hover:bg-surface2 disabled:opacity-50"
           title="Mover para Empregos"
         >
-          {moving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRightLeft className="h-3.5 w-3.5" />}
+          {moving ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowRightLeft className="h-3 w-3" />}
         </button>
-        <AddButton state={state} onAdd={onAdd} />
+        <AddButton state={state} onAdd={onAdd} compact />
       </div>
     </div>
   );
@@ -847,10 +858,11 @@ function VagaCard({
 // Ver, Vincular à Tarefa e Adicionar à Carreira.
 // v2.26.7 (Change 1 — linhas compactas): cabeçalho e linhas encolhidos —
 // py-2 → py-1, texto em text-[11px], data DD/MM, relevância como número
-// simples (sem badge). Área/País mantidos como badges pequenos (não há um
-// botão "remover" equivalente ao de Notícias nesta lista — a coluna Ações
-// aqui já continha só os 3 ícones funcionais da vaga: Ver, Vincular,
-// Adicionar; não há um item a reduzir para "só a lixeira").
+// simples (sem badge).
+// v2.26.7 (fix pós-feedback — faltava o botão de deletar): a Lista tinha
+// perdido o ícone de lixeira que o VagaCard sempre teve (onDelete abre o
+// mesmo modal de confirmação via setConfirmItem) — reintroduzido aqui como
+// o 4º ícone da coluna Ações, mesmo padrão do card.
 function SortHeader({ label, sortKey, active, dir, onSort, className = '' }) {
   return (
     <th
@@ -866,7 +878,7 @@ function SortHeader({ label, sortKey, active, dir, onSort, className = '' }) {
   );
 }
 
-function VagasListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, added, onLinkTask }) {
+function VagasListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, added, onLinkTask, onDelete, deletingId }) {
   if (items.length === 0) {
     return (
       <div className="rounded-xl border border-line bg-surface px-4 py-12 text-center text-sm text-muted">
@@ -946,6 +958,17 @@ function VagasListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, added,
                         className="rounded-md p-1 text-ink2 transition hover:bg-accent/10 hover:text-accent disabled:opacity-50"
                       >
                         {state === 'saving' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                      </button>
+                    )}
+                    {onDelete && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onDelete(it); }}
+                        disabled={deletingId === it.id}
+                        title="Remover vaga"
+                        className="rounded-md p-1 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+                      >
+                        {deletingId === it.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                       </button>
                     )}
                   </div>

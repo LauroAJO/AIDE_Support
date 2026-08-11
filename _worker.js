@@ -3760,14 +3760,39 @@ async function handleDriveFiles(request, env, user) {
   // Each user sees their OWN Drive. When navigating into a folder that was
   // shared via drive_sharing_rules (Alice was granted access to Lauro's
   // folder), fetch that subtree with the grantor's token instead.
+  //
+  // v2.26.9 (fix — subpastas de pasta compartilhada apareciam vazias) — ANTES
+  // isso só checava se `parent` EM SI tinha uma linha em drive_sharing_rules.
+  // Isso resolve certo pro nível direto da pasta compartilhada (ela mesma é
+  // a `google_file_id` da regra), mas qualquer subpasta DENTRO dela tem um
+  // `google_file_id` diferente, que nunca foi registrado em
+  // drive_sharing_rules — a busca não achava nada, tokenUserId caía de volta
+  // pro próprio usuário (Alice), e a API do Google era chamada como Alice,
+  // que não tem esses arquivos no Drive dela → lista vazia, sem nenhum erro
+  // visível (o request "funciona", só devolve 0 itens).
+  //
+  // Fix: sobe a árvore usando o parent_id já cacheado em drive_items_cache
+  // (populado toda vez que uma pasta é listada — ver cacheDriveItem abaixo)
+  // até achar um ancestral que tenha uma regra de compartilhamento direta,
+  // ou até esgotar a cadeia. Limite de 10 saltos como trava de segurança
+  // contra ciclo (não deveria acontecer numa árvore de pastas real).
   let tokenUserId = user.id;
   if (parent) {
     try {
-      const share = await env.DB.prepare(
-        'SELECT grantor_user_id FROM drive_sharing_rules WHERE google_file_id = ? AND grantee_user_id = ?'
-      ).bind(parent, user.id).first();
-      if (share && share.grantor_user_id) tokenUserId = share.grantor_user_id;
-    } catch { /* table missing → no sharing rules */ }
+      let currentId = parent;
+      let hops = 0;
+      while (currentId && hops < 10) {
+        const share = await env.DB.prepare(
+          'SELECT grantor_user_id FROM drive_sharing_rules WHERE google_file_id = ? AND grantee_user_id = ?'
+        ).bind(currentId, user.id).first();
+        if (share && share.grantor_user_id) { tokenUserId = share.grantor_user_id; break; }
+        const cached = await env.DB.prepare(
+          'SELECT parent_id FROM drive_items_cache WHERE google_file_id = ?'
+        ).bind(currentId).first();
+        currentId = (cached && cached.parent_id) || null;
+        hops += 1;
+      }
+    } catch { /* tabela ausente → sem regras de compartilhamento */ }
   }
 
   const api =

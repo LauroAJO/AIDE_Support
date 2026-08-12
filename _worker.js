@@ -112,6 +112,11 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/tasks/migrate-subtasks') {
     return handleMigrateSubtasks(request, env, user);
   }
+  // Edição em lote (v2.25.20) — precisa vir ANTES da rota genérica
+  // /api/tasks/:id, senão 'bulk' seria lido como um id de tarefa.
+  if (path === '/api/tasks/bulk' && method === 'PATCH') {
+    return handleTasksBulkPatch(request, env, user);
+  }
   if (path.match(/^\/api\/tasks\/[^/]+\/subtasks$/)) {
     return handleTaskSubtasks(request, env, user, path.split('/')[3], ctx);
   }
@@ -2129,6 +2134,101 @@ async function handleTaskItem(request, env, user, taskId, ctx) {
   }
 
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// PATCH /api/tasks/bulk — edição em lote (v2.25.20).
+// Body: { ids: string[], patch: { assigned_to?, status?, due_date?, project_id?,
+//         front_id?, urgency?, importance?, favorited? } }
+//
+// Mesmo modelo de permissão do PUT /api/tasks/:id (canEditTaskRow, já usado
+// pelas subtarefas): edit_all libera tudo; edit_own só libera tarefas cujo
+// created_by seja o próprio usuário. Cada id é checado individualmente —
+// tarefas sem permissão entram em `skipped` em vez de derrubar o lote todo.
+//
+// Escopo deliberadamente menor que o PUT individual: só os campos "de lista"
+// (responsável, status, prazo, projeto/frente, prioridade, favorito). Título,
+// descrição, subtarefas, comentários, anexos etc. continuam exclusivos do
+// editor de uma tarefa por vez — não fazem sentido em edição em massa e
+// evitam o risco de sobrescrever conteúdo rico com um PATCH genérico.
+// Efeito colateral replicado do PUT individual: sincroniza task_assignees
+// quando assigned_to muda (mesma tabela usada pelos avatares/co-responsáveis).
+// Não replicados aqui (fora de escopo para lote): notificações de atribuição
+// e sincronização com oportunidades de carreira vinculadas.
+const TASKS_BULK_FIELDS = ['assigned_to', 'status', 'due_date', 'project_id', 'front_id', 'urgency', 'importance', 'favorited'];
+
+async function handleTasksBulkPatch(request, env, user) {
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.ids)
+    ? [...new Set(body.ids.filter((id) => typeof id === 'string' && id))]
+    : [];
+  const patch = (body.patch && typeof body.patch === 'object') ? body.patch : {};
+  const fields = Object.keys(patch).filter((k) => TASKS_BULK_FIELDS.includes(k));
+
+  if (ids.length === 0) return json({ error: 'ids deve ser um array não vazio' }, 400);
+  if (fields.length === 0) return json({ error: 'Nenhum campo válido para atualizar' }, 400);
+  if (fields.includes('status') && !TASK_STATUSES.includes(patch.status)) {
+    return json({ error: 'status inválido' }, 400);
+  }
+  if (!canDo(user.granular, 'tasks', 'edit_all') && !canDo(user.granular, 'tasks', 'edit_own')) {
+    return json({ error: 'Sem permissão para editar tarefas' }, 403);
+  }
+
+  const placeholders = ids.map(() => '?').join(',');
+  const { results: rows } = await env.DB.prepare(
+    `SELECT id, created_by, assigned_to FROM tasks WHERE id IN (${placeholders})`
+  ).bind(...ids).all();
+  const byId = new Map((rows || []).map((r) => [r.id, r]));
+
+  const allowedIds = [];
+  const skipped = [];
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (!row) { skipped.push({ id, reason: 'not_found' }); continue; }
+    if (canEditTaskRow(user, row)) allowedIds.push(id);
+    else skipped.push({ id, reason: 'forbidden' });
+  }
+  if (allowedIds.length === 0) return json({ updated: 0, skipped }, 200);
+
+  const setClauses = [];
+  const binds = [];
+  if (fields.includes('assigned_to')) { setClauses.push('assigned_to = ?'); binds.push(patch.assigned_to || null); }
+  if (fields.includes('status')) { setClauses.push('status = ?'); binds.push(patch.status); }
+  if (fields.includes('due_date')) { setClauses.push('due_date = ?'); binds.push(patch.due_date || null); }
+  if (fields.includes('project_id')) { setClauses.push('project_id = ?'); binds.push(patch.project_id || null); }
+  if (fields.includes('urgency')) { setClauses.push('urgency = ?'); binds.push(clamp010(patch.urgency, 5)); }
+  if (fields.includes('importance')) { setClauses.push('importance = ?'); binds.push(clamp010(patch.importance, 5)); }
+  if (fields.includes('favorited')) { setClauses.push('favorited = ?'); binds.push(patch.favorited ? 1 : 0); }
+  setClauses.push('updated_at = ?');
+  binds.push(Math.floor(Date.now() / 1000));
+
+  const idPlaceholders = allowedIds.map(() => '?').join(',');
+  await env.DB.prepare(
+    `UPDATE tasks SET ${setClauses.join(', ')} WHERE id IN (${idPlaceholders})`
+  ).bind(...binds, ...allowedIds).run();
+
+  // front_id vive numa coluna que só existe a partir da migração 0015 —
+  // atualizado à parte, tolerando bancos antigos, igual ao PUT individual.
+  if (fields.includes('front_id')) {
+    try {
+      await env.DB.prepare(
+        `UPDATE tasks SET front_id = ? WHERE id IN (${idPlaceholders})`
+      ).bind(patch.front_id || null, ...allowedIds).run();
+    } catch { /* migration 0015 não aplicada */ }
+  }
+
+  if (fields.includes('assigned_to')) {
+    for (const id of allowedIds) {
+      const row = byId.get(id);
+      const ownerChanged = (row.assigned_to || null) !== (patch.assigned_to || null);
+      if (ownerChanged) {
+        await syncTaskAssignees(env, id, {
+          ownerId: patch.assigned_to || null, ownerChanged: true, addedBy: user.id,
+        });
+      }
+    }
+  }
+
+  return json({ updated: allowedIds.length, skipped });
 }
 
 // ---------------------------------------------------------------------------

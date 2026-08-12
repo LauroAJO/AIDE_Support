@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Plus, Upload, Download, AlertTriangle, X, LayoutGrid, List, Columns, GitBranch } from 'lucide-react';
+import { Plus, Upload, Download, AlertTriangle, X, LayoutGrid, List, Columns, GitBranch, CheckSquare } from 'lucide-react';
 import { useStore, selectFilteredTasks } from '../../store';
 import { apiFetch } from '../../lib/api';
 import { downloadTasksExport, EXPORT_FORMATS } from '../../lib/exportTasks';
@@ -15,12 +15,14 @@ import ImportModal from './ImportModal';
 import KanbanBoard from './KanbanBoard';
 import TaskTreeView from './TaskTreeView';
 import TaskFiltersBar from './TaskFiltersBar';
+import TaskBulkBar from './TaskBulkBar';
 
 export default function TasksPage() {
   const user = useStore((s) => s.user);
   const userGranular = useStore((s) => s.userGranular);
   const tasks = useStore((s) => s.tasks);
   const users = useStore((s) => s.users);
+  const projects = useStore((s) => s.projects);
   const setTasks = useStore((s) => s.setTasks);
   const setProjects = useStore((s) => s.setProjects);
   const setUsers = useStore((s) => s.setUsers);
@@ -75,6 +77,37 @@ export default function TasksPage() {
   const [showImport, setShowImport] = useState(false);
   const [showMatrix, setShowMatrix] = useState(false);
   const [alertDismissed, setAlertDismissed] = useState(false);
+  // Seleção múltipla + edição em lote (v2.25.20) — só na vista Lista.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  };
+  const canEditTasks = canDo(userGranular, 'tasks', 'edit_all') || canDo(userGranular, 'tasks', 'edit_own');
+  const applyBulkPatch = async (patch) => {
+    const ids = [...selectedIds];
+    const res = await apiFetch('/api/tasks/bulk', {
+      method: 'PATCH',
+      body: JSON.stringify({ ids, patch }),
+    });
+    await loadAll();
+    const updated = (res && res.updated) || 0;
+    const skippedCount = (res && res.skipped && res.skipped.length) || 0;
+    showToast(
+      skippedCount > 0
+        ? `${updated} tarefa(s) atualizada(s) · ${skippedCount} sem permissão`
+        : `${updated} tarefa(s) atualizada(s)`
+    );
+    setSelectedIds(new Set());
+  };
   // Menu de export. Fecha ao clicar fora — mesmo padrão do menu de perfil.
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState('');
@@ -249,6 +282,18 @@ export default function TasksPage() {
               Árvore
             </button>
           </div>
+          {taskView === 'list' && canEditTasks && (
+            <button
+              type="button"
+              onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+              className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-medium transition ${
+                selectMode ? 'border-accent bg-accent/10 text-accent' : 'border-line text-ink2 hover:bg-surface2'
+              }`}
+            >
+              <CheckSquare className="h-4 w-4" />
+              {selectMode ? 'Cancelar seleção' : 'Selecionar'}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setShowMatrix((v) => !v)}
@@ -357,6 +402,38 @@ export default function TasksPage() {
           <TreeFilterPill />
         )}
 
+        {/* Seleção múltipla — atalho para marcar tudo que está visível e barra
+            de edição em lote (v2.25.20). */}
+        {taskView === 'list' && selectMode && filtered.length > 0 && (
+          <div className="mt-2 flex items-center gap-3 text-xs text-ink2">
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set(filtered.map((t) => t.id)))}
+              className="underline decoration-dotted hover:text-ink"
+            >
+              Selecionar todas as {filtered.length} visíveis
+            </button>
+            {selectedIds.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                className="underline decoration-dotted hover:text-ink"
+              >
+                Limpar seleção
+              </button>
+            )}
+          </div>
+        )}
+        {taskView === 'list' && selectedIds.size > 0 && (
+          <TaskBulkBar
+            count={selectedIds.size}
+            users={users}
+            projects={projects}
+            onApply={applyBulkPatch}
+            onClear={() => setSelectedIds(new Set())}
+          />
+        )}
+
         {/* Task list / Kanban / Árvore */}
         <div className="mt-3 flex min-h-0 flex-1 gap-3 overflow-hidden pb-2">
           <div className="min-w-0 flex-1 overflow-y-auto">
@@ -381,14 +458,26 @@ export default function TasksPage() {
             ) : (
               <div className="space-y-2">
                 {filtered.map((t) => (
-                  <TaskCard
-                    key={t.id}
-                    task={t}
-                    selected={selectedTask?.id === t.id}
-                    onClick={() => setSelectedTask(t)}
-                    onToggleFavorite={toggleFavorite}
-                    onToggleSubtask={toggleSubtask}
-                  />
+                  <div key={t.id} className="flex items-start gap-2">
+                    {selectMode && (
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(t.id)}
+                        onChange={() => toggleSelect(t.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="mt-4 h-4 w-4 shrink-0 accent-accent"
+                      />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <TaskCard
+                        task={t}
+                        selected={selectedTask?.id === t.id}
+                        onClick={() => (selectMode ? toggleSelect(t.id) : setSelectedTask(t))}
+                        onToggleFavorite={toggleFavorite}
+                        onToggleSubtask={toggleSubtask}
+                      />
+                    </div>
+                  </div>
                 ))}
               </div>
             )}

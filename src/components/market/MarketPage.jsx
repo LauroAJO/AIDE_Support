@@ -1,13 +1,19 @@
-import { useState } from 'react';
+import { Suspense, lazy, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Building2, FolderKanban } from 'lucide-react';
+import { Building2, FolderKanban, Map } from 'lucide-react';
 import ErrorBoundary from '../shared/ErrorBoundary';
+import LoadingSpinner from '../shared/LoadingSpinner';
 import OrganizationsView from './OrganizationsView';
 import ProjectsView from './ProjectsView';
+
+// Carregado sob demanda (v2.25.21) — Leaflet + leaflet.markercluster somam
+// ~200KB ao bundle; quem nunca abre a aba Mapa não paga esse custo.
+const MarketMap = lazy(() => import('./MarketMap'));
 
 const TABS = [
   { key: 'orgs', label: 'Organizações', icon: Building2 },
   { key: 'projects', label: 'Projetos & Iniciativas', icon: FolderKanban },
+  { key: 'map', label: 'Mapa', icon: Map },
 ];
 
 export default function MarketPage() {
@@ -62,7 +68,7 @@ export default function MarketPage() {
           fallback={({ error, reset }) => (
             <div className="flex h-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-danger/40 bg-danger/5 p-8 text-center">
               <p className="text-sm font-semibold text-ink">
-                Erro ao carregar {tab === 'orgs' ? 'Organizações' : 'Projetos & Iniciativas'}
+                Erro ao carregar {tab === 'orgs' ? 'Organizações' : tab === 'projects' ? 'Projetos & Iniciativas' : 'Mapa'}
               </p>
               <p className="max-w-lg break-words font-mono text-xs text-danger">
                 {String((error && error.message) || error)}
@@ -88,6 +94,11 @@ export default function MarketPage() {
         >
           {tab === 'orgs' && <OrganizationsView />}
           {tab === 'projects' && <ProjectsView />}
+          {tab === 'map' && (
+            <Suspense fallback={<LoadingSpinner label="Carregando mapa..." />}>
+              <MarketMap />
+            </Suspense>
+          )}
         </ErrorBoundary>
       </div>
     </div>

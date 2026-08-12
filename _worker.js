@@ -315,6 +315,11 @@ async function handleAPI(request, env, ctx) {
   if (path.match(/^\/api\/market\/organizations\/[^/]+\/full$/) && request.method === 'GET') {
     return handleMarketOrgFull(request, env, user, path.split('/')[4]);
   }
+  // Mapa de Mercado (v2.25.21) — geocodificação sob demanda. Casa ANTES da
+  // rota genérica de item, senão 'geocode' seria lido como sub-recurso do id.
+  if (path.match(/^\/api\/market\/organizations\/[^/]+\/geocode$/) && request.method === 'POST') {
+    return handleMarketOrgGeocode(request, env, user, path.split('/')[4]);
+  }
   if (path.startsWith('/api/market/organizations/')) return handleMarketOrganizationItem(request, env, user, path.split('/')[4]);
   if (path === '/api/market/projects') return handleMarketProjects(request, env, user);
   if (path.startsWith('/api/market/projects/')) return handleMarketProjectItem(request, env, user, path.split('/')[4]);
@@ -9615,6 +9620,22 @@ async function handleMarketOrganizationItem(request, env, user, id) {
         Number(pick('relevance_for_spinoff', existing.relevance_for_spinoff)) || 0,
         now, id
       ).run();
+      // Posição manual do pino no mapa (v2.25.21) — coluna à parte (migração
+      // 0058), tolerante a bancos onde ainda não rodou. lat/lng nulos (body
+      // explicitamente { lat: null, lng: null }) limpam o pino; ausentes
+      // (undefined) não mexem nele — mesmo padrão do resto do PUT.
+      if (body.lat !== undefined || body.lng !== undefined) {
+        try {
+          await env.DB.prepare(
+            'UPDATE market_organizations SET lat=?, lng=?, geocode_source=?, geocoded_at=? WHERE id=?'
+          ).bind(
+            body.lat === null || body.lat === undefined ? null : Number(body.lat),
+            body.lng === null || body.lng === undefined ? null : Number(body.lng),
+            (body.lat === null && body.lng === null) ? null : 'manual',
+            now, id
+          ).run();
+        } catch { /* migração 0058 não aplicada */ }
+      }
     } catch (e) {
       return json({ error: 'Falha ao atualizar organização', detail: String(e) }, 500);
     }
@@ -9644,6 +9665,72 @@ async function handleMarketOrganizationItem(request, env, user, id) {
     }
   }
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// POST /api/market/organizations/:id/geocode — resolve city/country em
+// lat/lng via Nominatim (OpenStreetMap) e grava (v2.25.21, mapa de Mercado).
+//
+// Fica no servidor de propósito: a política de uso gratuito do Nominatim
+// exige um User-Agent identificando a aplicação e no máximo ~1 req/s — manter
+// isso no worker evita expor a chamada ao cliente e centraliza o rate-limit
+// (aqui é chamada sob demanda, uma organização por vez, nunca em lote).
+// Um pino 'manual' (o usuário já reposicionou) nunca é sobrescrito por uma
+// geocodificação automática — teria que passar por ?force=true.
+async function handleMarketOrgGeocode(request, env, user, id) {
+  const org = await env.DB.prepare('SELECT * FROM market_organizations WHERE id = ?').bind(id).first();
+  if (!org) return json({ error: 'Organização não encontrada' }, 404);
+  const url = new URL(request.url);
+  const force = url.searchParams.get('force') === 'true';
+  if (org.geocode_source === 'manual' && !force) {
+    return json({ error: 'Pino posicionado manualmente — use ?force=true para sobrescrever', skipped: true }, 409);
+  }
+  if (!org.city && !org.country) {
+    return json({ error: 'Organização sem city/country preenchidos' }, 400);
+  }
+  const query = [org.name, org.city, org.country].filter(Boolean).join(', ');
+  let result = null;
+  try {
+    const geoRes = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`,
+      { headers: { 'User-Agent': 'AIDE-Support/1 (uso pessoal — lauro.ajo@gmail.com)' } }
+    );
+    if (geoRes.ok) {
+      const arr = await geoRes.json();
+      if (Array.isArray(arr) && arr[0]) result = arr[0];
+    }
+  } catch { /* Nominatim indisponível — trata como não encontrado abaixo */ }
+
+  // Sem "Organização, Cidade, País" → tenta só "Cidade, País" (nomes de
+  // empresa pouco conhecidas costumam não existir no OSM; a cidade quase
+  // sempre existe).
+  if (!result && org.city) {
+    try {
+      const fallbackQuery = [org.city, org.country].filter(Boolean).join(', ');
+      const geoRes = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(fallbackQuery)}`,
+        { headers: { 'User-Agent': 'AIDE-Support/1 (uso pessoal — lauro.ajo@gmail.com)' } }
+      );
+      if (geoRes.ok) {
+        const arr = await geoRes.json();
+        if (Array.isArray(arr) && arr[0]) result = arr[0];
+      }
+    } catch { /* idem */ }
+  }
+
+  if (!result) return json({ error: 'Não foi possível geocodificar — tente posicionar manualmente' }, 422);
+
+  const now = Math.floor(Date.now() / 1000);
+  const lat = Number(result.lat);
+  const lng = Number(result.lon);
+  try {
+    await env.DB.prepare(
+      'UPDATE market_organizations SET lat=?, lng=?, geocode_source=?, geocoded_at=? WHERE id=?'
+    ).bind(lat, lng, 'auto', now, id).run();
+  } catch (e) {
+    return json({ error: 'Falha ao gravar coordenadas — migração 0058 aplicada?', detail: String(e) }, 500);
+  }
+  const row = await env.DB.prepare('SELECT * FROM market_organizations WHERE id = ?').bind(id).first();
+  return json(shapeMarketOrg(row));
 }
 
 // ---- Mercado: detalhe agregado da organização (OrgDetailPage) --------------

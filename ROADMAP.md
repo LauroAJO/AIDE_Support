@@ -13,6 +13,7 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.2.0 | 2026-08-13 | Task↔Carreira, regras de presença em reunião, log de presença, pagamentos com hora |
 | II.1.0.0 | 2026-08-10 | Início Arco II — versionamento formal |
 | 2.26.6 | 2026-08-10 | Hub redesign: compacto, lista view, sem stat cards |
 | 2.26.5 | 2026-08-10 | Fix crítico: crash da aba Tarefas (loop infinito) |

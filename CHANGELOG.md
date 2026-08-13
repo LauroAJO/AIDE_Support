@@ -9,6 +9,57 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.2.0] — 2026-08-13
+
+### Task↔Carreira (link bidirecional), regras de presença em reunião, log de presença, formatação de pagamentos
+
+**Task↔Carreira:**
+- `TasksPage`/`TaskCard`: badge "→ Ver vaga em Carreira" agora é clicável,
+  navega para `/career?opportunity=<id>` (antes era só texto, sem ação).
+- `OpportunityPipeline`: deep-link `?opportunity=<id>` abre o modal da vaga
+  direto (mesmo padrão já usado por `?task=<id>` em Tarefas); o botão "Criar
+  Tarefa" vira "Ver tarefa →" quando já existe uma tarefa vinculada.
+- `TaskModal`: nova seção "Vaga vinculada" (título + status + botão "Ver no
+  Pipeline →") quando a tarefa tem `opportunity_id`.
+
+**Reunião — regras de presença corrigidas (Regra 1/2):**
+- `handleMeetingStart` (`_worker.js`): assistentes agora podem iniciar a
+  PRÓPRIA contagem de tempo a qualquer momento, mesmo antes do Lauro entrar —
+  antes, sem sessão compartilhada aberta, a chamada era recusada com 409 e
+  NENHUM `time_entries` era criado. Só a sessão compartilhada (o relógio que
+  todos veem) continua exigindo que o Lauro entre primeiro.
+- `getMeetingParticipants`: deixou de filtrar por `sinceTs` (início da sessão)
+  — uma assistente que entrasse antes do Lauro desaparecia da lista de
+  participantes mesmo com o timer dela rodando. Agora lista qualquer entrada
+  aberta na tarefa da reunião, independente da ordem de chegada.
+- `MeetingPage.jsx`: lista "Em reunião agora (N)" com nome + hora de entrada
+  de cada participante; aviso quando alguém já está contando tempo mas o
+  relógio compartilhado ainda espera o Lauro; botão "Iniciar Reunião" deixou
+  de ficar bloqueado para não-owners sem sessão.
+
+**Log de presença (novo):**
+- Migração `0059_meeting_attendance.sql` — tabela `meeting_attendance_log`
+  (entrada/saída, independente da sessão compartilhada).
+- `GET /api/meeting/attendance-log` (owner-only) e modal "Ver histórico
+  completo" em `MeetingPage.jsx`.
+
+**Pagamentos:**
+- `PaymentPage.jsx`: coluna "Data" virou "Data/Hora" (mostrava só a data,
+  escondendo a hora de início de cada entrada). Entradas de reunião ganharam
+  um toggle "detalhes da reunião" com início, fim e duração completos.
+
+### Desvios do spec original (com justificativa):
+
+- Migração nomeada `0059_meeting_attendance.sql`, não `0057` — os números
+  0057 e 0058 já foram usados nesta mesma sessão (drive_hidden, market_org_geo).
+- Não foi adicionado `LEFT JOIN career_opportunities` em `shapeTask()`/
+  `TASK_SELECT` — mantido o padrão já existente no código (lookup client-side
+  no store via `careerOpportunities`), para não alterar o formato de resposta
+  de `/api/tasks` consumido em vários outros lugares.
+- As consultas `wrangler d1 execute --remote` pedidas na investigação não
+  puderam ser rodadas neste ambiente (sem credenciais Cloudflare); a análise
+  foi feita por leitura de código/schema, suficiente para desenhar os fixes.
+
 ## [II.1.0.0] — 2026-08-10
 
 ### Início do Arco II — Metodologia e versionamento formal

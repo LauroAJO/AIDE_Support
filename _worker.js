@@ -288,6 +288,7 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/meeting/stop') return handleMeetingStop(request, env, user);
   if (path === '/api/meeting/status') return handleMeetingStatus(request, env, user);
   if (path === '/api/meeting/notes') return handleMeetingNotes(request, env, user);
+  if (path === '/api/meeting/attendance-log') return handleMeetingAttendanceLog(request, env, user);
 
   // Personal data
   if (path === '/api/profile/personal') return handlePersonalData(request, env, user);
@@ -8091,20 +8092,40 @@ async function getActiveMeetingSession(env) {
   }
 }
 
-// Participantes = entradas de tempo AINDA ABERTAS na tarefa da reunião, desde o
-// início da sessão. Filtra por task_id (não por LIKE '%Reunião%'), senão uma
-// tarefa qualquer chamada "Reunião com cliente" entraria na conta e impediria
-// a sessão de fechar.
-async function getMeetingParticipants(env, taskId, sinceTs) {
+// Participantes = entradas de tempo AINDA ABERTAS na tarefa da reunião. Filtra
+// por task_id (não por LIKE '%Reunião%'), senão uma tarefa qualquer chamada
+// "Reunião com cliente" entraria na conta e impediria a sessão de fechar.
+//
+// v-attendance-fix — deixou de filtrar por `sinceTs` (início da sessão
+// compartilhada). Antes disso, uma assistente que entrasse ANTES do Lauro
+// tinha `time_entries.started_at` menor que `session.started_at` e sumia da
+// lista — mesmo com o timer dela rodando de verdade. A regra de negócio (ver
+// investigação task↔career/meeting) é: qualquer participante com entrada
+// aberta na tarefa da reunião está "presente agora", independente de quando a
+// sessão compartilhada (o relógio do Lauro) começou.
+async function getMeetingParticipants(env, taskId) {
   if (!taskId) return [];
   const { results } = await env.DB.prepare(
     `SELECT u.id, u.name, u.email, e.started_at
        FROM time_entries e
        JOIN users u ON u.id = e.user_id
-      WHERE e.task_id = ? AND e.ended_at IS NULL AND e.started_at >= ?
+      WHERE e.task_id = ? AND e.ended_at IS NULL
       ORDER BY e.started_at`
-  ).bind(taskId, sinceTs || 0).all();
+  ).bind(taskId).all();
   return results || [];
+}
+
+// Attendance log (migration 0059) — histórico de entradas/saídas, independente
+// da sessão compartilhada. Best-effort: uma falha aqui (ex.: migração ainda
+// não aplicada) não pode derrubar o fluxo principal de iniciar/parar reunião.
+async function logMeetingAttendance(env, userId, action, sessionId, taskId) {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO meeting_attendance_log (id, user_id, action, session_id, task_id, at, created_at)
+       VALUES (?,?,?,?,?,?,?)`
+    ).bind(crypto.randomUUID(), userId, action, sessionId || null, taskId || null, now, now).run();
+  } catch { /* tabela ausente (migração pendente) ou erro acessório — ignora */ }
 }
 
 async function handleMeetingStart(request, env, user) {
@@ -8120,22 +8141,23 @@ async function handleMeetingStart(request, env, user) {
   const meetingDate = (body.date && String(body.date).trim())
     || new Date(now * 1000).toISOString().slice(0, 10);
 
-  // 1) Sessão compartilhada: reusa a aberta, senão cria.
+  // 1) Sessão compartilhada: reusa a aberta, senão cria — SÓ o owner pode
+  //    abrir uma sessão nova (v2.25.19, mantido).
   //
-  // Só o owner pode ABRIR uma sessão nova (v2.25.19). Antes, quem clicasse
-  // primeiro — inclusive uma assistente sozinha na sala — criava a sessão e
-  // contava tempo de reunião sem o Lauro estar na call. Uma sessão já aberta
-  // continua aceitando qualquer participante normalmente (entrar/"joined").
+  // v-attendance-fix (regras 1/2 da investigação task↔career/meeting) — antes,
+  // uma assistente sem sessão aberta era bloqueada com 409 e NENHUM registro
+  // de tempo era criado: ela não conseguia nem começar a contar o próprio
+  // tempo até o Lauro entrar. A regra correta é: qualquer pessoa autorizada
+  // (canDo já checado acima) pode iniciar sua PRÓPRIA contagem a qualquer
+  // momento — só o relógio COMPARTILHADO (meeting_sessions) espera o owner.
+  // Por isso a ausência de sessão deixa de ser erro: session permanece null
+  // para não-owners até o Lauro entrar, e o passo 2 (time_entries) roda de
+  // qualquer forma.
   let session = await getActiveMeetingSession(env);
   let joined = false;
   if (session) {
     joined = true;
-  } else if (user.role !== 'owner') {
-    return json({
-      error: 'Aguarde o Lauro iniciar a reunião.',
-      code: 'session_not_started',
-    }, 409);
-  } else {
+  } else if (user.role === 'owner') {
     const sid = crypto.randomUUID();
     try {
       await env.DB.prepare(
@@ -8150,8 +8172,12 @@ async function handleMeetingStart(request, env, user) {
       joined = !!session;
     }
   }
+  // Não-owner sem sessão ativa: session continua null, joined continua false.
+  // Isso é esperado — ela está rastreando o próprio tempo sozinha, à espera
+  // do Lauro para o relógio compartilhado começar.
 
-  // 2) Entrada de tempo individual — comportamento original, intocado.
+  // 2) Entrada de tempo individual — agora incondicional (qualquer usuário
+  //    autorizado chega até aqui, com ou sem sessão compartilhada aberta).
   await stopActiveEntry(env, user.id, now);
   const avail = await env.DB.prepare(
     'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
@@ -8166,15 +8192,19 @@ async function handleMeetingStart(request, env, user) {
   ).bind(id, taskId, user.id, now, null, null, rate, 0, '', now).run();
   const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
 
+  // 3) Log de presença (migration 0059) — independente da sessão.
+  await logMeetingAttendance(env, user.id, 'joined', session ? session.id : null, taskId);
+
   return json({
     taskId,
     entryId: id,
     entry: shapeEntry(row),
-    joined,                                        // true = entrou numa reunião já em curso
+    joined,                                        // true = entrou numa sessão compartilhada já em curso
     session_id: session ? session.id : null,
     session_started_at: session ? session.started_at : null,
+    session_pending: !session,                     // true = você já está contando tempo, mas o relógio compartilhado ainda espera o Lauro
     user_entry_started_at: now,
-    participants: await getMeetingParticipants(env, taskId, session ? session.started_at : now),
+    participants: await getMeetingParticipants(env, taskId),
   }, 201);
 }
 
@@ -8236,12 +8266,14 @@ async function handleMeetingStop(request, env, user) {
     } catch { /* notificação é acessório */ }
   }
 
+  // 1c) Log de presença (migration 0059) — saída, independente da sessão.
+  const sessionAtLeave = await getActiveMeetingSession(env);
+  await logMeetingAttendance(env, user.id, 'left', sessionAtLeave ? sessionAtLeave.id : null, active.task_id);
+
   // 2) Sobrou alguém? A checagem roda DEPOIS do update acima, então o próprio
   //    usuário já não conta.
-  const session = await getActiveMeetingSession(env);
-  const remaining = await getMeetingParticipants(
-    env, active.task_id, session ? session.started_at : 0
-  );
+  const session = sessionAtLeave;
+  const remaining = await getMeetingParticipants(env, active.task_id);
   let sessionClosed = false;
   if (session && remaining.length === 0) {
     await env.DB.prepare(
@@ -8271,9 +8303,12 @@ async function handleMeetingStatus(request, env, user) {
     ? userEntry.task_id
     : (await env.DB.prepare('SELECT id FROM tasks WHERE title = ? LIMIT 1')
         .bind(MEETING_TASK_TITLE).first())?.id || null;
-  const participants = session
-    ? await getMeetingParticipants(env, taskId, session.started_at)
-    : [];
+  // v-attendance-fix — participantes agora são listados sempre que existir a
+  // tarefa da reunião, MESMO sem sessão compartilhada aberta. Antes, uma
+  // assistente sozinha rastreando o próprio tempo (session_pending) não
+  // aparecia para ninguém até o Lauro entrar — inclusive para ela mesma em
+  // outra aba/dispositivo.
+  const participants = await getMeetingParticipants(env, taskId);
 
   return json({
     // `inMeeting` mantém o significado antigo (o SEU timer está rodando) para
@@ -8285,13 +8320,42 @@ async function handleMeetingStatus(request, env, user) {
     startedAt: userEntry ? userEntry.started_at : null,
     user_started_at: userEntry ? userEntry.started_at : null,
     elapsedSeconds: userEntry ? Math.max(0, now - userEntry.started_at) : 0,
-    // Dados COMPARTILHADOS — iguais para todos os participantes.
+    // Dados COMPARTILHADOS — iguais para todos os participantes. Ausência de
+    // sessão (session_id null) significa "ninguém com papel de owner entrou
+    // ainda" — não significa "ninguém está na reunião".
     session_id: session ? session.id : null,
     session_started_at: session ? session.started_at : null,
     session_elapsed_seconds: session ? Math.max(0, now - session.started_at) : 0,
+    session_pending: !session && participants.length > 0,
     participants,
     serverNow: now,
   });
+}
+
+// Histórico de presença (migration 0059) — só o owner vê (mesma lógica de
+// "quem paga, audita"). Retorna as últimas N entradas, mais recentes primeiro,
+// com o nome do usuário já resolvido para a tela não precisar de outro fetch.
+async function handleMeetingAttendanceLog(request, env, user) {
+  if (user.role !== 'owner') {
+    return json({ error: 'Apenas o Lauro pode ver o histórico de presença' }, 403);
+  }
+  const url = new URL(request.url);
+  const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get('limit'), 10) || 200));
+  let results = [];
+  try {
+    ({ results } = await env.DB.prepare(
+      `SELECT l.id, l.user_id, u.name, u.email, l.action, l.session_id, l.task_id, l.at
+         FROM meeting_attendance_log l
+         JOIN users u ON u.id = l.user_id
+        ORDER BY l.at DESC
+        LIMIT ?`
+    ).bind(limit).all());
+  } catch {
+    // Migração 0059 ainda não aplicada no remoto — degrada para lista vazia
+    // em vez de 500, já que este endpoint é só para exibição de histórico.
+    results = [];
+  }
+  return json({ entries: results || [] });
 }
 
 // Notas de reunião persistidas em D1 (meeting_notes, uma linha por data).

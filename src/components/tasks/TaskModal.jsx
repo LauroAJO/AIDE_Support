@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { X, Star, Pencil, CheckCircle2, Trash2, Paperclip, ExternalLink, Send, CornerDownRight } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { X, Star, Pencil, CheckCircle2, Trash2, Paperclip, ExternalLink, Send, CornerDownRight, Briefcase } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
 import Avatar from '../shared/Avatar';
@@ -15,6 +16,7 @@ import {
 import { MarkdownViewer } from '../../lib/markdownRenderer';
 import AvatarStack from '../shared/AvatarStack';
 import { scoreColor, STATUS_LABELS, STATUS_COLORS, formatDate, isOverdue, WEEKDAY_CHIPS, taskAssignees } from '../../lib/tasks';
+import { OPP_STATUS_LABELS } from '../career/careerShared';
 
 // Recorrência (v2.25.5): "Personalizada" no seletor é só uma forma alternativa
 // de configurar o mesmo recurrence_type ('daily'/'weekly'/'monthly') — deixa
@@ -229,6 +231,7 @@ function ParentTaskNote({ parentTaskId, onOpenTask }) {
 // Centered modal: read-only view + quick actions. Editing the full task still
 // uses the existing TaskEditor slide-in (opened via onEdit).
 export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, onOpenTask }) {
+  const navigate = useNavigate();
   const currentUser = useStore((s) => s.user);
   // v2.26.2 — mesma lógica do TaskCard: tarefa vinculada a uma oportunidade em
   // "Mapear" (extract_knowledge) ou já arquivada como mapeada (status='mapped')
@@ -403,6 +406,29 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
           )}
 
           <RecurrenceSection key={task.id} task={task} onPersist={onPersist} />
+
+          {/* Fix 1 (spec de investigação task↔career) — link de volta para a
+              vaga de Carreira, quando a tarefa nasceu de uma oportunidade. */}
+          {linkedOpportunity && (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface2/60 p-3">
+              <div className="min-w-0">
+                <div className="text-[11px] font-medium uppercase tracking-wide text-muted">Vaga vinculada</div>
+                <div className="mt-0.5 flex items-center gap-2">
+                  <span className="truncate text-sm font-medium text-ink">{linkedOpportunity.title}</span>
+                  <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-ink2 bg-surface">
+                    {OPP_STATUS_LABELS[linkedOpportunity.status] || linkedOpportunity.status}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate(`/career?opportunity=${task.opportunity_id}`)}
+                className="flex shrink-0 items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-ink2 hover:bg-surface"
+              >
+                <Briefcase className="h-3.5 w-3.5" /> Ver no Pipeline →
+              </button>
+            </div>
+          )}
 
           {task.tags?.length > 0 && (
             <div className="flex flex-wrap gap-1.5">

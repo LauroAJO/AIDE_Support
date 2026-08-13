@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Video, Play, Pause, RotateCcw, ArrowRight, Square, Bell, ChevronLeft, ChevronRight, FileText,
+  History, X as XIcon, LogIn, LogOut,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { apiFetch } from '../../lib/api';
@@ -203,6 +204,70 @@ function AgendaCountdown() {
   );
 }
 
+// Modal de histórico completo de presença (owner-only) — lê meeting_attendance_log
+// via GET /api/meeting/attendance-log. Cada linha é um evento (entrou/saiu),
+// mais recente primeiro; agrupar por sessão fica complexo demais para o valor
+// que traria aqui — a lista crua já responde "quem entrou/saiu e quando".
+function AttendanceHistoryModal({ onClose }) {
+  const [entries, setEntries] = useState(null); // null = carregando
+  const [loadError, setLoadError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/meeting/attendance-log?limit=200');
+        if (!cancelled) setEntries((res && res.entries) || []);
+      } catch (e) {
+        if (!cancelled) setLoadError(String((e && e.message) || e) || 'Falha ao carregar histórico.');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const fmt = (ts) => new Date(ts * 1000).toLocaleString('pt-BR', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-surface shadow-soft">
+        <div className="flex items-center justify-between gap-3 border-b border-line p-4">
+          <h3 className="flex items-center gap-2 text-base font-bold text-ink">
+            <History className="h-4 w-4 text-accent" /> Histórico de presença
+          </h3>
+          <button onClick={onClose} className="rounded-md p-1 text-ink2 hover:bg-surface2 hover:text-ink">
+            <XIcon className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          {loadError && <p className="text-sm text-danger">{loadError}</p>}
+          {!loadError && entries === null && (
+            <p className="text-sm text-muted">Carregando...</p>
+          )}
+          {!loadError && entries && entries.length === 0 && (
+            <p className="text-sm text-muted">Nenhum registro de presença ainda.</p>
+          )}
+          {!loadError && entries && entries.length > 0 && (
+            <ul className="space-y-1.5">
+              {entries.map((e) => (
+                <li key={e.id} className="flex items-center gap-2 text-sm">
+                  {e.action === 'joined'
+                    ? <LogIn className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                    : <LogOut className="h-3.5 w-3.5 shrink-0 text-amber-600" />}
+                  <span className="font-medium text-ink">{e.name || e.email}</span>
+                  <span className="text-ink2">{e.action === 'joined' ? 'entrou' : 'saiu'}</span>
+                  <span className="ml-auto shrink-0 text-xs text-muted">{fmt(e.at)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function MeetingPage() {
   const navigate = useNavigate();
   const tasks = useStore((s) => s.tasks);
@@ -221,6 +286,7 @@ export default function MeetingPage() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
 
   // --- Notas de reunião (persistidas em D1) -------------------------------
   const [form, setForm] = useState({ agenda: '', notes: '' });
@@ -463,16 +529,24 @@ export default function MeetingPage() {
   }, []);
 
   // Polling do status (v2.25.17): mantém a lista de participantes e o relógio
-  // compartilhado em dia. Só roda com sessão ativa e aba visível.
+  // compartilhado em dia.
+  //
+  // v-attendance-fix — antes só rodava com sessão compartilhada ativa
+  // (hasSession). Agora que uma assistente pode estar contando o próprio
+  // tempo SEM sessão (regra 1/2), o polling também precisa continuar nesse
+  // caso — senão a lista de participantes de outras telas/usuários fica
+  // travada até o Lauro entrar. Roda enquanto houver sessão OU alguém (este
+  // usuário incluído) já com timer aberto na reunião.
   const hasSession = !!(meetingStatus && meetingStatus.session_started_at);
+  const trackingActive = hasSession || inMeeting || (meetingStatus?.participants?.length > 0);
   useEffect(() => {
-    if (!hasSession) return undefined;
+    if (!trackingActive) return undefined;
     const iv = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       refreshStatus();
     }, 10000);
     return () => clearInterval(iv);
-  }, [hasSession, refreshStatus]);
+  }, [trackingActive, refreshStatus]);
 
   // Relógio COMPARTILHADO: conta a partir de session_started_at, então todos os
   // participantes veem o mesmo número — independente de quando cada um entrou.
@@ -590,6 +664,8 @@ export default function MeetingPage() {
         const hhmm = new Date(res.session_started_at * 1000)
           .toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         showToast(`Entrando na reunião iniciada às ${hhmm}`);
+      } else if (res && res.session_pending) {
+        showToast('Seu tempo começou a ser contado — aguardando o Lauro para o relógio compartilhado.');
       } else {
         showToast('Reunião iniciada');
       }
@@ -817,11 +893,22 @@ export default function MeetingPage() {
         <div className="space-y-4">
           {/* Global meeting timer (mirrors the header/sidebar timer) */}
           <div className="rounded-2xl border border-line bg-surface p-5 shadow-soft">
-            <p className="text-xs font-medium text-ink2">
-              {hasSession
-                ? (inMeeting ? 'Reunião em andamento' : 'Reunião em andamento (você fora)')
-                : 'Reunião não iniciada'}
-            </p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-ink2">
+                {hasSession
+                  ? (inMeeting ? 'Reunião em andamento' : 'Reunião em andamento (você fora)')
+                  : (participants.length > 0 ? 'Presença registrada — aguardando o Lauro' : 'Reunião não iniciada')}
+              </p>
+              {isOwner && (
+                <button
+                  type="button"
+                  onClick={() => setShowHistory(true)}
+                  className="flex items-center gap-1 text-[11px] font-medium text-ink2 hover:text-accent hover:underline"
+                >
+                  <History className="h-3 w-3" /> Ver histórico completo
+                </button>
+              )}
+            </div>
             {/* Relógio COMPARTILHADO — mesmo número em todas as telas (v2.25.17). */}
             <div
               className="mt-1 font-mono text-[36px] font-bold leading-none text-ink sm:text-[40px]"
@@ -830,18 +917,26 @@ export default function MeetingPage() {
               {hasSession ? formatHMS(sessionElapsed) : '00:00:00'}
             </div>
 
+            {/* v-attendance-fix — lista "Em reunião agora" completa (nome + hora de
+                entrada), não só um avatar com título no hover. Mostra qualquer
+                participante com time_entries aberto, mesmo antes do Lauro entrar
+                (regra 1/2: cada um começa a contar o próprio tempo quando quer). */}
             {participants.length > 0 && (
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] text-muted">Em reunião:</span>
-                {participants.map((p) => (
-                  <span
-                    key={p.id || p.email}
-                    title={`${p.name || p.email} — entrou às ${new Date((p.started_at || 0) * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`}
-                    className="flex h-5 w-5 items-center justify-center rounded-full bg-accent text-[10px] font-bold text-white"
-                  >
-                    {initialsOf(p)}
-                  </span>
-                ))}
+              <div className="mt-2 space-y-1">
+                <span className="text-[11px] font-medium text-muted">Em reunião agora ({participants.length}):</span>
+                <ul className="space-y-0.5">
+                  {participants.map((p) => (
+                    <li key={p.id || p.email} className="flex items-center gap-1.5 text-[11px] text-ink2">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent text-[10px] font-bold text-white">
+                        {initialsOf(p)}
+                      </span>
+                      <span className="truncate">{p.name || p.email}</span>
+                      <span className="ml-auto shrink-0 text-muted">
+                        desde {new Date((p.started_at || 0) * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 
@@ -853,14 +948,18 @@ export default function MeetingPage() {
             <p className="mt-1 text-[11px] text-muted">
               Cronômetro compartilhado · seu tempo individual é o que vai para pagamento
             </p>
-            {/* v2.25.19 — assistentes só podem iniciar o PRÓPRIO tempo depois que
-                o Lauro já abriu a sessão (hasSession); o backend recusa a
-                criação de sessão nova para quem não é owner (código
-                session_not_started), então travar aqui também evita o clique
-                em vão e explica o motivo na hora. */}
-            {!isOwner && !hasSession && canDo(userGranular, 'meeting', 'start_stop') && (
+            {/* v-attendance-fix — regra 1/2: assistentes podem iniciar o PRÓPRIO
+                tempo a qualquer momento, mesmo antes do Lauro. Só o relógio
+                COMPARTILHADO espera o owner — por isso o botão "Iniciar Reunião"
+                deixou de ficar desabilitado sem sessão (era o bug reportado). */}
+            {!isOwner && !hasSession && canDo(userGranular, 'meeting', 'start_stop') && !inMeeting && (
               <p className="mt-2 text-[11px] font-medium text-amber-600">
-                Aguardando o Lauro iniciar a reunião…
+                Você pode começar a contar seu tempo agora — o relógio compartilhado inicia quando o Lauro entrar.
+              </p>
+            )}
+            {!isOwner && !hasSession && inMeeting && (
+              <p className="mt-2 text-[11px] font-medium text-amber-600">
+                Contando seu tempo — aguardando o Lauro para o relógio compartilhado começar.
               </p>
             )}
             {error && (
@@ -871,7 +970,7 @@ export default function MeetingPage() {
                 <button
                   type="button"
                   onClick={startMeeting}
-                  disabled={busy || (!isOwner && !hasSession)}
+                  disabled={busy}
                   className="flex flex-1 items-center justify-center gap-1.5 rounded-lg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
                   style={{ background: '#22C55E' }}
                 >
@@ -941,6 +1040,8 @@ export default function MeetingPage() {
           </ul>
         )}
       </section>
+
+      {showHistory && <AttendanceHistoryModal onClose={() => setShowHistory(false)} />}
 
       {selectedTask && (
         <TaskModal

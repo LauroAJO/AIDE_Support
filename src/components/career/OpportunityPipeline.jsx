@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Plus, X, ExternalLink, Loader2, Building2, User, CalendarClock, CheckSquare, Trash2, Star,
   Search, CheckCircle2, Archive as ArchiveIcon, RotateCcw,
@@ -85,6 +85,10 @@ function columnKeyForStatus(status) {
 export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed }) {
   const opps = useStore((s) => s.careerOpportunities);
   const setOpps = useStore((s) => s.setCareerOpportunities);
+  // Deep-link vindo de TaskCard/TaskModal ("Ver vaga em Carreira" — v2.25.22):
+  // ?opportunity=<id> abre o detalhe direto, mesmo padrão do ?task= da
+  // TasksPage. Limpa o param depois de consumir, senão um refresh reabriria.
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [loading, setLoading] = useState(true);
   const [trackFilter, setTrackFilter] = useState('all');
@@ -142,6 +146,16 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
     onInitialOrgConsumed && onInitialOrgConsumed();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialOrgId]);
+
+  useEffect(() => {
+    const oppId = searchParams.get('opportunity');
+    if (!oppId) return;
+    setModalId(oppId);
+    const next = new URLSearchParams(searchParams);
+    next.delete('opportunity');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const filtered = useMemo(
     () => (trackFilter === 'all' ? opps : opps.filter((o) => o.track === trackFilter)),
@@ -711,6 +725,19 @@ function OpportunityModal({ id, orgs, usersById, onClose, onChanged, onEditFull 
   const [loading, setLoading] = useState(true);
   const [notes, setNotes] = useState('');
   const [taskMsg, setTaskMsg] = useState('');
+  // Tarefa vinculada (opportunity_id = id) — v2.25.22, Fix 1: antes esta
+  // modal só oferecia "Criar Tarefa", nunca dizia se uma já existia nem
+  // deixava abri-la. Mesmo padrão de busca já usado nesta tela (linha ~226,
+  // handleArchive) — sem endpoint dedicado, filtra a lista completa.
+  const [linkedTask, setLinkedTask] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/tasks').then((all) => {
+      if (cancelled) return;
+      setLinkedTask((all || []).find((t) => t.opportunity_id === id) || null);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [id]);
 
   // `notes` no textarea = só o texto livre; as linhas do histórico de status
   // ficam guardadas em logLines e são re-anexadas ao salvar (ver saveNotes).
@@ -783,7 +810,7 @@ function OpportunityModal({ id, orgs, usersById, onClose, onChanged, onEditFull 
   const createTask = async () => {
     if (!data) return;
     try {
-      await apiFetch('/api/tasks', {
+      const created = await apiFetch('/api/tasks', {
         method: 'POST',
         body: JSON.stringify({
           title: `Carreira: ${data.title}`,
@@ -799,6 +826,7 @@ function OpportunityModal({ id, orgs, usersById, onClose, onChanged, onEditFull 
         }),
       });
       setTaskMsg('Tarefa criada ✓');
+      setLinkedTask(created);
     } catch {
       setTaskMsg('Falha ao criar tarefa');
     }
@@ -987,7 +1015,17 @@ function OpportunityModal({ id, orgs, usersById, onClose, onChanged, onEditFull 
             <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
               {taskMsg && <span className="mr-auto text-xs text-emerald-600">{taskMsg}</span>}
               <button type="button" onClick={() => onEditFull(data)} className="rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2">Editar completo</button>
-              <button type="button" onClick={createTask} className="flex items-center gap-1 rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2"><CheckSquare className="h-4 w-4" /> Criar Tarefa</button>
+              {linkedTask ? (
+                <button
+                  type="button"
+                  onClick={() => navigate(`/tasks?task=${linkedTask.id}`)}
+                  className="flex items-center gap-1 rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2"
+                >
+                  <CheckSquare className="h-4 w-4" /> Ver tarefa →
+                </button>
+              ) : (
+                <button type="button" onClick={createTask} className="flex items-center gap-1 rounded-lg border border-line px-4 py-2 text-sm text-ink2 hover:bg-surface2"><CheckSquare className="h-4 w-4" /> Criar Tarefa</button>
+              )}
               <button type="button" onClick={guard.requestClose} className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90">Fechar</button>
             </div>
           </>

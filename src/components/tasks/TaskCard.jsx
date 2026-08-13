@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { AlertTriangle, Star, ChevronRight, ChevronDown, Briefcase, Repeat, Search } from 'lucide-react';
 import AvatarStack from '../shared/AvatarStack';
 import { useStore } from '../../store';
@@ -25,6 +26,7 @@ function areaFadedBg(hexColor) {
 }
 
 export default function TaskCard({ task, selected, onClick, onToggleFavorite, onToggleSubtask }) {
+  const navigate = useNavigate();
   const overdue = isOverdue(task.due_date);
   const warn = needsDate(task);
   const fav = !!task.favorited;
@@ -146,10 +148,18 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
         </div>
       )}
       {opportunityTitle && !isMapping && (
-        <div className="mt-2 flex items-center gap-1 truncate text-[11px] font-medium text-accent" title={`Carreira: ${opportunityTitle}`}>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            navigate(`/career?opportunity=${task.opportunity_id}`);
+          }}
+          className="mt-2 flex w-full items-center gap-1 truncate text-left text-[11px] font-medium text-accent hover:underline"
+          title={`Ver vaga em Carreira: ${opportunityTitle}`}
+        >
           <Briefcase className="h-3 w-3 shrink-0" />
-          <span className="truncate">→ {opportunityTitle}</span>
-        </div>
+          <span className="truncate">→ Ver vaga em Carreira — {opportunityTitle}</span>
+        </button>
       )}
 
       {assignees.length > 0 && (

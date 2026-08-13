@@ -41,6 +41,17 @@ function formatEntryDate(unix) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
 }
 
+// Fix 6 (spec de investigação task↔career/meeting/payment) — a tabela mostrava
+// só a data, escondendo A QUE HORAS a entrada aconteceu (relevante sobretudo
+// para as entradas de reunião, onde vários registros podem cair no mesmo dia).
+const MEETING_TASK_TITLE = 'Reunião AIDE';
+function formatEntryDateTime(unix) {
+  if (!unix) return '';
+  const d = new Date(unix * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function dateKey(unix) {
   if (!unix) return '';
   const d = new Date(unix * 1000);
@@ -90,6 +101,13 @@ export default function PaymentPage() {
   });
   const [editEntry, setEditEntry] = useState(null); // time_entry payload
   const [showManual, setShowManual] = useState(false);
+  // Fix 6 — ids de entradas de reunião com o detalhe (início/fim/duração) expandido.
+  const [expandedMeeting, setExpandedMeeting] = useState(() => new Set());
+  const toggleMeetingDetails = (id) => setExpandedMeeting((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const [busy, setBusy] = useState(false);
   const [defaultRateDraft, setDefaultRateDraft] = useState('');
   const [savingDefaultRate, setSavingDefaultRate] = useState(false);
@@ -504,7 +522,7 @@ export default function PaymentPage() {
         <table className="w-full text-left text-xs">
           <thead>
             <tr className="border-b border-line text-muted">
-              <th className="py-2 pr-2 font-medium">Data</th>
+              <th className="py-2 pr-2 font-medium">Data/Hora</th>
               {isAllTab && <th className="py-2 pr-2 font-medium">Usuário</th>}
               <th className="py-2 pr-2 font-medium">Tarefa</th>
               <th className="py-2 pr-2 font-medium">Projeto</th>
@@ -548,11 +566,23 @@ export default function PaymentPage() {
                   );
                   lastDateKey = k;
                 }
+                const isMeetingEntry = e.taskTitle === MEETING_TASK_TITLE;
                 rows.push(
                   <tr key={e.id} className="border-b border-line/60 text-ink">
-                    <td className="py-2 pr-2 text-ink2">{formatEntryDate(e.started_at)}</td>
+                    <td className="py-2 pr-2 text-ink2">{formatEntryDateTime(e.started_at)}</td>
                     {isAllTab && <td className="py-2 pr-2 text-ink2">{e.userName || '—'}</td>}
-                    <td className="py-2 pr-2">{e.taskTitle}</td>
+                    <td className="py-2 pr-2">
+                      {e.taskTitle}
+                      {isMeetingEntry && (
+                        <button
+                          type="button"
+                          onClick={() => toggleMeetingDetails(e.id)}
+                          className="ml-1.5 text-[10px] font-medium text-accent hover:underline"
+                        >
+                          {expandedMeeting.has(e.id) ? 'ocultar detalhes ▴' : 'detalhes da reunião ▾'}
+                        </button>
+                      )}
+                    </td>
                     <td className="py-2 pr-2 text-ink2">{e.projectName || '—'}</td>
                     <td className="py-2 pr-2">{e.rateType === 'fixed' ? 'Fixo' : 'Por hora'}</td>
                     <td className="py-2 pr-2">
@@ -611,6 +641,18 @@ export default function PaymentPage() {
                     </td>
                   </tr>
                 );
+                if (isMeetingEntry && expandedMeeting.has(e.id)) {
+                  rows.push(
+                    <tr key={`${e.id}-details`} className="border-b border-line/60 bg-surface2/40">
+                      <td colSpan={(isOwner ? 10 : 9) + (isAllTab ? 1 : 0)} className="px-2 py-2 text-[11px] text-ink2">
+                        <span className="font-medium text-ink">Detalhes da reunião:</span>{' '}
+                        Início {formatEntryDateTime(e.started_at)} · Fim{' '}
+                        {e.ended_at ? formatEntryDateTime(e.ended_at) : '— (em andamento)'} · Duração{' '}
+                        {durationLabel(e.duration_seconds || 0)}
+                      </td>
+                    </tr>
+                  );
+                }
               }
               return rows;
             })()}

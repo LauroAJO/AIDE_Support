@@ -52,6 +52,17 @@ function formatEntryDateTime(unix) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// v-payment-time-range — a tabela já agrupa por data (linha de cabeçalho por
+// dia, ver `dateKey`), então repetir a data inteira em CADA linha era
+// redundante — e ainda assim só mostrava o início, sem o fim. Esta função
+// devolve só HH:MM, para a coluna virar um intervalo "início–fim" compacto.
+function formatEntryTime(unix) {
+  if (!unix) return '';
+  const d = new Date(unix * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function dateKey(unix) {
   if (!unix) return '';
   const d = new Date(unix * 1000);
@@ -522,7 +533,7 @@ export default function PaymentPage() {
         <table className="w-full text-left text-xs">
           <thead>
             <tr className="border-b border-line text-muted">
-              <th className="py-2 pr-2 font-medium">Data/Hora</th>
+              <th className="py-2 pr-2 font-medium">Início–Fim</th>
               {isAllTab && <th className="py-2 pr-2 font-medium">Usuário</th>}
               <th className="py-2 pr-2 font-medium">Tarefa</th>
               <th className="py-2 pr-2 font-medium">Projeto</th>
@@ -569,7 +580,11 @@ export default function PaymentPage() {
                 const isMeetingEntry = e.taskTitle === MEETING_TASK_TITLE;
                 rows.push(
                   <tr key={e.id} className="border-b border-line/60 text-ink">
-                    <td className="py-2 pr-2 text-ink2">{formatEntryDateTime(e.started_at)}</td>
+                    <td className="py-2 pr-2 text-ink2">
+                      {formatEntryTime(e.started_at)}
+                      {'–'}
+                      {e.ended_at ? formatEntryTime(e.ended_at) : <span className="text-amber-600">em andamento</span>}
+                    </td>
                     {isAllTab && <td className="py-2 pr-2 text-ink2">{e.userName || '—'}</td>}
                     <td className="py-2 pr-2">
                       {e.taskTitle}

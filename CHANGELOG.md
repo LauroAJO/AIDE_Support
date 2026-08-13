@@ -9,6 +9,15 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.3.1] — 2026-08-13
+
+### Pagamentos: coluna de horário virou intervalo início–fim
+
+Feedback direto na tela: a tabela já agrupa as entradas por data (cabeçalho de grupo por dia), então repetir a data inteira em cada linha era redundante — e a coluna só mostrava o início, nunca o fim.
+
+- `PaymentPage.jsx`: coluna "Início–Fim" (nome novo, era "Data/Hora") mostra só `HH:MM–HH:MM` por linha; entrada ainda aberta mostra "em andamento" em vez do horário de fim.
+- A seção expansível "Detalhes da reunião" (toggle nas entradas de reunião) continua mostrando data completa — ali faz sentido, é um resumo isolado, não repetido por linha.
+
 ## [II.1.3.0] — 2026-08-13
 
 ### Notificações: redesign completo, Task↔Carreira via backend, presença em reunião enriquecida

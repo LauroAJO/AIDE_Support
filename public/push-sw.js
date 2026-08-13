@@ -21,6 +21,16 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || '/';
+  // Fix A2 (Bloco A do redesign de notificações) — antes sempre abria '/'
+  // (a home), mesmo quando a notificação tinha um item específico. Prioriza
+  // o deep-link explícito (`link`, calculado no backend), depois monta um
+  // fallback a partir de taskId/noteId (mesmo padrão do clique no painel),
+  // e só cai em '/tasks' (não mais '/') como último recurso.
+  const data = event.notification.data || {};
+  const url = data.link
+    || (data.taskId ? `/tasks?task=${data.taskId}` : null)
+    || (data.noteId ? `/notes?note=${data.noteId}` : null)
+    || data.url
+    || '/tasks';
   event.waitUntil(self.clients.openWindow(url));
 });

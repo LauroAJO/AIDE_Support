@@ -233,13 +233,25 @@ function ParentTaskNote({ parentTaskId, onOpenTask }) {
 export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, onOpenTask }) {
   const navigate = useNavigate();
   const currentUser = useStore((s) => s.user);
+  // Fix B1 — título/status da vaga vêm do backend (TASK_SELECT já faz o JOIN
+  // com career_opportunities); fallback no store só para tarefas otimistas
+  // locais que ainda não passaram por um refetch.
+  const linkedOpportunityFallback = useStore((s) =>
+    (task && !task.opportunityTitle && task.opportunity_id)
+      ? s.careerOpportunities.find((o) => o.id === task.opportunity_id)
+      : null,
+  );
+  const opportunityTitle = task?.opportunityTitle || linkedOpportunityFallback?.title || null;
+  const opportunityStatus = task?.opportunityStatus || linkedOpportunityFallback?.status || null;
+  const opportunityExtractKnowledge = task?.opportunity_id
+    ? (task?.opportunityTitle
+      ? !!task.opportunityExtractKnowledge
+      : !!linkedOpportunityFallback?.extract_knowledge)
+    : false;
   // v2.26.2 — mesma lógica do TaskCard: tarefa vinculada a uma oportunidade em
   // "Mapear" (extract_knowledge) ou já arquivada como mapeada (status='mapped')
   // é de coleta de informação, não de candidatura — mostra um aviso no detalhe.
-  const linkedOpportunity = useStore((s) =>
-    task?.opportunity_id ? s.careerOpportunities.find((o) => o.id === task.opportunity_id) : null,
-  );
-  const isMapping = !!linkedOpportunity && (!!linkedOpportunity.extract_knowledge || linkedOpportunity.status === 'mapped');
+  const isMapping = !!opportunityTitle && (opportunityExtractKnowledge || opportunityStatus === 'mapped');
   // O modal é read-only + ações rápidas que persistem na hora; o ÚNICO texto
   // que se perdia ao fechar era o comentário em digitação — por isso ele tem
   // rascunho próprio. Chave separada da do TaskEditor de propósito: aquela
@@ -407,16 +419,17 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
 
           <RecurrenceSection key={task.id} task={task} onPersist={onPersist} />
 
-          {/* Fix 1 (spec de investigação task↔career) — link de volta para a
-              vaga de Carreira, quando a tarefa nasceu de uma oportunidade. */}
-          {linkedOpportunity && (
+          {/* Fix B3 (spec Notifications+Task↔Career+Meeting) — link de volta para
+              a vaga de Carreira, quando a tarefa nasceu de uma oportunidade. */}
+          {opportunityTitle && (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface2/60 p-3">
               <div className="min-w-0">
                 <div className="text-[11px] font-medium uppercase tracking-wide text-muted">Vaga vinculada</div>
                 <div className="mt-0.5 flex items-center gap-2">
-                  <span className="truncate text-sm font-medium text-ink">{linkedOpportunity.title}</span>
+                  <span className="truncate text-sm font-medium text-ink">{opportunityTitle}</span>
                   <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-ink2 bg-surface">
-                    {OPP_STATUS_LABELS[linkedOpportunity.status] || linkedOpportunity.status}
+                    {OPP_STATUS_LABELS[opportunityStatus] || opportunityStatus}
+                    {isMapping && ' · 🔍 Mapeamento'}
                   </span>
                 </div>
               </div>

@@ -9,6 +9,39 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.3.0] — 2026-08-13
+
+### Notificações: redesign completo, Task↔Carreira via backend, presença em reunião enriquecida
+
+**Nota:** a entrega anterior (II.1.2.0, Bloco Task↔Carreira/Reunião/Pagamentos) ainda não tinha sido implantada quando este pedido chegou — os dois conjuntos de mudanças estão nesta mesma versão.
+
+**Notificações (Bloco A):**
+- Clique numa notificação navega para o item exato: `/tasks?task=<id>`, `/notes?note=<id>`, ou uma rota própria por tipo (`/career`, `/bridge/staging`, `/gmail`, `/networking`, `/events`, `/meeting`) — antes só abria a lista genérica (`/tasks` ou `/notes`), sem abrir o item.
+- `task_assigned` mostra o título da tarefa como texto principal (antes era sempre "Fulano atribuiu uma tarefa a você", idêntico em toda notificação — o título real ficava escondido no corpo).
+- Ícone dedicado por tipo (11 tipos que caíam no sino genérico antes).
+- Painel redesenhado: agrupado por data (Hoje/Ontem/Últimos 7 dias/Mais antigas), mais largo (w-96), `max-h-[80vh]` sem cortar conteúdo, "Marcar todas como lidas" numa faixa própria sempre visível.
+- `markRead`/`markAllRead`/`remove` voltam a sincronizar com o servidor via `load()` em vez de só decrementar o contador local.
+- Erro ao carregar mostra mensagem + botão "Tentar de novo", não mais uma lista vazia silenciosa.
+- Push notification abre o item certo (`data.link`), não mais sempre `/`.
+- Backend: `entity_type`/`entity_id`/`link` adicionados às notificações (migração `0060_notification_link.sql`); `GET /api/notifications` sobe para limite 100 e aceita `?since=`.
+
+**Task↔Carreira (Bloco B) — agora via JOIN no backend:**
+- `TASK_SELECT` ganhou `LEFT JOIN career_opportunities`; `TaskCard`/`TaskModal` usam `task.opportunityTitle`/`opportunityStatus` direto da API, com fallback no store só para tarefas otimistas locais.
+
+**Reunião (Bloco C) — presença enriquecida:**
+- `GET /api/meeting/status` agora devolve participantes ativos E recém-saídos (`is_active`, `duration_seconds`), permitindo a MeetingPage mostrar "Em reunião agora" e "Já saíram" separadamente, com duração de cada um.
+- Rota de histórico renomeada para `GET /api/meeting/attendance`; coluna `meeting_attendance_log.at` renomeada para `timestamp`.
+- `handleMeetingStart`/`handleMeetingStop` ganharam campos extras na resposta (`is_owner`, `message`, `duration_seconds`) para clientes futuros.
+
+### Desvios do spec (com justificativa):
+
+- Migração de notificações nomeada `0060_notification_link.sql`, não `0058` — 0057, 0058 e 0059 já usados nesta sessão.
+- `logMeetingAttendance` grava o log de presença mesmo SEM `session_id` (o spec propunha `if (!sessionId) return;`) — do contrário, todo mundo que entra antes do Lauro (o caso central da Regra 1/2) simplesmente não apareceria no histórico, violando a própria Regra 4 ("every join/leave recorded").
+- `GET /api/meeting/attendance` mantém escopo amplo (últimas N entradas via `?limit=`) em vez de restringir à sessão mais recente — o escopo do spec omitiria linhas sem sessão e sessões anteriores à mais recente.
+- `co.hub_type` (pedido no Fix B1) não existe em `career_opportunities` — a coluna real é `extract_knowledge` (migração 0041); usada no lugar.
+- Notificação `meeting_ended` deixou de levar `task_id` (antes apontava para a tarefa interna "Reunião AIDE") — agora usa só `entity_type`/`link` para abrir `/meeting`, já que o clique não deve abrir a tarefa interna.
+- Regra 2 ("Owner is NOT paid") já era satisfeita estruturalmente antes desta entrega — `PaymentPage.jsx` filtra o owner da lista de abas/assistentes (`u.role !== 'owner'`) e `computePaymentSummary` sempre roda escopado a um `user_id` específico, nunca "todos". Nenhuma mudança de código foi necessária para essa regra.
+
 ## [II.1.2.0] — 2026-08-13
 
 ### Task↔Carreira (link bidirecional), regras de presença em reunião, log de presença, formatação de pagamentos

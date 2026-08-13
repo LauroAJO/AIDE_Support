@@ -34,16 +34,28 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
   // v2.25.19 — principal + co-responsáveis numa pilha só.
   const assignees = taskAssignees(task);
   const [expanded, setExpanded] = useState(false);
-  // Etapa 6 — nome da oportunidade vinculada, resolvido a partir do store.
+  // Fix B1 (spec Notifications+Task↔Career+Meeting) — título/status da vaga
+  // agora vêm direto do backend (TASK_SELECT faz o JOIN com
+  // career_opportunities), sem precisar de um segundo lookup no store. Mantém
+  // o fallback no store para tarefas otimistas locais que ainda não passaram
+  // por um refetch (ex.: logo após criar via OpportunityPipeline).
+  const linkedOpportunityFallback = useStore((s) =>
+    (!task.opportunityTitle && task.opportunity_id)
+      ? s.careerOpportunities.find((o) => o.id === task.opportunity_id)
+      : null,
+  );
+  const opportunityTitle = task.opportunityTitle || linkedOpportunityFallback?.title || null;
+  const opportunityStatus = task.opportunityStatus || linkedOpportunityFallback?.status || null;
+  const opportunityExtractKnowledge = task.opportunity_id
+    ? (task.opportunityTitle
+      ? !!task.opportunityExtractKnowledge
+      : !!linkedOpportunityFallback?.extract_knowledge)
+    : false;
   // v2.26.2 — quando a oportunidade vinculada está em "Mapear" (extract_knowledge)
   // ou já foi arquivada como mapeada (status='mapped'), a tarefa é de coleta de
   // informação, não de candidatura real — o card mostra um badge diferente
   // ("🔍 Mapeamento") em vez do "→ nome da vaga" padrão.
-  const linkedOpportunity = useStore((s) =>
-    task.opportunity_id ? s.careerOpportunities.find((o) => o.id === task.opportunity_id) : null,
-  );
-  const opportunityTitle = linkedOpportunity?.title || null;
-  const isMapping = !!linkedOpportunity && (!!linkedOpportunity.extract_knowledge || linkedOpportunity.status === 'mapped');
+  const isMapping = !!opportunityTitle && (opportunityExtractKnowledge || opportunityStatus === 'mapped');
 
   return (
     // role=button (not a real <button>) so the favorite <button> can nest validly.

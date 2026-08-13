@@ -205,7 +205,7 @@ function AgendaCountdown() {
 }
 
 // Modal de histórico completo de presença (owner-only) — lê meeting_attendance_log
-// via GET /api/meeting/attendance-log. Cada linha é um evento (entrou/saiu),
+// via GET /api/meeting/attendance (Fix C5). Cada linha é um evento (entrou/saiu),
 // mais recente primeiro; agrupar por sessão fica complexo demais para o valor
 // que traria aqui — a lista crua já responde "quem entrou/saiu e quando".
 function AttendanceHistoryModal({ onClose }) {
@@ -216,7 +216,7 @@ function AttendanceHistoryModal({ onClose }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiFetch('/api/meeting/attendance-log?limit=200');
+        const res = await apiFetch('/api/meeting/attendance?limit=200');
         if (!cancelled) setEntries((res && res.entries) || []);
       } catch (e) {
         if (!cancelled) setLoadError(String((e && e.message) || e) || 'Falha ao carregar histórico.');
@@ -257,7 +257,7 @@ function AttendanceHistoryModal({ onClose }) {
                     : <LogOut className="h-3.5 w-3.5 shrink-0 text-amber-600" />}
                   <span className="font-medium text-ink">{e.name || e.email}</span>
                   <span className="text-ink2">{e.action === 'joined' ? 'entrou' : 'saiu'}</span>
-                  <span className="ml-auto shrink-0 text-xs text-muted">{fmt(e.at)}</span>
+                  <span className="ml-auto shrink-0 text-xs text-muted">{fmt(e.timestamp)}</span>
                 </li>
               ))}
             </ul>
@@ -562,8 +562,16 @@ export default function MeetingPage() {
     return () => clearInterval(iv);
   }, [sessionStartedAt]);
 
-  const participants = meetingStatus?.participants || [];
+  // Fix C3/C6 — /api/meeting/status agora devolve participantes ativos E
+  // recém-saídos (is_active), para separar "Em reunião agora" de "Já
+  // saíram" sem um segundo fetch.
+  const allParticipants = meetingStatus?.participants || [];
+  const participants = allParticipants.filter((p) => p.is_active);
+  const departedParticipants = allParticipants.filter((p) => !p.is_active);
+  const sessionStartedBy = meetingStatus?.session_started_by || null;
   const initialsOf = (p) => (p.name || p.email || '?').trim().charAt(0).toUpperCase();
+  const fmtHM = (ts) => (ts ? new Date(ts * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '—');
+  const fmtMin = (sec) => `${Math.round((sec || 0) / 60)} min`;
 
   // Load tasks if the store is empty.
   useEffect(() => {
@@ -931,8 +939,33 @@ export default function MeetingPage() {
                         {initialsOf(p)}
                       </span>
                       <span className="truncate">{p.name || p.email}</span>
+                      {p.id === sessionStartedBy && (
+                        <span className="shrink-0 text-muted" title="Sessão iniciada por esta pessoa">⬅</span>
+                      )}
                       <span className="ml-auto shrink-0 text-muted">
-                        desde {new Date((p.started_at || 0) * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                        entrou às {fmtHM(p.started_at)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Fix C6 — "Já saíram": participantes com time_entries fechado na
+                janela da sessão atual (ou últimas 12h sem sessão). Mostra o
+                intervalo entrou–saiu e a duração de cada um. */}
+            {departedParticipants.length > 0 && (
+              <div className="mt-2 space-y-1">
+                <span className="text-[11px] font-medium text-muted">Já saíram:</span>
+                <ul className="space-y-0.5">
+                  {departedParticipants.map((p) => (
+                    <li key={`${p.id || p.email}-${p.started_at}`} className="flex items-center gap-1.5 text-[11px] text-muted">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface2 text-[10px] font-bold text-ink2">
+                        {initialsOf(p)}
+                      </span>
+                      <span className="truncate">{p.name || p.email}</span>
+                      <span className="ml-auto shrink-0">
+                        {fmtHM(p.started_at)}–{fmtHM(p.ended_at)} ({fmtMin(p.duration_seconds)})
                       </span>
                     </li>
                   ))}

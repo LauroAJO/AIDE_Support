@@ -288,7 +288,9 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/meeting/stop') return handleMeetingStop(request, env, user);
   if (path === '/api/meeting/status') return handleMeetingStatus(request, env, user);
   if (path === '/api/meeting/notes') return handleMeetingNotes(request, env, user);
-  if (path === '/api/meeting/attendance-log') return handleMeetingAttendanceLog(request, env, user);
+  // Fix C5 — rota renomeada de /attendance-log para /attendance para casar
+  // com o nome pedido no spec mais recente.
+  if (path === '/api/meeting/attendance') return handleMeetingAttendanceLog(request, env, user);
 
   // Personal data
   if (path === '/api/profile/personal') return handlePersonalData(request, env, user);
@@ -1426,6 +1428,11 @@ function shapeTask(row) {
     favorited: row.favorited ? 1 : 0,
     google_event_id: row.google_event_id || null,
     opportunity_id: row.opportunity_id || null,
+    // Fix B1 — evita um segundo fetch/lookup no store só para mostrar o
+    // título/status da vaga vinculada (TaskCard/TaskModal).
+    opportunityTitle: row.opportunity_title || null,
+    opportunityStatus: row.opportunity_status || null,
+    opportunityExtractKnowledge: row.opportunity_extract_knowledge ? 1 : 0,
     drive_attachments: parseJsonArray(row.drive_attachments),
     source: row.source || 'aide',
     lifegame_id: row.lifegame_id || null,
@@ -1485,15 +1492,24 @@ function shapeSubtasks(row) {
 // LEFT JOINs all the way through (front → project → area + assignee) so the
 // hierarchy is available on every task read. Wrapped via try/catch in shapeTask
 // callers — falls back to the legacy SELECT if migration 0015 hasn't landed.
+// v-attendance-fix / Fix B1 (spec Notifications+Task↔Career+Meeting) — JOIN
+// com career_opportunities para o front não precisar mais resolver o título
+// da vaga via lookup no store (padrão anterior, documentado como deviation na
+// entrega II.1.2.0). NOTA: o spec pedia `co.hub_type`, mas essa coluna não
+// existe em career_opportunities — o campo real (migration 0041) é
+// `extract_knowledge` (flag 0/1 de "Mapear"), usado aqui no lugar.
 const TASK_SELECT =
   'SELECT t.*, u.id AS au_id, u.name AS au_name, u.avatar AS au_avatar, ' +
   'f.name AS front_name, p.name AS project_name, ' +
-  'a.id AS area_id, a.name AS area_name, a.color AS area_color ' +
+  'a.id AS area_id, a.name AS area_name, a.color AS area_color, ' +
+  'co.title AS opportunity_title, co.status AS opportunity_status, ' +
+  'co.extract_knowledge AS opportunity_extract_knowledge ' +
   'FROM tasks t ' +
   'LEFT JOIN users u ON t.assigned_to = u.id ' +
   'LEFT JOIN fronts f ON t.front_id = f.id ' +
   'LEFT JOIN projects p ON t.project_id = p.id ' +
-  'LEFT JOIN areas a ON p.area_id = a.id';
+  'LEFT JOIN areas a ON p.area_id = a.id ' +
+  'LEFT JOIN career_opportunities co ON co.id = t.opportunity_id';
 
 // v2.25.19 — mesma consulta + os dois agregados da migration 0052:
 // co-responsaveis (task_assignees) e subtarefas-linha (tasks com is_subtask=1).
@@ -4218,6 +4234,13 @@ function shapeNotif(row) {
     body: row.body || '',
     task_id: row.task_id || null,
     note_id: row.note_id || null,
+    // Fix A2 (Bloco A do redesign de notificações) — presentes só depois da
+    // migration 0060; `|| ''`/`|| null` degradam graciosamente em linhas
+    // antigas ou se a migração ainda não rodou (a coluna simplesmente não
+    // vem no row e fica undefined).
+    entity_type: row.entity_type || '',
+    entity_id: row.entity_id || null,
+    link: row.link || '',
     read: !!row.read,
     created_at: row.created_at,
     fromUser: row.from_user_id
@@ -4229,20 +4252,40 @@ function shapeNotif(row) {
 async function createNotification(env, ctx, n) {
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
-  await env.DB.prepare(
-    `INSERT INTO notifications (id, from_user_id, to_user_id, type, title, body, task_id, note_id, read, created_at)
-     VALUES (?,?,?,?,?,?,?,?,0,?)`
-  ).bind(
-    id, n.from_user_id || null, n.to_user_id, n.type, n.title, n.body || '',
-    n.task_id || null, n.note_id || null, now
-  ).run();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO notifications
+         (id, from_user_id, to_user_id, type, title, body, task_id, note_id,
+          entity_type, entity_id, link, read, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)`
+    ).bind(
+      id, n.from_user_id || null, n.to_user_id, n.type, n.title, n.body || '',
+      n.task_id || null, n.note_id || null,
+      n.entity_type || '', n.entity_id || null, n.link || '', now
+    ).run();
+  } catch (e) {
+    // Migração 0060 (entity_type/entity_id/link) ainda não aplicada no
+    // remoto — degrada para o INSERT antigo em vez de falhar a notificação
+    // inteira (best-effort: perder o deep-link é melhor que perder o aviso).
+    if (!/no such column/i.test(String((e && e.message) || e))) throw e;
+    await env.DB.prepare(
+      `INSERT INTO notifications (id, from_user_id, to_user_id, type, title, body, task_id, note_id, read, created_at)
+       VALUES (?,?,?,?,?,?,?,?,0,?)`
+    ).bind(
+      id, n.from_user_id || null, n.to_user_id, n.type, n.title, n.body || '',
+      n.task_id || null, n.note_id || null, now
+    ).run();
+  }
 
   const job = pushToUser(env, n.to_user_id, {
     title: n.title,
     body: n.body || '',
     icon: '/icon-192.png',
     badge: '/icon-192.png',
-    data: { notificationId: id, taskId: n.task_id || null, noteId: n.note_id || null, url: '/' }
+    data: {
+      notificationId: id, taskId: n.task_id || null, noteId: n.note_id || null,
+      link: n.link || null, url: '/',
+    }
   });
   if (ctx && ctx.waitUntil) ctx.waitUntil(job);
   else await job.catch(() => {});
@@ -4397,13 +4440,33 @@ async function notifyTaskDue(env, ctx, task) {
 
 async function handleNotifications(request, env, user, ctx) {
   if (request.method === 'GET') {
+    // Fix A4 — limite subiu de 50 para 100; `?since=<unix>` filtra para só
+    // notificações criadas depois de um timestamp (paginação simples: o
+    // frontend manda o `created_at` mais antigo já carregado para pedir mais).
+    const url = new URL(request.url);
+    const since = parseInt(url.searchParams.get('since'), 10) || 0;
     try {
-      const { results } = await env.DB.prepare(
-        `${NOTIF_SELECT} WHERE n.to_user_id = ? ORDER BY n.read ASC, n.created_at DESC LIMIT 50`
-      ).bind(user.id).all();
+      const { results } = since
+        ? await env.DB.prepare(
+            `${NOTIF_SELECT} WHERE n.to_user_id = ? AND n.created_at > ? ORDER BY n.read ASC, n.created_at DESC LIMIT 100`
+          ).bind(user.id, since).all()
+        : await env.DB.prepare(
+            `${NOTIF_SELECT} WHERE n.to_user_id = ? ORDER BY n.read ASC, n.created_at DESC LIMIT 100`
+          ).bind(user.id).all();
       return json((results || []).map(shapeNotif));
-    } catch {
-      return json([]); // table not migrated yet — degrade gracefully
+    } catch (e) {
+      // v-notif-redesign (Fix A3/#8) — antes um erro real (ex.: tabela
+      // ausente por falta de migração, ou uma falha transiente do D1) virava
+      // silenciosamente uma lista vazia: o painel mostrava "Nenhuma
+      // notificação" mesmo havendo notificações de verdade, sem pista
+      // nenhuma de que algo tinha falhado. Diferencia os dois casos: tabela
+      // ausente degrada para lista vazia (comportamento esperado antes da
+      // migração), qualquer outro erro sobe como 500 com mensagem, para o
+      // frontend mostrar "Erro ao carregar" com botão de retry em vez de
+      // fingir que não há notificações.
+      const msg = String((e && e.message) || e);
+      if (/no such table/i.test(msg)) return json([]);
+      return json({ error: 'Falha ao carregar notificações', detail: msg }, 500);
     }
   }
   if (request.method === 'POST') {
@@ -4418,7 +4481,10 @@ async function handleNotifications(request, env, user, ctx) {
       title: body.title,
       body: body.body || '',
       task_id: body.task_id || null,
-      note_id: body.note_id || null
+      note_id: body.note_id || null,
+      entity_type: body.entity_type || '',
+      entity_id: body.entity_id || null,
+      link: body.link || '',
     });
     const row = await env.DB.prepare(`${NOTIF_SELECT} WHERE n.id = ?`).bind(id).first();
     return json(shapeNotif(row), 201);
@@ -6966,6 +7032,8 @@ async function runDailyNotifications(env) {
             type: 'bridge_pending',
             title: 'Itens do Lifegame aguardando revisão',
             body: `${tasksN} tarefa(s) e ${peopleN} pessoa(s) aguardando sua aprovação em Revisar Bridge`,
+            entity_type: 'bridge',
+            link: '/bridge/staging',
           });
           await dedupSet(key, 86400, env);
           sent += 1;
@@ -6992,6 +7060,8 @@ async function runDailyNotifications(env) {
           type: 'gmail_unread',
           title: 'Emails não lidos — LCEStech',
           body: `${gmailUnread} email(s) não lido(s) em lcestech.consulting@gmail.com`,
+          entity_type: 'gmail',
+          link: '/gmail',
         });
         await dedupSet(key, 86400, env);
         sent += 1;
@@ -7057,7 +7127,10 @@ async function runDailyNotifications(env) {
         to_user_id: assignedUser,
         type: 'staleness_alert',
         title: 'Perfil desatualizado',
-        body: `${entity.entity_name} não é atualizado há ${entity.daysSince} dias`
+        body: `${entity.entity_name} não é atualizado há ${entity.daysSince} dias`,
+        entity_type: entity.entity_type,
+        entity_id: entity.entity_id,
+        link: '/networking',
       });
 
       await dedupSet(key, 86400, env);
@@ -7119,6 +7192,9 @@ async function runEventDeadlineNotifications(env, today) {
       type: 'event_deadline',
       title: 'Prazo de evento se aproximando',
       body: `${label} — ${kind} em ${when}`,
+      entity_type: 'event',
+      entity_id: ev.id,
+      link: '/events',
     });
     await dedupSet(key, 86400, env);
     n += 1;
@@ -7156,6 +7232,9 @@ async function runCareerNotifications(env, today) {
       type: 'career_deadline',
       title: 'Deadline de oportunidade',
       body: `"${o.title}" tem prazo em ${o.deadline}`,
+      entity_type: 'opportunity',
+      entity_id: o.id,
+      link: `/career?opportunity=${o.id}`,
     });
     await dedupSet(key, 86400, env);
     deadlines += 1;
@@ -7177,6 +7256,9 @@ async function runCareerNotifications(env, today) {
       type: 'career_contact_due',
       title: 'Contato a fazer hoje',
       body: `${c.name || 'Contato'}${c.action ? ` — ${c.action}` : ''}`,
+      entity_type: 'person',
+      entity_id: c.pid,
+      link: '/career',
     });
     await dedupSet(key, 86400, env);
     contacts += 1;
@@ -7197,6 +7279,9 @@ async function runCareerNotifications(env, today) {
       type: 'career_inactive',
       title: 'Oportunidade parada',
       body: `"${o.title}" está sem atividade há mais de 14 dias`,
+      entity_type: 'opportunity',
+      entity_id: o.id,
+      link: `/career?opportunity=${o.id}`,
     });
     await dedupSet(key, 86400, env);
     inactive += 1;
@@ -8115,6 +8200,30 @@ async function getMeetingParticipants(env, taskId) {
   return results || [];
 }
 
+// Fix C3/C6 (Bloco C — meeting timer rules) — versão "rica" para a tela de
+// status: inclui quem JÁ SAIU recentemente (is_active=0), não só quem está
+// ativo agora, para o MeetingPage separar "Em reunião agora" de "Já saíram".
+// Janela: desde o início da sessão compartilhada ativa, ou (sem sessão) as
+// últimas 12h — mesmo fallback que o spec sugere via strftime('%s','now',
+// '-12 hours'). Participantes ainda ABERTOS (ended_at IS NULL) entram sempre,
+// mesmo que tenham começado fora da janela — repete o fix de
+// getMeetingParticipants (Regra 1/2: alguém pode estar contando tempo há mais
+// de 12h se a reunião realmente durou isso).
+async function getMeetingParticipantsFull(env, taskId, session) {
+  if (!taskId) return [];
+  const sinceTs = session ? session.started_at : Math.floor(Date.now() / 1000) - 12 * 3600;
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.name, u.email, u.avatar, u.role,
+            e.started_at, e.ended_at, e.duration_seconds,
+            CASE WHEN e.ended_at IS NULL THEN 1 ELSE 0 END AS is_active
+       FROM time_entries e
+       JOIN users u ON u.id = e.user_id
+      WHERE e.task_id = ? AND (e.ended_at IS NULL OR e.started_at >= ?)
+      ORDER BY e.started_at`
+  ).bind(taskId, sinceTs).all();
+  return results || [];
+}
+
 // Attendance log (migration 0059) — histórico de entradas/saídas, independente
 // da sessão compartilhada. Best-effort: uma falha aqui (ex.: migração ainda
 // não aplicada) não pode derrubar o fluxo principal de iniciar/parar reunião.
@@ -8122,7 +8231,7 @@ async function logMeetingAttendance(env, userId, action, sessionId, taskId) {
   try {
     const now = Math.floor(Date.now() / 1000);
     await env.DB.prepare(
-      `INSERT INTO meeting_attendance_log (id, user_id, action, session_id, task_id, at, created_at)
+      `INSERT INTO meeting_attendance_log (id, user_id, action, session_id, task_id, timestamp, created_at)
        VALUES (?,?,?,?,?,?,?)`
     ).bind(crypto.randomUUID(), userId, action, sessionId || null, taskId || null, now, now).run();
   } catch { /* tabela ausente (migração pendente) ou erro acessório — ignora */ }
@@ -8200,10 +8309,13 @@ async function handleMeetingStart(request, env, user) {
     entryId: id,
     entry: shapeEntry(row),
     joined,                                        // true = entrou numa sessão compartilhada já em curso
+    is_owner: user.role === 'owner',                // Fix C1
     session_id: session ? session.id : null,
     session_started_at: session ? session.started_at : null,
     session_pending: !session,                     // true = você já está contando tempo, mas o relógio compartilhado ainda espera o Lauro
+    user_started_at: now,                           // Fix C1 (alias de user_entry_started_at)
     user_entry_started_at: now,
+    message: user.role === 'owner' ? 'Reunião iniciada' : 'Entraste na reunião', // Fix C1
     participants: await getMeetingParticipants(env, taskId),
   }, 201);
 }
@@ -8253,15 +8365,22 @@ async function handleMeetingStop(request, env, user) {
       const { ownerId } = await getRoleUsers(env);
       if (ownerId && ownerId !== user.id) {
         const durationMin = Math.round(duration / 60);
-        await env.DB.prepare(
-          `INSERT INTO notifications
-             (id, from_user_id, to_user_id, type, title, body, task_id, note_id, read, created_at)
-           VALUES (?,?,?,'meeting_ended','Reunião encerrada',?,?,NULL,0,?)`
-        ).bind(
-          crypto.randomUUID(), user.id, ownerId,
-          `${user.name || user.email} saiu da reunião após ${durationMin} minutos`,
-          active.task_id || null, now
-        ).run();
+        // v-notif-redesign — trocado o INSERT bruto pelo helper createNotification
+        // (antes escrevia direto na tabela, sem entity_type/entity_id/link e sem
+        // o fallback de degradação se a migração 0060 ainda não tiver rodado).
+        // NÃO usa task_id aqui de propósito: task_id é reservado para "abrir a
+        // tarefa" no clique (Fix A1); esta notificação deve abrir a página da
+        // Reunião, não a tarefa interna "Reunião AIDE" — por isso vai só em
+        // entity_type/link, e o clique é roteado pelo tipo, não por task_id.
+        await createNotification(env, null, {
+          from_user_id: user.id,
+          to_user_id: ownerId,
+          type: 'meeting_ended',
+          title: 'Reunião encerrada',
+          body: `${user.name || user.email} saiu da reunião após ${durationMin} minutos`,
+          entity_type: 'meeting',
+          link: '/meeting',
+        });
       }
     } catch { /* notificação é acessório */ }
   }
@@ -8285,6 +8404,7 @@ async function handleMeetingStop(request, env, user) {
   return json({
     taskId: active.task_id,
     duration: now - active.started_at,
+    duration_seconds: now - active.started_at,      // Fix C2 (alias explícito pedido no spec)
     sessionClosed,                                 // true = você era o último
     session_id: session ? session.id : null,
     remainingParticipants: remaining,
@@ -8308,7 +8428,13 @@ async function handleMeetingStatus(request, env, user) {
   // assistente sozinha rastreando o próprio tempo (session_pending) não
   // aparecia para ninguém até o Lauro entrar — inclusive para ela mesma em
   // outra aba/dispositivo.
-  const participants = await getMeetingParticipants(env, taskId);
+  //
+  // Fix C3/C6 — `participants` agora vem de getMeetingParticipantsFull, que
+  // inclui quem JÁ SAIU recentemente (is_active=0) além de quem está ativo
+  // agora, para o front separar "Em reunião agora" de "Já saíram" sem um
+  // segundo fetch. `active_count` conta só os ativos.
+  const participants = await getMeetingParticipantsFull(env, taskId, session);
+  const activeCount = participants.filter((p) => p.is_active).length;
 
   return json({
     // `inMeeting` mantém o significado antigo (o SEU timer está rodando) para
@@ -8325,9 +8451,11 @@ async function handleMeetingStatus(request, env, user) {
     // ainda" — não significa "ninguém está na reunião".
     session_id: session ? session.id : null,
     session_started_at: session ? session.started_at : null,
+    session_started_by: session ? session.started_by : null,
     session_elapsed_seconds: session ? Math.max(0, now - session.started_at) : 0,
-    session_pending: !session && participants.length > 0,
+    session_pending: !session && activeCount > 0,
     participants,
+    active_count: activeCount,                      // Fix C3
     serverNow: now,
   });
 }
@@ -8335,6 +8463,13 @@ async function handleMeetingStatus(request, env, user) {
 // Histórico de presença (migration 0059) — só o owner vê (mesma lógica de
 // "quem paga, audita"). Retorna as últimas N entradas, mais recentes primeiro,
 // com o nome do usuário já resolvido para a tela não precisar de outro fetch.
+//
+// DEVIATION vs. spec Fix C5: o spec pedia escopo limitado à sessão mais
+// recente (`WHERE session_id = (SELECT ... ORDER BY started_at DESC LIMIT 1)`).
+// Isso omitiria linhas sem session_id — exatamente as entradas de quem entrou
+// antes do Lauro (Regra 1/2) — e qualquer sessão anterior à mais recente.
+// Mantido o escopo mais amplo (últimas N entradas, `?limit=`) para o
+// "histórico completo" ser de fato completo.
 async function handleMeetingAttendanceLog(request, env, user) {
   if (user.role !== 'owner') {
     return json({ error: 'Apenas o Lauro pode ver o histórico de presença' }, 403);
@@ -8344,10 +8479,11 @@ async function handleMeetingAttendanceLog(request, env, user) {
   let results = [];
   try {
     ({ results } = await env.DB.prepare(
-      `SELECT l.id, l.user_id, u.name, u.email, l.action, l.session_id, l.task_id, l.at
+      `SELECT l.id, l.user_id, u.name, u.email, l.action, l.session_id, l.task_id,
+              l.timestamp, datetime(l.timestamp, 'unixepoch') AS time_readable
          FROM meeting_attendance_log l
          JOIN users u ON u.id = l.user_id
-        ORDER BY l.at DESC
+        ORDER BY l.timestamp DESC
         LIMIT ?`
     ).bind(limit).all());
   } catch {

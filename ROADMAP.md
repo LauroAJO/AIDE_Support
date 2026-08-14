@@ -13,6 +13,7 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.4.0 | 2026-08-14 | Painel de debug (🐛): log de API (últimas 50 chamadas) + changelog compacto, direto no app — portado do BBE |
 | II.1.3.1 | 2026-08-13 | Pagamentos: coluna vira intervalo início–fim (sem repetir a data já agrupada) |
 | II.1.3.0 | 2026-08-13 | Notificações: redesign completo (deep-link, ícones, agrupamento), Task↔Carreira via JOIN, presença em reunião enriquecida (ativos + saídos) |
 | II.1.2.0 | 2026-08-13 | Task↔Carreira, regras de presença em reunião, log de presença, pagamentos com hora |

@@ -33,6 +33,7 @@ import AdminPage from './components/admin/AdminPage';
 import BridgeCurationPage from './components/bridge/BridgeCurationPage';
 import DexStagingPage from './components/networking/DexStagingPage';
 import PendingApprovalPage from './components/PendingApprovalPage';
+import DebugPanel from './components/DebugPanel';
 
 // Permission-aware route gate. Owner bypasses. Anyone else needs a non-'none'
 // value on userPermissions[feature]; missing/none renders the friendly
@@ -184,23 +185,37 @@ export default function App() {
 
   if (isLoading) {
     return (
-      <div className="h-screen bg-base">
-        <LoadingSpinner label="Iniciando o Aide..." />
-      </div>
+      <>
+        <div className="h-screen bg-base">
+          <LoadingSpinner label="Iniciando o Aide..." />
+        </div>
+        <DebugPanel />
+      </>
     );
   }
 
   // Pending users (or anyone bounced from OAuth with ?pending=true and no
   // token) see the waiting screen instead of the login or the app shell.
   if (pendingFlag || (user && user.status === 'pending')) {
-    return <PendingApprovalPage />;
+    return (
+      <>
+        <PendingApprovalPage />
+        <DebugPanel />
+      </>
+    );
   }
 
   if (!user) {
-    return <Login />;
+    return (
+      <>
+        <Login />
+        <DebugPanel />
+      </>
+    );
   }
 
   return (
+    <>
     <Layout>
       <ErrorBoundary>
         <Routes>
@@ -265,5 +280,7 @@ export default function App() {
         </Routes>
       </ErrorBoundary>
     </Layout>
+    <DebugPanel />
+    </>
   );
 }

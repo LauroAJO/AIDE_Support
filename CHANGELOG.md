@@ -9,6 +9,22 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.4.0] — 2026-08-14
+
+### Painel de debug (🐛): log de API + changelog dentro do app
+
+Padrão portado do Birdie Bear Entertainment (BBE), onde foi criado pra diagnosticar problemas no PWA instalado sem precisar abrir o DevTools do navegador (nem sempre há um computador por perto). O AIDE já tinha as duas peças de base prontas — `apiFetch` centralizado (`src/lib/api.js`) e `version.js` — faltava só o log e o painel.
+
+- `src/lib/api.js`: `apiFetch` agora grava cada chamada (método, URL, status, duração, erro) num array em memória limitado a 50 entradas, com `getApiLog`/`subscribeApiLog`/`clearApiLog`. Comportamento de sucesso/erro de `apiFetch` para quem já chama a função não muda — é só instrumentação adicional.
+- `src/changelog.js` (novo): versão compacta do `CHANGELOG.md`, mantida em paralelo manualmente — só os destaques, pensada pra leitura rápida dentro do app.
+- `src/components/DebugPanel.jsx` (novo): botão 🐛 fixo (canto inferior esquerdo), bottom-sheet com abas "API log" (lista as chamadas, com botão "Copiar tudo" e "Limpar") e "Changelog" (lê `src/changelog.js`).
+- `App.jsx`: `<DebugPanel />` montado em todos os estados de renderização (loading, pending, login, app autenticado) — fica disponível mesmo se o login falhar.
+
+### Desvios do spec do BBE (com justificativa):
+
+- Estilo: BBE usa estilos inline + CSS custom properties; AIDE usa Tailwind — a estrutura JSX é a mesma, só o styling foi adaptado (classes `bg-base`/`text-ink`/`text-muted` já usadas no resto do app).
+- `changelog.js` do AIDE começa a partir de II.1.0.0 (início do Arco II) e inclui só os últimos ~6 marcos, não o histórico 2.26.x completo — o objetivo é leitura rápida, não substituir o `CHANGELOG.md`.
+
 ## [II.1.3.1] — 2026-08-13
 
 ### Pagamentos: coluna de horário virou intervalo início–fim

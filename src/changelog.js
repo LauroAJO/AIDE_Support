@@ -8,6 +8,15 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.4.1',
+    date: '2026-08-14',
+    title: 'Botão de debug: movido pro canto inferior direito',
+    items: [
+      'Estava em bottom-2 left-2, sobrepondo o cronômetro do sidebar (também no canto inferior esquerdo, empurrado pra baixo pelo spacer)',
+      'Agora fica em bottom-3 right-3 no desktop, bottom-20 right-2 no mobile (acima da barra de navegação inferior)',
+    ],
+  },
+  {
     version: 'II.1.4.0',
     date: '2026-08-14',
     title: 'Painel de debug (🐛): log de API + changelog no app',

@@ -41,7 +41,7 @@ export default function DebugPanel() {
         type="button"
         onClick={() => setOpen((o) => !o)}
         title={`Debug · v${APP_VERSION}`}
-        className="fixed bottom-2 left-2 z-50 flex h-7 w-7 items-center justify-center rounded-full border border-ink/10 bg-base/90 text-muted shadow-sm backdrop-blur transition hover:text-ink"
+        className="fixed bottom-20 right-2 z-50 flex h-7 w-7 items-center justify-center rounded-full border border-ink/10 bg-base/90 text-muted shadow-sm backdrop-blur transition hover:text-ink md:bottom-3 md:right-3"
       >
         <Bug size={12} />
       </button>

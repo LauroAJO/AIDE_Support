@@ -9,6 +9,15 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.4.1] — 2026-08-14
+
+### Fix: botão de debug sobrepondo o cronômetro
+
+Feedback direto na tela: o botão 🐛 (`bottom-2 left-2`) ficava por cima do `TimerIndicator` do sidebar — que também vive no canto inferior esquerdo, empurrado até lá pelo spacer (`flex-1`) entre a navegação e o rodapé do sidebar.
+
+- `DebugPanel.jsx`: botão movido para o canto inferior **direito** — `bottom-3 right-3` no desktop, `bottom-20 right-2` no mobile (acima da barra de navegação inferior, que tem `h-16`).
+- Único ponto de atenção verificado: `/career` (OpportunityPipeline) tem um toast transitório em `bottom-4 right-4`; pode sobrepor o botão momentaneamente enquanto o toast está visível, mas não é um conflito permanente como o do cronômetro.
+
 ## [II.1.4.0] — 2026-08-14
 
 ### Painel de debug (🐛): log de API + changelog dentro do app

@@ -644,7 +644,9 @@ export default function VagasPhDPage({ refreshToken = 0, highlightShortId = null
           onClose={() => setSelected(null)}
           onAdd={() => addToCareer(selected)}
           state={added[selected.id]}
+          onDelete={isOwner ? () => setConfirmItem(selected) : null}
           onEdit={() => setEditingItem(selected)}
+          deleting={deleting === selected.id}
         />
       )}
 
@@ -991,7 +993,7 @@ function Row({ label, children }) {
   );
 }
 
-function DetailModal({ item, onClose, onAdd, state, onEdit }) {
+function DetailModal({ item, onClose, onAdd, state, onDelete, onEdit, deleting }) {
   const topicos = Array.isArray(item.topicos) ? item.topicos : [];
   const title = effectiveTitle(item);
   const resumo = effectiveResumo(item);
@@ -1014,6 +1016,17 @@ function DetailModal({ item, onClose, onAdd, state, onEdit }) {
                 title="Editar vaga"
               >
                 <Pencil className="h-4 w-4" />
+              </button>
+            )}
+            {onDelete && (
+              <button
+                type="button"
+                onClick={onDelete}
+                disabled={deleting}
+                className="rounded-md p-1.5 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+                title="Remover vaga"
+              >
+                {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
               </button>
             )}
             <button onClick={guard.requestClose} className="rounded-md p-1 text-ink2 hover:bg-surface2"><X className="h-5 w-5" /></button>

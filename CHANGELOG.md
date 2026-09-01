@@ -9,6 +9,21 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.4.2] — 2026-08-14
+
+### Fix: botão de deletar faltando no painel de detalhe de Vagas PhD
+
+Origem: diagnóstico de um bug crítico no Intelligence Hub (projeto separado) — cascade-delete que apagava `item_projects` a cada execução da pipeline até 11/08, causando reenvio duplicado de itens já aceitos via `POST /api/hub/items` (a trava local `aide_exported_at` era resetada). A única proteção do lado do Hub contra isso — `GET /api/hub/excluded-ids` + tabela local `deleted_items` — só existe para itens que foram deletados no AIDE. Sem o botão de deletar no painel de detalhe, o projeto `phd_vagas` nunca teve como popular esse hard-delete, então vagas de PhD reenviadas em duplicidade não tinham nem essa proteção parcial.
+
+- `VagasPhDPage.jsx`: `DetailModal` ganhou o botão de deletar (🗑) no cabeçalho, ao lado do editar — mesmo padrão já usado em `EmpregoPage.jsx` (`onDelete`/`deleting` como props, `DELETE /api/hub/items/:id`, confirmação via `ConfirmModal`). A lista e os cards de Vagas PhD já tinham o botão; só faltava no painel de detalhe.
+- Nenhuma mudança de backend — `handleHubItemById` (`DELETE /api/hub/items/:id`) já existia e já fazia soft-delete (`deleted_at`), usado por todos os outros projetos.
+
+### Investigação (item 2 do relatório do Hub): duplicatas em `hub_items`
+
+Verificado no código do `_worker.js` (`handleHubIngest`, `POST /api/hub/items`): a tabela `hub_items` tem `UNIQUE(external_id, project_id)` e o insert usa `ON CONFLICT(...) DO UPDATE` — reenvio do mesmo `external_id`/`project_id` **atualiza a linha existente**, nunca cria uma linha nova. Uma exceção: se o item já foi soft-deletado (`deleted_at` preenchido), o `WHERE hub_items.deleted_at IS NULL` no `DO UPDATE` bloqueia a atualização — o conflito ainda ocorre (então nada é inserido), mas o item também não é reativado nem sobrescrito; a ingestão conta esse caso como `duplicates`, não como erro.
+
+**Conclusão: não há duplicatas de `hub_items` para investigar em D1** — a constraint estrutural torna isso impossível, independente de quantas vezes o Hub reenviar o mesmo item. O efeito real do bug do Hub, do lado do AIDE, foi só reprocessamento redundante (relevancia/prioridade/tópicos reescritos a cada reenvio) — sem custo de dados duplicados. Item 3 do relatório (checar dados reais do D1) fica sem necessidade, já que a resposta veio da própria constraint do schema, não de uma amostragem.
+
 ## [II.1.4.1] — 2026-08-14
 
 ### Fix: botão de debug sobrepondo o cronômetro

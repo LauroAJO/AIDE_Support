@@ -8,6 +8,15 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.4.2',
+    date: '2026-08-14',
+    title: 'Fix: botão de deletar em Vagas PhD (painel de detalhe)',
+    items: [
+      'DetailModal de Vagas PhD ganhou o botão de deletar, igual EmpregoPage já tinha',
+      'Duplicatas em hub_items: verificado no código — UNIQUE + upsert torna impossível, sem necessidade de checar D1',
+    ],
+  },
+  {
     version: 'II.1.4.1',
     date: '2026-08-14',
     title: 'Botão de debug: movido pro canto inferior direito',

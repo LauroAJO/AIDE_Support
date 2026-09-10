@@ -13,9 +13,13 @@ import {
 import { TRACK_LABELS, trackColor, daysUntil, PRIORITY_LABELS } from './careerShared';
 
 // Lembrete crítico fixo por trilha (hardcoded conforme spec da Etapa 5).
+// "Visto expira dezembro 2025" ficou aqui até 2026-09-10: já estava com a
+// data no passado E o motivo de fundo (busca de PhD/emprego pra garantir
+// visto) deixou de existir — Lauro foi aceito no PhD com o Prof. Zondervan
+// (UT). Removido; o mecanismo continua disponível pra um lembrete futuro.
 const CRITICAL_NOTE = {
-  phd: 'Visto expira dezembro 2025',
-  job: 'Visto expira dezembro 2025',
+  phd: '',
+  job: '',
   spinoff: '',
 };
 

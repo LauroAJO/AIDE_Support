@@ -12635,6 +12635,15 @@ function isHubReader(user) {
   return !!user && (user.role === 'owner' || user.role === 'assistant_fixed' || user.user_type === 'fixed');
 }
 
+// v2026-09-10 — Lauro foi aceito no PhD (Prof. Edwin Zondervan, UT): a busca
+// de emprego deixou de ser prioridade. Ele quer manter as vagas de emprego já
+// coletadas (visíveis em /hub, ainda podem virar oportunidade em /career),
+// mas NENHUMA vaga nova deve se acumular a partir de agora — mesmo que o
+// Intelligence Hub continue enviando (o freio, do lado do Hub, é um projeto
+// separado; aqui é a barreira do lado do AIDE, que sempre pode ser revertida
+// removendo este bloco).
+const HUB_INGEST_BLOCKED_PROJECTS = new Set(['emprego_vagas']);
+
 // POST /api/hub/items — ingestão em lote. Idempotente via UNIQUE(external_id,
 // project_id) + ON CONFLICT DO NOTHING: itens repetidos contam como duplicates.
 // Itens já existentes (incluindo soft-deletados, deleted_at NOT NULL) entram em
@@ -12650,8 +12659,10 @@ async function handleHubIngest(request, env) {
 
   let accepted = 0;
   let duplicates = 0;
+  let blocked = 0;
   for (const item of body.items) {
     if (!item || !item.external_id || !item.project_id || !item.title) continue; // item malformado — ignora
+    if (HUB_INGEST_BLOCKED_PROJECTS.has(String(item.project_id))) { blocked += 1; continue; }
     const topicos = Array.isArray(item.topicos) ? JSON.stringify(item.topicos) : (item.topicos || null);
     try {
       const res = await env.DB.prepare(
@@ -12713,7 +12724,7 @@ async function handleHubIngest(request, env) {
       // erro individual de item — ignora (não conta como accepted nem duplicate)
     }
   }
-  return json({ accepted, duplicates, total: accepted + duplicates });
+  return json({ accepted, duplicates, blocked, total: accepted + duplicates + blocked });
 }
 
 // Converte uma linha do banco para o shape do front (topicos → array).

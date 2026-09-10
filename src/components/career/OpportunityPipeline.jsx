@@ -17,8 +17,8 @@ import {
 } from '../../hooks/useUnsavedGuard';
 import {
   StarRating, TrackBadge, OppTypeBadge, parseTags,
-  PIPELINE_COLUMNS, TRACK_LABELS, OPP_TYPE_LABELS, OPP_STATUS_LABELS, OPP_STATUS_ORDER,
-  ARCHIVE_STATUSES,
+  PIPELINE_COLUMNS, TRACK_LABELS, OPP_TYPE_LABELS, OPP_STATUS_ORDER,
+  ARCHIVE_STATUSES, statusLabelFor, columnLabelFor,
   trackColor, deadlineColor, deadlineCountdown, daysUntil, priorityDot, PRIORITY_LABELS,
   trackForType, parseStatusLog, joinNotesWithLog,
 } from './careerShared';
@@ -419,7 +419,7 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
               }`}
             >
               <div className={`flex items-center justify-between gap-1.5 rounded-t-xl px-3 py-2 text-sm font-semibold ${header.header}`}>
-                <span className="truncate">{col.label}</span>
+                <span className="truncate">{columnLabelFor(col, trackFilter)}</span>
                 <div className="flex shrink-0 items-center gap-1">
                   <span className="rounded-full bg-white/60 px-1.5 text-xs font-medium">{total}</span>
                   <select
@@ -673,7 +673,7 @@ function ArchiveView({ items, onRestore, onDelete, onOpen, deleting }) {
                   o.status === 'mapped' ? 'bg-violet-100 text-violet-700' : 'bg-surface2 text-ink2'
                 }`}
                 >
-                  {OPP_STATUS_LABELS[o.status] || o.status}
+                  {statusLabelFor(o.status, o.track)}
                 </span>
               </td>
               <td className="px-3 py-2 text-ink2">
@@ -895,7 +895,7 @@ function OpportunityModal({ id, orgs, usersById, onClose, onChanged, onEditFull 
               {/* Status selector */}
               <Field label="Status (move o card)">
                 <select value={data.status} onChange={(e) => patch({ status: e.target.value })} className="input">
-                  {OPP_STATUS_ORDER.map((s) => <option key={s} value={s}>{OPP_STATUS_LABELS[s]}</option>)}
+                  {OPP_STATUS_ORDER.map((s) => <option key={s} value={s}>{statusLabelFor(s, data.track)}</option>)}
                 </select>
               </Field>
 
@@ -956,7 +956,7 @@ function OpportunityModal({ id, orgs, usersById, onClose, onChanged, onEditFull 
                       <li key={`${e.date}-${i}`} className="flex items-center gap-1.5 text-xs text-ink2">
                         <span className="text-emerald-600">✓</span>
                         <span>
-                          {OPP_STATUS_LABELS[e.from] || e.from} → <span className="font-medium text-ink">{OPP_STATUS_LABELS[e.to] || e.to}</span>
+                          {statusLabelFor(e.from, data.track)} → <span className="font-medium text-ink">{statusLabelFor(e.to, data.track)}</span>
                         </span>
                         <span className="ml-auto shrink-0 text-muted">{e.date}</span>
                       </li>
@@ -992,7 +992,7 @@ function OpportunityModal({ id, orgs, usersById, onClose, onChanged, onEditFull 
                           <li key={e.id} className="text-xs text-ink2">
                             <span className="font-medium text-ink">{e.user_name || 'Alguém'}</span>{' '}
                             {e.action === 'status_change' && (
-                              <>mudou status: {OPP_STATUS_LABELS[e.old_value] || e.old_value || '—'} → <span className="font-medium text-ink">{OPP_STATUS_LABELS[e.new_value] || e.new_value}</span></>
+                              <>mudou status: {e.old_value ? statusLabelFor(e.old_value, data.track) : '—'} → <span className="font-medium text-ink">{statusLabelFor(e.new_value, data.track)}</span></>
                             )}
                             {e.action === 'assignee_change' && (
                               <>mudou o responsável: {(usersById && usersById[e.old_value]?.name) || 'ninguém'} → <span className="font-medium text-ink">{(usersById && usersById[e.new_value]?.name) || 'ninguém'}</span></>
@@ -1185,7 +1185,7 @@ function OpportunityEditor({ mode, initial, orgs, people, users, onClose, onSave
             <Field label="Prazo"><input value={form.deadline || ''} onChange={(e) => set({ deadline: e.target.value })} className="input" placeholder="2026-09-30" /></Field>
             <Field label="Status">
               <select value={form.status} onChange={(e) => set({ status: e.target.value })} className="input">
-                {OPP_STATUS_ORDER.map((s) => <option key={s} value={s}>{OPP_STATUS_LABELS[s]}</option>)}
+                {OPP_STATUS_ORDER.map((s) => <option key={s} value={s}>{statusLabelFor(s, form.track)}</option>)}
               </select>
             </Field>
           </div>

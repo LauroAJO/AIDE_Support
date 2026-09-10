@@ -9,6 +9,26 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.5.0] — 2026-09-10
+
+### Carreira/Hub ajustados para o novo papel: Lauro aceito no PhD (Prof. Edwin Zondervan, UT)
+
+Não é mais busca de emprego/PhD — é um PhD confirmado, programa separado do EngD em hidrogênio (financiado pela empresa) que continua em paralelo. A área Carreira e o fluxo de ingestão do Hub foram ajustados para essa realidade, mantendo os dados já existentes intactos.
+
+**Empregos (Hub) — parar de acumular, sem remover nada:**
+- `_worker.js`: `POST /api/hub/items` agora bloqueia (`HUB_INGEST_BLOCKED_PROJECTS`) qualquer item novo do projeto `emprego_vagas` — nem insere nem atualiza, mesmo que o Intelligence Hub continue enviando. Resposta ganhou o campo `blocked` (`{ accepted, duplicates, blocked, total }`).
+- A aba "Empregos" em `/hub` e as vagas já coletadas continuam 100% visíveis e utilizáveis (inclusive "Adicionar à Carreira") — nada foi comentado ou escondido na UI. Only a barreira de ingestão é nova.
+- Decisão revista em conversa: o pedido original era comentar a aba inteira, mas Lauro esclareceu que quer manter o que já existe navegável — só não quer mais vagas novas se acumulando.
+
+**Carreira — trilha PhD virou networking, não candidatura:**
+- `careerShared.jsx`: novo `OPP_STATUS_LABELS_PHD_NETWORKING` (Descobertas / A contatar / Contato feito / Em conversa / Sem retorno) + `statusLabelFor(status, track)` e `columnLabelFor(col, trackFilter)` — os status internos do banco (`to_organize`/`preparing`/`applied`/`in_process`/`dead`) não mudam, só o rótulo exibido quando a trilha é `phd`. job/spinoff continuam com os rótulos de candidatura originais (Triagem/Preparando/Aplicada/Em Processo/Vagas Mortas).
+- `OpportunityPipeline.jsx`: cabeçalho de coluna do Kanban (track-aware só quando uma trilha específica está filtrada — com "Todas" selecionado, mistura trilhas e o rótulo genérico é o único que faz sentido), linha da tabela/arquivo, seletor de status no modal e no editor, histórico de status (log de notas) e auditoria — todos os 6 pontos que mostravam `OPP_STATUS_LABELS` direto passaram a usar `statusLabelFor`.
+- `GoalsView.jsx`: removido o lembrete crítico hardcoded "Visto expira dezembro 2025" (`CRITICAL_NOTE`) das trilhas phd/job — já estava com a data no passado e o motivo de fundo (garantir visto via emprego/PhD) deixou de existir. Mecanismo mantido no código para um lembrete futuro, se precisar.
+
+### Fora desta entrega (decisão do usuário, não código)
+- Oportunidades tipo `job`/`contract` já cadastradas em Carreira: o usuário revisa manualmente ("vou considerar o que está atualmente no site") — nenhum arquivamento automático foi feito.
+- Parar a coleta de vagas de emprego na origem (projeto `emprego_vagas` do Intelligence Hub) é mudança num repositório separado, fora do escopo desta sessão — o bloqueio aqui é só do lado de recebimento do AIDE.
+
 ## [II.1.4.2] — 2026-08-14
 
 ### Fix: botão de deletar faltando no painel de detalhe de Vagas PhD

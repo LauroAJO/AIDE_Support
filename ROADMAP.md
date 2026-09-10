@@ -13,6 +13,7 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.5.0 | 2026-09-10 | Carreira/Hub: Lauro aceito no PhD (Prof. Zondervan) — Empregos para de acumular no Hub (dados existentes mantidos), trilha PhD vira networking com rótulos próprios |
 | II.1.4.2 | 2026-08-14 | Fix: botão de deletar no painel de detalhe de Vagas PhD (faltava desde sempre, agravado por bug de duplicação no Hub) |
 | II.1.4.1 | 2026-08-14 | Fix: botão de debug movido pro canto inferior direito (sobrepunha o cronômetro do sidebar) |
 | II.1.4.0 | 2026-08-14 | Painel de debug (🐛): log de API (últimas 50 chamadas) + changelog compacto, direto no app — portado do BBE |

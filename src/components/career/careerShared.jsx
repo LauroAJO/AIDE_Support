@@ -85,6 +85,37 @@ export const OPP_STATUS_LABELS = {
 
 export const OPP_STATUS_ORDER = ['to_organize', 'preparing', 'applied', 'in_process', 'dead'];
 
+// v2027-09-10 — Lauro foi aceito no PhD (Prof. Edwin Zondervan, UT) — a
+// trilha "phd" deixou de ser "candidatar-se a vagas" e virou "acompanhar
+// outros PhDs/colaboradores pra guiar networking". Os status internos do
+// banco (to_organize/preparing/applied/...) NÃO mudam — só o texto exibido
+// quando o card/board é da trilha phd. job/spinoff continuam com os rótulos
+// de candidatura originais (OPP_STATUS_LABELS acima), inalterados.
+export const OPP_STATUS_LABELS_PHD_NETWORKING = {
+  to_organize: 'Descobertas',
+  preparing: 'A contatar',
+  applied: 'Contato feito',
+  in_process: 'Em conversa',
+  dead: 'Sem retorno',
+};
+
+// Rótulo de status certo para o contexto: usa o mapa de networking quando
+// track === 'phd', senão cai no mapa padrão (candidatura). `track` pode vir
+// undefined (ex.: card antigo sem trilha) — cai no padrão nesse caso também.
+export function statusLabelFor(status, track) {
+  const map = track === 'phd' ? OPP_STATUS_LABELS_PHD_NETWORKING : OPP_STATUS_LABELS;
+  return map[status] || OPP_STATUS_LABELS[status] || status;
+}
+
+// Rótulo de cabeçalho de coluna do Kanban: só é track-aware quando o board
+// está filtrado numa única trilha (trackFilter !== 'all') — com várias
+// trilhas misturadas na mesma coluna, o rótulo genérico é o único que faz
+// sentido para todas ao mesmo tempo.
+export function columnLabelFor(col, trackFilter) {
+  return trackFilter && trackFilter !== 'all' ? statusLabelFor(col.key, trackFilter) : col.label;
+}
+
+
 // v2.26.2 — 'mapped' é um status de arquivo (fora do Kanban ativo), alcançado
 // só pelo botão "Coleta concluída" — por isso não entra em OPP_STATUS_ORDER
 // (que alimenta o select manual de status no editor/modal). Ambos 'mapped' e

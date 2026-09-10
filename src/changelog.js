@@ -8,6 +8,16 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.5.0',
+    date: '2026-09-10',
+    title: 'PhD aceito! Carreira/Hub ajustados',
+    items: [
+      'Empregos no Hub para de acumular vagas novas (dados existentes continuam navegáveis)',
+      'Trilha PhD em Carreira virou networking: Descobertas / A contatar / Contato feito / Em conversa / Sem retorno',
+      'Removido lembrete de visto desatualizado em Metas',
+    ],
+  },
+  {
     version: 'II.1.4.2',
     date: '2026-08-14',
     title: 'Fix: botão de deletar em Vagas PhD (painel de detalhe)',

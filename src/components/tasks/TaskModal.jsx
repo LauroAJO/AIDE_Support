@@ -243,15 +243,13 @@ export default function TaskModal({ task, onClose, onEdit, onPersist, onDelete, 
   );
   const opportunityTitle = task?.opportunityTitle || linkedOpportunityFallback?.title || null;
   const opportunityStatus = task?.opportunityStatus || linkedOpportunityFallback?.status || null;
-  const opportunityExtractKnowledge = task?.opportunity_id
-    ? (task?.opportunityTitle
-      ? !!task.opportunityExtractKnowledge
-      : !!linkedOpportunityFallback?.extract_knowledge)
-    : false;
-  // v2.26.2 — mesma lógica do TaskCard: tarefa vinculada a uma oportunidade em
-  // "Mapear" (extract_knowledge) ou já arquivada como mapeada (status='mapped')
-  // é de coleta de informação, não de candidatura — mostra um aviso no detalhe.
-  const isMapping = !!opportunityTitle && (opportunityExtractKnowledge || opportunityStatus === 'mapped');
+  // II.1.7.0 — antes usava o flag extract_knowledge (toggle "Mapear" que
+  // existia por cima de qualquer coluna). Com o Kanban simplificado, "Mapear"
+  // virou a própria coluna to_organize — mesma lógica do TaskCard: tarefa
+  // vinculada a uma oportunidade ainda em Mapear (to_organize) ou já
+  // arquivada como mapeada (status='mapped') é de coleta de informação, não
+  // de candidatura — mostra um aviso no detalhe.
+  const isMapping = !!opportunityTitle && (opportunityStatus === 'to_organize' || opportunityStatus === 'mapped');
   // O modal é read-only + ações rápidas que persistem na hora; o ÚNICO texto
   // que se perdia ao fechar era o comentário em digitação — por isso ele tem
   // rascunho próprio. Chave separada da do TaskEditor de propósito: aquela

@@ -13,6 +13,8 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.7.0 | 2026-09-10 | Carreira: Kanban simplifica para Mapear→Analisar (2 colunas ativas) com rodízio automático Alice/Milene e Arquivo discreto; Hub: Postdoc volta a ser coletado (emprego geral continua parado) |
+| II.1.6.0 | 2026-09-10 | Export multi-domínio (Carreira/Mercado/Networking/Eventos/Venues) em CSV/TXT/PDF, seleção livre, via Configurações |
 | II.1.5.0 | 2026-09-10 | Carreira/Hub: Lauro aceito no PhD (Prof. Zondervan) — Empregos para de acumular no Hub (dados existentes mantidos), trilha PhD vira networking com rótulos próprios |
 | II.1.4.2 | 2026-08-14 | Fix: botão de deletar no painel de detalhe de Vagas PhD (faltava desde sempre, agravado por bug de duplicação no Hub) |
 | II.1.4.1 | 2026-08-14 | Fix: botão de debug movido pro canto inferior direito (sobrepunha o cronômetro do sidebar) |

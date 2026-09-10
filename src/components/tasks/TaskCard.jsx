@@ -46,16 +46,13 @@ export default function TaskCard({ task, selected, onClick, onToggleFavorite, on
   );
   const opportunityTitle = task.opportunityTitle || linkedOpportunityFallback?.title || null;
   const opportunityStatus = task.opportunityStatus || linkedOpportunityFallback?.status || null;
-  const opportunityExtractKnowledge = task.opportunity_id
-    ? (task.opportunityTitle
-      ? !!task.opportunityExtractKnowledge
-      : !!linkedOpportunityFallback?.extract_knowledge)
-    : false;
-  // v2.26.2 — quando a oportunidade vinculada está em "Mapear" (extract_knowledge)
-  // ou já foi arquivada como mapeada (status='mapped'), a tarefa é de coleta de
-  // informação, não de candidatura real — o card mostra um badge diferente
-  // ("🔍 Mapeamento") em vez do "→ nome da vaga" padrão.
-  const isMapping = !!opportunityTitle && (opportunityExtractKnowledge || opportunityStatus === 'mapped');
+  // II.1.7.0 — antes usava o flag extract_knowledge (toggle "Mapear" que
+  // existia por cima de qualquer coluna). Com o Kanban simplificado, "Mapear"
+  // virou a própria coluna to_organize: quando a oportunidade vinculada
+  // ainda está lá, ou já foi arquivada como mapeada (status='mapped'), a
+  // tarefa é de coleta de informação, não de candidatura real — o card
+  // mostra um badge diferente ("🔍 Mapeamento") em vez do "→ nome da vaga".
+  const isMapping = !!opportunityTitle && (opportunityStatus === 'to_organize' || opportunityStatus === 'mapped');
 
   return (
     // role=button (not a real <button>) so the favorite <button> can nest validly.

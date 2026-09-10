@@ -95,7 +95,6 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
   // v2.26.2 — [Pipeline] [Arquivo] toggle. 'archive' mostra status IN
   // ARCHIVE_STATUSES ('mapped' + 'dead'), fora do Kanban ativo.
   const [view, setView] = useState('pipeline');
-  const [ecExpanded, setEcExpanded] = useState({}); // colKey -> bool
   const [sortBy, setSortBy] = useState({});          // colKey -> chave de SORT_OPTIONS
   const [orgs, setOrgs] = useState([]);
   const [people, setPeople] = useState([]);
@@ -176,23 +175,24 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
     [filtered],
   );
 
-  // Por coluna: cards visíveis (sem Mapear) + cards em Mapear ocultos por
-  // padrão — dentro de cada grupo, prioritários (is_priority=1) vêm antes, e
-  // só então a ordenação escolhida no select da coluna decide. `total` conta
-  // só os cards normais (sem Mapear) — o contador de Mapear fica no botão de
-  // expandir, separado.
+  // Por coluna: prioritários (is_priority=1) vêm antes, e só então a
+  // ordenação escolhida no select da coluna decide.
+  //
+  // II.1.7.0 — antes havia um segundo grupo "ecHidden" (cards com
+  // extract_knowledge=1, escondidos atrás de um botão "🔍 N em Mapear"
+  // dentro de cada coluna). Isso desapareceu: "Mapear" agora é a própria
+  // primeira coluna (to_organize), não um toggle por cima de qualquer
+  // coluna — então não há mais nada para esconder/expandir aqui.
   const byColumn = useMemo(() => {
     const map = {};
     PIPELINE_COLUMNS.forEach((c) => {
       const items = pipelineOpps.filter((o) => columnKeyForStatus(o.status) === c.key);
       const sortKey = sortBy[c.key] || 'recent';
-      const normal = items.filter((o) => !o.extract_knowledge);
-      const ec = items.filter((o) => !!o.extract_knowledge);
-      const byPriority = (list) => [
-        ...sortOpps(list.filter((o) => o.is_priority), sortKey),
-        ...sortOpps(list.filter((o) => !o.is_priority), sortKey),
+      const visible = [
+        ...sortOpps(items.filter((o) => o.is_priority), sortKey),
+        ...sortOpps(items.filter((o) => !o.is_priority), sortKey),
       ];
-      map[c.key] = { visible: byPriority(normal), ecHidden: byPriority(ec), total: normal.length };
+      map[c.key] = { visible, total: items.length };
     });
     return map;
   }, [pipelineOpps, sortBy]);
@@ -209,28 +209,20 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
     }
   };
 
-  // Liga/desliga o toggle "Mapear" de um card (otimista + PATCH). O campo no
-  // banco continua chamado extract_knowledge (não renomeado — ver nota de
-  // desvio no relatório do Bloco 2); só o texto voltado ao usuário virou "Mapear".
-  const toggleExtract = async (id) => {
-    const opp = opps.find((o) => o.id === id);
-    if (!opp) return;
-    const next = opp.extract_knowledge ? 0 : 1;
-    setOpps(opps.map((o) => (o.id === id ? { ...o, extract_knowledge: next } : o)));
-    try {
-      await apiFetch(`/api/career/opportunities/${id}`, { method: 'PATCH', body: JSON.stringify({ extract_knowledge: next }) });
-    } catch {
-      load(); // reverte recarregando se falhar
-    }
-  };
+  // II.1.7.0 — "Mapeado ✓ → Analisar": card sai da coluna Mapear (to_organize)
+  // e entra em Analisar. Substitui o antigo toggle "extract_knowledge"
+  // (que não movia o card de coluna nenhuma, só colapsava visualmente).
+  const advanceToAnalisar = async (id) => moveTo(id, 'analisar');
 
-  // v2.26.2 — "Coleta concluída": arquiva o card (status='mapped', some do
-  // Kanban ativo) e, se houver uma tarefa vinculada (opportunity_id = id)
-  // ainda não concluída, marca-a como concluída também. Não existe endpoint
-  // "tarefas por opportunity_id" — varre a lista completa (já com o escopo de
-  // permissão do usuário aplicado pelo backend). Best-effort: uma falha ao
-  // atualizar a tarefa não desfaz o arquivamento da oportunidade.
-  const markCollected = async (id) => {
+  // II.1.7.0 — "Enviar ao Arquivo" (era "Coleta concluída" até aqui, mesmo
+  // botão/posição no card — reaproveitado por pedido do Lauro): arquiva o
+  // card (status='mapped', some do Kanban ativo) e, se houver uma tarefa
+  // vinculada (opportunity_id = id) ainda não concluída, marca-a como
+  // concluída também. Não existe endpoint "tarefas por opportunity_id" —
+  // varre a lista completa (já com o escopo de permissão do usuário aplicado
+  // pelo backend). Best-effort: uma falha ao atualizar a tarefa não desfaz o
+  // arquivamento da oportunidade.
+  const archiveOpp = async (id) => {
     const opp = opps.find((o) => o.id === id);
     if (!opp) return;
     setOpps(opps.map((o) => (o.id === id ? { ...o, status: 'mapped' } : o)));
@@ -243,10 +235,28 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
           await apiFetch(`/api/tasks/${linked.id}`, { method: 'PUT', body: JSON.stringify({ status: 'done' }) });
         }
       } catch { /* best-effort — não bloqueia o arquivamento da oportunidade */ }
-      showToast('✅ Mapeamento concluído — movido para Arquivo');
+      showToast('📦 Enviado para o Arquivo');
       load();
     } catch (e) {
-      showToast(`Falha ao concluir mapeamento: ${String(e.message || e).slice(0, 80)}`);
+      showToast(`Falha ao arquivar: ${String(e.message || e).slice(0, 80)}`);
+      load();
+    }
+  };
+
+  // II.1.7.0 — "Descartar": segundo destino final possível a partir de
+  // Analisar (status='dead'). Já existia como status ('dead'/"Vagas Mortas"),
+  // só não tinha um botão dedicado — antes só era alcançável arrastando o
+  // card pra coluna "Vagas Mortas", que sumia por já estar em ARCHIVE_STATUSES.
+  const discardOpp = async (id) => {
+    const opp = opps.find((o) => o.id === id);
+    if (!opp) return;
+    setOpps(opps.map((o) => (o.id === id ? { ...o, status: 'dead' } : o)));
+    try {
+      await apiFetch(`/api/career/opportunities/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'dead' }) });
+      showToast(`${statusLabelFor('dead', opp.track) === 'Sem retorno' ? '🔕 Marcado como sem retorno' : '🗑️ Descartada'} — movido para Arquivo`);
+      load();
+    } catch (e) {
+      showToast(`Falha ao descartar: ${String(e.message || e).slice(0, 80)}`);
       load();
     }
   };
@@ -315,36 +325,9 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
 
   return (
     <div className="flex h-full flex-col gap-3">
-      {/* Barra: Pipeline/Arquivo + filtro por trilha + nova oportunidade */}
+      {/* Barra: filtro por trilha + nova oportunidade (+ acesso discreto ao Arquivo) */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          {/* v2.26.2 — aba Arquivo: itens 'mapped' (mapeamento concluído) e
-              'dead' (vagas mortas) saem do Kanban ativo e ficam aqui. */}
-          <div className="flex overflow-hidden rounded-lg border border-line">
-            <button
-              type="button"
-              onClick={() => setView('pipeline')}
-              className={`px-3 py-1.5 text-xs font-medium transition ${
-                view === 'pipeline' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
-              }`}
-            >
-              Pipeline
-            </button>
-            <button
-              type="button"
-              onClick={() => setView('archive')}
-              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium transition ${
-                view === 'archive' ? 'bg-accent text-white' : 'text-ink2 hover:bg-surface2'
-              }`}
-            >
-              <ArchiveIcon className="h-3.5 w-3.5" /> Arquivo
-              {archiveOpps.length > 0 && (
-                <span className={`rounded-full px-1.5 text-[10px] ${view === 'archive' ? 'bg-white/25' : 'bg-surface2'}`}>
-                  {archiveOpps.length}
-                </span>
-              )}
-            </button>
-          </div>
           <div className="flex flex-wrap gap-1.5">
             {TRACK_FILTERS.map((t) => {
               const active = trackFilter === t.key;
@@ -366,6 +349,24 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* II.1.7.0 — Arquivo saiu da navegação principal (era um toggle de
+              aba bem visível [Pipeline]/[Arquivo]). Continua existindo e
+              acessível, só que agora como um ícone discreto — o envio pra lá
+              acontece pelos botões "Enviar ao Arquivo"/"Descartar" no card,
+              não mais por uma aba que convida a navegar até ela. */}
+          <button
+            type="button"
+            onClick={() => setView((v) => (v === 'archive' ? 'pipeline' : 'archive'))}
+            title={view === 'archive' ? 'Voltar ao Pipeline' : 'Ver Arquivo'}
+            className={`flex items-center gap-1 rounded-lg border p-2 text-ink2 transition hover:bg-surface2 ${
+              view === 'archive' ? 'border-accent text-accent' : 'border-line'
+            }`}
+          >
+            <ArchiveIcon className="h-4 w-4" />
+            {archiveOpps.length > 0 && view !== 'archive' && (
+              <span className="rounded-full bg-surface2 px-1.5 text-[10px] font-medium">{archiveOpps.length}</span>
+            )}
+          </button>
           <button
             type="button"
             onClick={() => setEditor({ mode: 'create', form: { ...EMPTY_OPP, track: trackFilter === 'all' ? 'job' : trackFilter } })}
@@ -382,6 +383,7 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
           onRestore={restoreOpp}
           onDelete={(item) => setConfirmItem(item)}
           onOpen={(id) => setModalId(id)}
+          onBack={() => setView('pipeline')}
           deleting={deleting}
         />
       ) : (
@@ -389,9 +391,8 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
       <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto pb-2">
         {PIPELINE_COLUMNS.map((col) => {
           const header = trackColor(trackFilter);
-          const { visible, ecHidden, total } = byColumn[col.key] || { visible: [], ecHidden: [], total: 0 };
+          const { visible, total } = byColumn[col.key] || { visible: [], total: 0 };
           const over = dragOverCol === col.key;
-          const expanded = !!ecExpanded[col.key];
           const sortKey = sortBy[col.key] || 'recent';
           const cardProps = (o) => ({
             key: o.id,
@@ -401,8 +402,9 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
             onDragStart: () => setDraggingId(o.id),
             onDragEnd: () => setDraggingId(null),
             onClick: () => setModalId(o.id),
-            onToggleExtract: () => toggleExtract(o.id),
-            onMarkCollected: () => markCollected(o.id),
+            onAdvanceToAnalisar: () => advanceToAnalisar(o.id),
+            onArchive: () => archiveOpp(o.id),
+            onDiscard: () => discardOpp(o.id),
             onTogglePriority: () => togglePriority(o.id),
             onDelete: () => setConfirmItem(o),
             onMove: (status) => moveTo(o.id, status),
@@ -419,7 +421,7 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
               }`}
             >
               <div className={`flex items-center justify-between gap-1.5 rounded-t-xl px-3 py-2 text-sm font-semibold ${header.header}`}>
-                <span className="truncate">{columnLabelFor(col, trackFilter)}</span>
+                <span className="truncate">{columnLabelFor(col)}</span>
                 <div className="flex shrink-0 items-center gap-1">
                   <span className="rounded-full bg-white/60 px-1.5 text-xs font-medium">{total}</span>
                   <select
@@ -435,28 +437,6 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
               <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
                 {total === 0 && <p className="px-1 py-4 text-center text-xs text-muted">Vazio</p>}
                 {visible.map((o) => <OpportunityCard {...cardProps(o)} />)}
-
-                {ecHidden.length > 0 && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => setEcExpanded((m) => ({ ...m, [col.key]: !m[col.key] }))}
-                      className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-line px-2 py-1.5 text-[11px] font-medium text-ink2 transition hover:bg-surface2"
-                    >
-                      🔍 {ecHidden.length} em Mapear {expanded ? '▲' : '▼'}
-                    </button>
-                    {expanded && (
-                      <>
-                        <div className="flex items-center gap-2 py-0.5">
-                          <div className="h-px flex-1 bg-line" />
-                          <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Mapear</span>
-                          <div className="h-px flex-1 bg-line" />
-                        </div>
-                        {ecHidden.map((o) => <OpportunityCard {...cardProps(o)} />)}
-                      </>
-                    )}
-                  </>
-                )}
               </div>
             </div>
           );
@@ -506,16 +486,14 @@ export default function OpportunityPipeline({ initialOrgId, onInitialOrgConsumed
   );
 }
 
-function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onToggleExtract, onMarkCollected, onTogglePriority, onDelete, onMove, deleting }) {
+function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onClick, onAdvanceToAnalisar, onArchive, onDiscard, onTogglePriority, onDelete, onMove, deleting }) {
   const c = trackColor(opp.track);
   const dl = deadlineColor(opp.deadline);
   const countdown = deadlineCountdown(opp.deadline);
-  const extracting = !!opp.extract_knowledge;
   const priority = !!opp.is_priority;
   const currentCol = columnKeyForStatus(opp.status);
-  // Cards em "Mapeando" mantêm o fundo neutro; nos demais, o fundo de urgência
-  // do prazo (bg-red-50 / bg-amber-50) substitui o bg-surface padrão.
-  const cardBg = extracting ? 'bg-surface2' : (dl.bg || 'bg-surface');
+  const inMapear = currentCol === 'to_organize';
+  const cardBg = dl.bg || 'bg-surface';
   return (
     <div
       draggable="true"
@@ -523,16 +501,11 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
       onDragEnd={onDragEnd}
       onClick={onClick}
       style={{
-        borderLeft: `4px solid ${extracting ? '#8B5CF6' : c.hex}`,
-        opacity: dragging ? 0.5 : (extracting ? 0.6 : 1),
+        borderLeft: `4px solid ${c.hex}`,
+        opacity: dragging ? 0.5 : 1,
       }}
       className={`relative cursor-pointer rounded-lg border border-line p-2.5 shadow-sm transition hover:border-accent ${cardBg}`}
     >
-      {extracting && (
-        <span className="absolute -right-1.5 -top-1.5 rounded-full bg-violet-600 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm">
-          🔍 Mapeando
-        </span>
-      )}
       <div className="flex items-start justify-between gap-2">
         <span className="text-sm font-semibold text-ink">{opp.title}</span>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -572,30 +545,41 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
         <StarRating value={opp.fit_score} size={12} />
         {assignee && <Avatar user={{ name: assignee.name, avatar: assignee.avatar }} size={20} />}
       </div>
-      {/* v2.26.2 — "Mapear" virou um chip compacto (ícone + rótulo curto) em
-          vez de um botão largo com o texto inteiro "Extrair Conhecimento" —
-          era grande demais e poluía visualmente o card (bug #1 do Bloco 2).
-          "Coleta concluída" só aparece quando o card já está em Mapear. */}
+      {/* II.1.7.0 — botão de ação principal do card muda com a coluna:
+          em Mapear, avança pra Analisar; em Analisar, decide o destino final
+          (Arquivo ou Descartar — reaproveita o slot/estilo do antigo botão
+          "Mapear"). Cards fora dessas duas colunas (legado, ver rede de
+          segurança em PIPELINE_COLUMNS) não mostram ação principal. */}
       <div className="mt-1.5 flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onToggleExtract(); }}
-          title={extracting ? 'Marcado para mapear — clique para desmarcar' : 'Marcar para mapear (só fonte de informação, não candidatura)'}
-          className={`flex items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
-            extracting ? 'bg-violet-600 text-white hover:opacity-90' : 'border border-line text-ink2 hover:bg-surface2'
-          }`}
-        >
-          <Search className="h-3 w-3" /> {extracting ? 'Mapear ✓' : 'Mapear'}
-        </button>
-        {extracting && (
+        {inMapear && (
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); onMarkCollected(); }}
-            title="Coleta concluída — arquiva esta oportunidade e conclui a tarefa vinculada"
-            className="flex items-center justify-center gap-1 rounded-md bg-emerald-600 px-2 py-1 text-[11px] font-medium text-white transition hover:opacity-90"
+            onClick={(e) => { e.stopPropagation(); onAdvanceToAnalisar(); }}
+            title="Mapeamento concluído — mover para Analisar"
+            className="flex items-center justify-center gap-1 rounded-md bg-violet-600 px-2 py-1 text-[11px] font-medium text-white transition hover:opacity-90"
           >
-            <CheckCircle2 className="h-3 w-3" /> Coleta concluída
+            <Search className="h-3 w-3" /> Mapeado → Analisar
           </button>
+        )}
+        {currentCol === 'analisar' && (
+          <>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onArchive(); }}
+              title="Enviar ao Arquivo"
+              className="flex items-center justify-center gap-1 rounded-md bg-emerald-600 px-2 py-1 text-[11px] font-medium text-white transition hover:opacity-90"
+            >
+              <CheckCircle2 className="h-3 w-3" /> Arquivo
+            </button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onDiscard(); }}
+              title={statusLabelFor('dead', opp.track) === 'Sem retorno' ? 'Marcar como sem retorno' : 'Descartar'}
+              className="flex items-center justify-center gap-1 rounded-md border border-line px-2 py-1 text-[11px] font-medium text-ink2 transition hover:bg-surface2"
+            >
+              {statusLabelFor('dead', opp.track) === 'Sem retorno' ? 'Sem retorno' : 'Descartar'}
+            </button>
+          </>
         )}
         <button
           type="button"
@@ -639,15 +623,29 @@ function OpportunityCard({ opp, assignee, dragging, onDragStart, onDragEnd, onCl
 // v2.26.2 — Aba Arquivo: lista (não Kanban) dos itens com status 'mapped'
 // (mapeamento concluído) ou 'dead' (vaga morta). Colunas conforme o pedido do
 // Bloco 2: título | tipo | data | organização, com [Ver] [Restaurar] [Remover].
-function ArchiveView({ items, onRestore, onDelete, onOpen, deleting }) {
+function ArchiveView({ items, onRestore, onDelete, onOpen, onBack, deleting }) {
+  const backBar = (
+    <button
+      type="button"
+      onClick={onBack}
+      className="mb-2 flex items-center gap-1 text-xs font-medium text-ink2 hover:text-accent"
+    >
+      ← Voltar ao Pipeline
+    </button>
+  );
   if (items.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-line">
-        <p className="text-sm text-muted">Nada no arquivo ainda — itens mapeados ou vagas mortas aparecem aqui.</p>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {backBar}
+        <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-line">
+          <p className="text-sm text-muted">Nada no arquivo ainda — itens mapeados ou vagas mortas aparecem aqui.</p>
+        </div>
       </div>
     );
   }
   return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {backBar}
     <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-line">
       <table className="w-full text-left text-sm">
         <thead className="sticky top-0 bg-surface2 text-xs uppercase tracking-wide text-muted">
@@ -715,6 +713,7 @@ function ArchiveView({ items, onRestore, onDelete, onOpen, deleting }) {
           ))}
         </tbody>
       </table>
+    </div>
     </div>
   );
 }

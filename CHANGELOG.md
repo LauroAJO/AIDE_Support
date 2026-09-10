@@ -9,6 +9,61 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.7.0] — 2026-09-10
+
+### Carreira: Kanban simplificado (Mapear → Analisar) + rodízio de responsáveis + Arquivo discreto
+
+Pedido do usuário: o Kanban de Carreira (5 colunas + toggle "Mapear" por cima) virou complexo demais depois que a trilha PhD mudou de "candidatar-se" pra "networking" (II.1.5.0). Pedido: 1ª coluna literal "Mapear" (onde tudo que chega em Carreira cai e onde as assistentes trabalham), 2ª coluna "Analisar" (onde ele decide o destino final); vaga vinda do Hub já entra com um responsável definido, alternando Alice/Milene; e o Arquivo deixa de ser uma aba visível, virando um botão discreto — reaproveitando o slot do antigo botão "Mapear" no card.
+
+**Kanban — de 5 colunas + toggle para 2 colunas literais:**
+- `careerShared.jsx`: `PIPELINE_COLUMNS` caiu de 5 entradas (Triagem/Preparando/Aplicada/Em Processo/Vagas Mortas) para 2 (`to_organize` → "Mapear", novo status `analisar` → "Analisar"). O toggle `extract_knowledge` (que colapsava um card em qualquer coluna numa sub-seção "🔍 N em Mapear") foi removido — "Mapear" agora é a própria primeira coluna, não um flag por cima de qualquer coluna. Campo `extract_knowledge` continua existindo no banco (não removido/migrado — apenas parou de ser lido/escrito pelo Kanban), sem custo de manter.
+- `OpportunityPipeline.jsx`: botão de ação do card muda com a coluna — em Mapear, "Mapeado ✓ → Analisar" (`status='analisar'`); em Analisar, dois botões novos — "Arquivo" (`status='mapped'`, reaproveita a lógica/estilo do antigo "Coleta concluída") e "Descartar" (`status='dead'`, ação que antes só existia arrastando o card pra coluna "Vagas Mortas", que sumia na hora por já estar em `ARCHIVE_STATUSES`).
+- Aplicado às **3 trilhas** (PhD, Emprego, Spin-off) — confirmado explicitamente com o usuário, não só PhD.
+- `OPP_STATUS_LABELS_PHD_NETWORKING` reduzido a só `dead: 'Sem retorno'` — com Mapear/Analisar virando genéricos pra todas as trilhas, a única nuance de linguagem de networking que ainda faz sentido é o destino "Descartada" soar como "Sem retorno" (contato sem resposta) em vez de recusa ativa, só pra trilha PhD.
+
+**Cards já em Preparando/Aplicada/Em Processo — migrados, não congelados:**
+- `migrations/0011_career_kanban_simplify.sql`: `UPDATE career_opportunities SET status='analisar' WHERE status IN ('preparing','applied','in_process')`. Decisão explícita do usuário (perguntado via clarificação): mover tudo pra Analisar, em vez de manter as 3 colunas antigas congeladas só pra esses cards. Nada é apagado — histórico de status continua em `opportunity_audit_log` e no log embutido em `notes`.
+- `_worker.js`: `OPP_STATUS_RANK`, `taskStatusForOpportunityStatus` e `syncOpportunityFromTaskStatus` (sincronização tarefa↔oportunidade) atualizados pro novo status `analisar` — preparing/applied/in_process mantidos como sinônimos de rank/comportamento (rede de segurança pra card que escape da migration), não removidos das funções.
+- `TaskCard.jsx`/`TaskModal.jsx`: badge "🔍 Mapeamento" (mostrado quando a tarefa vinculada é de uma oportunidade em coleta de informação) trocou o critério de `extract_knowledge` para `status === 'to_organize'` — mesma semântica, refletindo onde "Mapear" mora agora.
+
+**Rodízio automático Alice/Milene (só vagas do Hub):**
+- `_worker.js`: `nextRoundRobinAssistant(env)` — conta quantas oportunidades vindas do Hub (`hub_short_id IS NOT NULL`) já têm responsável e alterna pelo resto da divisão por N assistentes (ordenados por nome, "Alice" antes de "Milene"). Aplicado em `POST /api/career/opportunities` só quando `hub_short_id` está presente e `assigned_to` não veio explícito no body — vagas criadas manualmente em Carreira **não** entram no rodízio (confirmado com o usuário).
+- `createHubCareerTask`: a tarefa de preenchimento (criada junto com toda vaga vinda do Hub) agora nasce atribuída à mesma pessoa sorteada pro card, em vez de `assigned_to=NULL` ("solta", qualquer assistente pega) como era desde v2.25.18 — evita dois "donos" divergentes pro mesmo card.
+
+**Arquivo — de aba visível para ícone discreto:**
+- `OpportunityPipeline.jsx`: o toggle `[Pipeline] [Arquivo]` (abas lado a lado, sempre visíveis, com contador) virou um ícone (`Archive`) sozinho, junto ao botão "Nova Oportunidade" — sem rótulo de texto, só contador quando há itens e título ao passar o mouse. `ArchiveView` ganhou um link "← Voltar ao Pipeline" no topo (antes só existia clicando de volta na aba "Pipeline", que não existe mais).
+
+### Desvios/decisões técnicas (com justificativa)
+- Status novo `analisar` em vez de reaproveitar `preparing`: um status próprio deixa "chegou aqui vindo de Mapear" e "chegou aqui vindo de uma reversão manual" com o mesmo significado, sem herdar a semântica antiga (de candidatura) de `preparing`.
+- `dead` não ganhou rótulo/coluna própria no Kanban ativo — já era assim antes de II.1.7.0 (`ARCHIVE_STATUSES` já incluía `dead`; a coluna "Vagas Mortas" só existia visualmente, mas qualquer card solto lá sumia na hora). O botão "Descartar" só torna esse caminho alcançável sem depender de drag-and-drop.
+- `OPP_STATUS_ORDER` (select manual de status no modal/editor) ficou só com `['to_organize', 'analisar']` — `dead`/`mapped` continuam alcançáveis só pelos botões dedicados do card, mesma filosofia que já valia pra `mapped` antes desta entrega (nunca esteve no select manual).
+
+### Intelligence Hub: Postdoc volta a ser coletado (emprego geral continua parado)
+
+Complemento do pedido — desligar emprego geral (II.1.5.0) não deveria ter parado Postdoc também, que o usuário ainda quer receber em Empregos.
+
+- `collectors/base.py` (`_resolve_projects`): novo suporte a `enabled` **por fonte** (default `True` — não muda o comportamento de nenhuma fonte que nunca declarou a chave). Antes só existia liga/desliga por projeto inteiro.
+- `config.yaml`: projeto `emprego_vagas` voltou a `enabled: true`, mas as 3 fontes de vaga geral (Techniekwerkt · Energy Engineer/Waterstof/Process Engineer) ganharam `enabled: false` individualmente — as 8 fontes de Postdoc/Pesquisador (jobs.ac.uk, EuroScienceJobs, Nature Careers, TNO, DIFFER, Juelich, EnergyVille, ResearchGate) seguem coletando normalmente.
+- `_worker.js`: `HUB_INGEST_BLOCKED_PROJECTS` esvaziado (era `{'emprego_vagas'}`) — o filtro passou a ser feito inteiramente do lado do Hub, por fonte, então bloquear o projeto inteiro na ingestão do AIDE bloquearia o Postdoc que devia passar.
+
+**Desvio/decisão:** perguntado explicitamente — Postdoc continua aparecendo na aba **Empregos** (não migrado para Vagas PhD), mesmo o AIDE já tratar `postdoc` como trilha `phd` internamente (`TYPE_TO_TRACK`) — o usuário confirmou que quer ver essas vagas em Empregos, não misturadas com PhD.
+
+## [II.1.6.0] — 2026-09-10
+
+### Export multi-domínio: Carreira, Mercado, Networking, Eventos, Venues (CSV/TXT/PDF)
+
+Pedido explícito do usuário: poder exportar as áreas Carreira, Mercado, Contatos-Networking, Eventos e Venues, escolhendo quais (até "todos") e em qual formato — CSV, TXT ou PDF, complementando o export de Tarefas/Notas que já existia.
+
+- `_worker.js`: `GET /api/export/data?domain=<career|market|networking|events|venues>&format=csv|txt` — reaproveita as mesmas queries/joins das páginas de origem (`career_opportunities` com JOIN em organização/contato, `market_organizations`, `network_people` via `hydratePeople` para trazer cargo/instituição atual, `career_events`, `publication_venues`). Controle de acesso espelha cada página (Mercado/Eventos/Venues: owner + assistente fixo; Networking: permissão granular; Carreira: qualquer sessão válida). Um domínio por chamada — o frontend dispara N downloads quando vários são marcados.
+- `GET /api/export/data/json?domains=a,b,c` — variante sem download, usada só pelo PDF: devolve `{ [domain]: { label, columns, rows } }` já formatado (mesmas colunas/rótulos do CSV) para o cliente montar o arquivo.
+- `src/lib/exportData.js` (novo): PDF é gerado no **navegador**, via `jspdf` + `jspdf-autotable` (import dinâmico — só baixa a lib quando o usuário realmente pede PDF; confirmado no build que ficaram em chunks separados, não infladando o bundle inicial). Um PDF por exportação, com uma seção/tabela por domínio selecionado — CSV/TXT continuam um arquivo por domínio (colunas incompatíveis entre domínios impedem juntar num CSV só).
+- `SettingsPage.jsx`: novo painel "Exportar dados" na seção Dados — chips de seleção por domínio + "Selecionar todos", formato (CSV/TXT/PDF), botão único.
+
+### Desvios/decisões técnicas (com justificativa)
+- PDF gerado no cliente, não no Worker: gerar PDF de verdade em Cloudflare Workers exigiria uma lib pesada sem suporte claro nesse runtime; o navegador já faz isso bem, sem dependência nova no backend.
+- Rótulos de status/trilha da Carreira (`EXPORT_STATUS_LABELS`/`EXPORT_TRACK_LABELS`) duplicados no worker a partir de `careerShared.jsx` — o Worker não importa código do bundle React (build separado). Mesmo padrão já usado entre `CHANGELOG.md` e `src/changelog.js`: mantidos em paralelo manualmente, com comentário apontando a duplicação.
+- Local de entrada: painel único em Configurações (não um botão por página) — o pedido foi poder escolher qualquer combinação dos 5 domínios de um só lugar, o que um botão por página não atende bem.
+
 ## [II.1.5.0] — 2026-09-10
 
 ### Carreira/Hub ajustados para o novo papel: Lauro aceito no PhD (Prof. Edwin Zondervan, UT)

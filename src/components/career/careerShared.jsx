@@ -61,41 +61,52 @@ export function trackForType(type) {
   return TYPE_TO_TRACK[type] || 'job';
 }
 
-// --- Pipeline: 5 colunas, uma por status do banco.
+// --- Pipeline: 2 colunas ativas (II.1.7.0 — restructure pedido pelo Lauro).
 // dropStatus = status gravado quando um card é solto na coluna.
+//
+// v2.26.2→II.1.6.0: eram 5 colunas (Triagem/Preparando/Aplicada/Em Processo/
+// Vagas Mortas), com "Mapear" sendo um toggle (extract_knowledge) por cima
+// de qualquer coluna, e "Coleta concluída" arquivando (status='mapped').
+//
+// II.1.7.0 — Lauro pediu um fluxo mais simples: "Mapear" vira a PRIMEIRA
+// coluna de verdade (onde tudo que chega em Carreira cai, e onde as
+// assistentes trabalham) e "Analisar" a segunda (onde ele decide o destino
+// final — Arquivo ou Descartada — via botão no card, sem colunas
+// intermediárias de status de candidatura). `statuses` de 'analisar' inclui
+// os status antigos (preparing/applied/in_process) como rede de segurança —
+// a migration 0011 já move todo card existente para 'analisar', mas caso
+// algum escape da migration ele ainda cai visualmente na coluna certa em vez
+// de sumir do Kanban.
 export const PIPELINE_COLUMNS = [
-  // v2.26.4 (Bloco 4C) — rótulo encurtado de "Identificadas a Organizar" para
-  // "Triagem" (cabeçalho de coluna do Kanban); o valor de status interno
-  // ('to_organize') NÃO muda, só o texto exibido.
-  { key: 'to_organize', label: 'Triagem', statuses: ['to_organize'], dropStatus: 'to_organize' },
-  { key: 'preparing',   label: 'Preparando',                statuses: ['preparing'],   dropStatus: 'preparing' },
-  { key: 'applied',     label: 'Aplicada',                  statuses: ['applied'],     dropStatus: 'applied' },
-  { key: 'in_process',  label: 'Em Processo',               statuses: ['in_process'],  dropStatus: 'in_process' },
-  { key: 'dead',        label: 'Vagas Mortas',              statuses: ['dead'],        dropStatus: 'dead' },
+  { key: 'to_organize', label: 'Mapear',   statuses: ['to_organize'],                              dropStatus: 'to_organize' },
+  { key: 'analisar',    label: 'Analisar', statuses: ['analisar', 'preparing', 'applied', 'in_process'], dropStatus: 'analisar' },
 ];
 
 // Todos os status do banco, para selects de status no modal/editor.
 export const OPP_STATUS_LABELS = {
-  to_organize: 'Triagem',
-  preparing: 'Preparando',
-  applied: 'Aplicada',
-  in_process: 'Em Processo',
-  dead: 'Vagas Mortas',
+  to_organize: 'Mapear',
+  analisar: 'Analisar',
+  // Legado (pré-II.1.7.0) — não usados mais como destino de novo card, mas
+  // ainda podem aparecer em auditoria/histórico de cards antigos.
+  preparing: 'Analisar',
+  applied: 'Analisar',
+  in_process: 'Analisar',
+  dead: 'Descartada',
 };
 
-export const OPP_STATUS_ORDER = ['to_organize', 'preparing', 'applied', 'in_process', 'dead'];
+// Só 'to_organize' e 'analisar' são status "ativos" que um card pode receber
+// manualmente — 'dead' e 'mapped' são destinos finais, alcançados só pelos
+// botões "Descartar"/"Enviar ao Arquivo" do card (ver OpportunityPipeline).
+export const OPP_STATUS_ORDER = ['to_organize', 'analisar'];
 
-// v2027-09-10 — Lauro foi aceito no PhD (Prof. Edwin Zondervan, UT) — a
-// trilha "phd" deixou de ser "candidatar-se a vagas" e virou "acompanhar
-// outros PhDs/colaboradores pra guiar networking". Os status internos do
-// banco (to_organize/preparing/applied/...) NÃO mudam — só o texto exibido
-// quando o card/board é da trilha phd. job/spinoff continuam com os rótulos
-// de candidatura originais (OPP_STATUS_LABELS acima), inalterados.
+// v2027-09-10 (II.1.5.0) — trilha "phd" virou "acompanhar outros PhDs/
+// colaboradores pra guiar networking", não mais "candidatar-se a vagas".
+// II.1.7.0 — com o Kanban simplificado para Mapear/Analisar em TODAS as
+// trilhas, os rótulos de coluna também viraram genéricos p/ todas — a única
+// nuance de networking que sobrevive é o destino "Descartada", que para a
+// trilha phd faz mais sentido como "Sem retorno" (contato que não respondeu)
+// do que "Descartada" (soa como recusa ativa, o que nem sempre é o caso).
 export const OPP_STATUS_LABELS_PHD_NETWORKING = {
-  to_organize: 'Descobertas',
-  preparing: 'A contatar',
-  applied: 'Contato feito',
-  in_process: 'Em conversa',
   dead: 'Sem retorno',
 };
 
@@ -107,21 +118,23 @@ export function statusLabelFor(status, track) {
   return map[status] || OPP_STATUS_LABELS[status] || status;
 }
 
-// Rótulo de cabeçalho de coluna do Kanban: só é track-aware quando o board
-// está filtrado numa única trilha (trackFilter !== 'all') — com várias
-// trilhas misturadas na mesma coluna, o rótulo genérico é o único que faz
-// sentido para todas ao mesmo tempo.
-export function columnLabelFor(col, trackFilter) {
-  return trackFilter && trackFilter !== 'all' ? statusLabelFor(col.key, trackFilter) : col.label;
+// Rótulo de cabeçalho de coluna do Kanban: os cabeçalhos "Mapear"/"Analisar"
+// agora são literais/genéricos para todas as trilhas (II.1.7.0) — não mais
+// track-aware feito antes de II.1.7.0. Mantido como função (em vez de usar
+// col.label direto) para não obrigar os call sites a mudar de novo se um dia
+// voltar a fazer sentido diferenciar por trilha.
+export function columnLabelFor(col) {
+  return col.label;
 }
 
 
 // v2.26.2 — 'mapped' é um status de arquivo (fora do Kanban ativo), alcançado
-// só pelo botão "Coleta concluída" — por isso não entra em OPP_STATUS_ORDER
-// (que alimenta o select manual de status no editor/modal). Ambos 'mapped' e
-// 'dead' aparecem juntos na aba Arquivo — 'dead' já era o "arquivo" de facto
-// desta app antes de existir uma aba dedicada para isso.
-OPP_STATUS_LABELS.mapped = 'Mapeada';
+// pelo botão "Enviar ao Arquivo" (era "Coleta concluída" até II.1.7.0) — por
+// isso não entra em OPP_STATUS_ORDER (que alimenta o select manual de status
+// no editor/modal). Ambos 'mapped' e 'dead' aparecem juntos na aba Arquivo —
+// 'dead' já era o "arquivo" de facto desta app antes de existir uma aba
+// dedicada para isso.
+OPP_STATUS_LABELS.mapped = 'Arquivada';
 export const ARCHIVE_STATUSES = ['mapped', 'dead'];
 
 // --- Documentos --------------------------------------------------------------

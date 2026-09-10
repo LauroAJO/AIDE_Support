@@ -99,6 +99,8 @@ async function handleAPI(request, env, ctx) {
   // Exports
   if (path === '/api/export/tasks') return handleExportTasks(request, env, user);
   if (path === '/api/export/notes') return handleExportNotes(env);
+  if (path === '/api/export/data') return handleExportData(request, env, user);
+  if (path === '/api/export/data/json') return handleExportDataJson(request, env, user);
   if (path === '/api/import/tasks') return handleImportTasks(request, env, user);
 
   if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
@@ -5095,6 +5097,248 @@ async function handleImportTasks(request, env, user) {
 async function handleExportNotes(env) {
   const { results } = await env.DB.prepare(`${NOTE_SELECT} ORDER BY n.updated_at DESC`).all();
   return downloadJson((results || []).map(shapeNote), 'aide-notes.json');
+}
+
+// ── Export genérico multi-domínio (Carreira/Mercado/Networking/Eventos/Venues) ──
+// v2026-09-10 — pedido do Lauro: exportar Carreira, Mercado, Contatos
+// (Networking), Eventos e Venues em CSV e TXT, podendo escolher quais
+// domínios (até "todos"). PDF é gerado no CLIENTE (src/lib/exportData.js,
+// via jsPDF) a partir do mesmo JSON usado aqui — gerar PDF de verdade num
+// Worker exigiria uma lib pesada sem suporte claro no runtime; o navegador
+// já faz isso bem e sem dependência nova no backend.
+// Um domínio por chamada — o frontend dispara N downloads quando o usuário
+// seleciona vários, em vez de zipar múltiplos arquivos aqui.
+const EXPORT_DOMAIN_LABELS = {
+  career: 'Carreira',
+  market: 'Mercado',
+  networking: 'Contatos (Networking)',
+  events: 'Eventos',
+  venues: 'Venues',
+};
+
+// Rótulos de status/trilha da Carreira, DUPLICADOS de careerShared.jsx —
+// o worker não importa código do frontend (bundles separados). Igual ao
+// padrão já usado em src/changelog.js vs CHANGELOG.md: mantido em paralelo
+// manualmente. Se essas trilhas/status mudarem lá, atualizar aqui também.
+// II.1.7.0 — Kanban Carreira simplificado para Mapear/Analisar (ver
+// PIPELINE_COLUMNS/OPP_STATUS_LABELS em careerShared.jsx); preparing/applied/
+// in_process viram sinônimo de 'Analisar' aqui (rótulo, não status — a
+// migration 0011 já migra os registros de verdade).
+const EXPORT_TRACK_LABELS = { phd: 'PhD', job: 'Emprego', spinoff: 'Spin-off' };
+const EXPORT_STATUS_LABELS = {
+  to_organize: 'Mapear', analisar: 'Analisar',
+  preparing: 'Analisar', applied: 'Analisar', in_process: 'Analisar',
+  dead: 'Descartada', mapped: 'Arquivada',
+};
+const EXPORT_STATUS_LABELS_PHD = {
+  ...EXPORT_STATUS_LABELS,
+  dead: 'Sem retorno',
+};
+function exportStatusLabel(status, track) {
+  const map = track === 'phd' ? EXPORT_STATUS_LABELS_PHD : EXPORT_STATUS_LABELS;
+  return map[status] || EXPORT_STATUS_LABELS[status] || status || '';
+}
+
+async function fetchExportRows(domain, env) {
+  if (domain === 'career') {
+    const { results } = await env.DB.prepare(
+      `SELECT o.*, org.name AS organization_name, c.name AS contact_name
+         FROM career_opportunities o
+         LEFT JOIN market_organizations org ON org.id = o.organization_id
+         LEFT JOIN network_people c ON c.id = o.contact_id
+        WHERE o.status != 'deleted'
+        ORDER BY o.updated_at DESC`
+    ).all();
+    return (results || []).map(shapeOpportunity);
+  }
+  if (domain === 'market') {
+    const { results } = await env.DB.prepare('SELECT * FROM market_organizations ORDER BY name ASC').all();
+    return (results || []).map(shapeMarketOrg);
+  }
+  if (domain === 'networking') {
+    const { results } = await env.DB.prepare('SELECT * FROM network_people ORDER BY name ASC').all();
+    return hydratePeople(env, results || []);
+  }
+  if (domain === 'events') {
+    const { results } = await env.DB.prepare(
+      `SELECT * FROM career_events
+        ORDER BY CASE WHEN date_start IS NULL OR date_start = '' THEN 1 ELSE 0 END, date_start ASC, name ASC`
+    ).all();
+    return (results || []).map(shapeEvent);
+  }
+  if (domain === 'venues') {
+    const { results } = await env.DB.prepare(
+      'SELECT * FROM publication_venues ORDER BY relevance_phd DESC, name ASC'
+    ).all();
+    return (results || []).map(shapeVenue);
+  }
+  return [];
+}
+
+// `get(row)` devolve o valor já formatado para exibição (string). Colunas
+// derivadas (trilha/status traduzidos, tags juntas, booleanos em Sim/Não)
+// ficam aqui, não no shape*() — export é uma visão de leitura, não muda o
+// shape usado pelo resto do app.
+const EXPORT_COLUMNS = {
+  career: [
+    { label: 'Título', get: (r) => r.title || '' },
+    { label: 'Trilha', get: (r) => EXPORT_TRACK_LABELS[r.track] || r.track || '' },
+    { label: 'Tipo', get: (r) => r.type || '' },
+    { label: 'Status', get: (r) => exportStatusLabel(r.status, r.track) },
+    { label: 'Organização', get: (r) => r.organization_name || '' },
+    { label: 'Contato', get: (r) => r.contact_name || '' },
+    { label: 'Local', get: (r) => r.location || '' },
+    { label: 'Faixa salarial', get: (r) => r.salary_range || '' },
+    { label: 'Prazo', get: (r) => r.deadline || '' },
+    { label: 'Prioridade', get: (r) => r.priority ?? '' },
+    { label: 'Mapear', get: (r) => (r.extract_knowledge ? 'Sim' : 'Não') },
+    { label: 'Tags', get: (r) => (r.tags || []).join('; ') },
+    { label: 'Notas', get: (r) => r.notes || '' },
+  ],
+  market: [
+    { label: 'Nome', get: (r) => r.name || '' },
+    { label: 'Tipo', get: (r) => r.type || '' },
+    { label: 'Subtipo', get: (r) => r.subtype || '' },
+    { label: 'País', get: (r) => r.country || '' },
+    { label: 'Cidade', get: (r) => r.city || '' },
+    { label: 'Website', get: (r) => r.website || '' },
+    { label: 'LinkedIn', get: (r) => r.linkedin || '' },
+    { label: 'Relevância', get: (r) => r.relevance_score ?? '' },
+    { label: 'Relev. PhD', get: (r) => r.relevance_for_phd ?? '' },
+    { label: 'Relev. Emprego', get: (r) => r.relevance_for_job ?? '' },
+    { label: 'Relev. Spin-off', get: (r) => r.relevance_for_spinoff ?? '' },
+    { label: 'Status', get: (r) => r.status || '' },
+    { label: 'Tags', get: (r) => (r.tags || []).join('; ') },
+    { label: 'Descrição', get: (r) => r.description || '' },
+  ],
+  networking: [
+    { label: 'Nome', get: (r) => r.name || '' },
+    { label: 'Tipo', get: (r) => r.type || '' },
+    { label: 'Instituição', get: (r) => r.institution || '' },
+    { label: 'Cargo', get: (r) => r.role || '' },
+    { label: 'Área de atuação', get: (r) => r.area_of_work || '' },
+    { label: 'País', get: (r) => r.country || '' },
+    { label: 'Email', get: (r) => r.email || '' },
+    { label: 'Telefone', get: (r) => r.phone || '' },
+    { label: 'LinkedIn', get: (r) => r.linkedin || '' },
+    { label: 'Conexão com Lauro', get: (r) => r.connection_to_lauro || '' },
+    { label: 'Força da conexão', get: (r) => r.connection_strength ?? '' },
+    { label: 'Temperatura', get: (r) => r.temperature || '' },
+    { label: 'Tags', get: (r) => (r.tags || []).join('; ') },
+    { label: 'Notas', get: (r) => r.notes || '' },
+  ],
+  events: [
+    { label: 'Nome', get: (r) => r.name || '' },
+    { label: 'Sigla', get: (r) => r.acronym || '' },
+    { label: 'Tipo', get: (r) => r.type || '' },
+    { label: 'Área', get: (r) => r.area || '' },
+    { label: 'Início', get: (r) => r.date_start || '' },
+    { label: 'Fim', get: (r) => r.date_end || '' },
+    { label: 'Local', get: (r) => r.location || '' },
+    { label: 'Cidade', get: (r) => r.city || '' },
+    { label: 'País', get: (r) => r.country || '' },
+    { label: 'Organizador', get: (r) => r.organizer || '' },
+    { label: 'Peer review', get: (r) => (r.peer_review ? 'Sim' : 'Não') },
+    { label: 'Híbrido', get: (r) => (r.hybrid ? 'Sim' : 'Não') },
+    { label: 'Prazo resumo', get: (r) => r.deadline_abstract || '' },
+    { label: 'Prazo artigo', get: (r) => r.deadline_paper || '' },
+    { label: 'Website', get: (r) => r.website || '' },
+    { label: 'Status', get: (r) => r.status || '' },
+    { label: 'Fase estratégica', get: (r) => r.strategic_phase ?? '' },
+    { label: 'Tags', get: (r) => (r.tags || []).join('; ') },
+    { label: 'Notas', get: (r) => r.notes || '' },
+  ],
+  venues: [
+    { label: 'Nome', get: (r) => r.name || '' },
+    { label: 'Sigla', get: (r) => r.acronym || '' },
+    { label: 'Editora', get: (r) => r.publisher || '' },
+    { label: 'Tipo', get: (r) => r.type || '' },
+    { label: 'Indexação', get: (r) => r.indexing || '' },
+    { label: 'Fator de impacto', get: (r) => r.impact_factor ?? '' },
+    { label: 'Quartil', get: (r) => r.quartile || '' },
+    { label: 'Área', get: (r) => r.area || '' },
+    { label: 'Relev. PhD', get: (r) => r.relevance_phd ?? '' },
+    { label: 'Open access', get: (r) => (r.open_access ? 'Sim' : 'Não') },
+    { label: 'Website', get: (r) => r.website || '' },
+    { label: 'Tags', get: (r) => (r.tags || []).join('; ') },
+    { label: 'Notas', get: (r) => r.notes || '' },
+  ],
+};
+
+function buildGenericCsv(rows, columns, title) {
+  const linhas = [csvRow([title]), csvRow(columns.map((c) => c.label))];
+  for (const r of rows) linhas.push(csvRow(columns.map((c) => c.get(r))));
+  return '﻿' + linhas.join('\r\n');
+}
+
+function buildGenericTxt(rows, columns, title) {
+  const out = [
+    title, '='.repeat(title.length),
+    `Exportado em ${new Date().toLocaleString('pt-BR')} — ${rows.length} registro(s)`, '',
+  ];
+  if (rows.length === 0) out.push('(nenhum registro)');
+  rows.forEach((r, i) => {
+    out.push(`— ${i + 1} —`);
+    for (const c of columns) {
+      const v = c.get(r);
+      if (v === '' || v == null) continue;
+      out.push(`${c.label}: ${v}`);
+    }
+    out.push('');
+  });
+  return out.join('\r\n');
+}
+
+// GET /api/export/data?domain=career|market|networking|events|venues&format=csv|txt
+// Mesmo controle de acesso das páginas de origem: Mercado/Eventos/Venues são
+// owner + assistente fixo (isFixedUser); Networking segue a permissão
+// granular 'networking'/'view'; Carreira é liberado a qualquer sessão válida
+// (mesma regra de GET /api/career/opportunities).
+async function handleExportData(request, env, user) {
+  const url = new URL(request.url);
+  const domain = url.searchParams.get('domain');
+  const formato = String(url.searchParams.get('format') || 'csv').toLowerCase();
+  if (!EXPORT_DOMAIN_LABELS[domain]) return json({ error: 'domain inválido' }, 400);
+  if ((domain === 'market' || domain === 'events' || domain === 'venues') && !isFixedUser(user)) {
+    return json({ error: 'Restrito ao owner e assistentes fixos' }, 403);
+  }
+  if (domain === 'networking' && !requirePermission(user, 'networking', 'view')) {
+    return json({ error: 'Sem permissão' }, 403);
+  }
+  const rows = await fetchExportRows(domain, env);
+  const columns = EXPORT_COLUMNS[domain];
+  const label = EXPORT_DOMAIN_LABELS[domain];
+  const hoje = new Date().toISOString().slice(0, 10);
+  const base = `aide-${domain}-${hoje}`;
+  if (formato === 'txt') {
+    return downloadText(buildGenericTxt(rows, columns, label), `${base}.txt`, 'text/plain; charset=utf-8');
+  }
+  return downloadText(buildGenericCsv(rows, columns, label), `${base}.csv`, 'text/csv; charset=utf-8');
+}
+
+// GET /api/export/data/json?domain=...&domains=a,b,c — variante JSON (sem
+// download, sem Content-Disposition) usada pelo PDF client-side: o frontend
+// busca os dados aqui e monta o PDF localmente com jsPDF (ver
+// src/lib/exportData.js). Aceita 1+ domínios numa só chamada — o PDF, ao
+// contrário do CSV/TXT, pode juntar várias seções num único arquivo.
+async function handleExportDataJson(request, env, user) {
+  const url = new URL(request.url);
+  const domains = String(url.searchParams.get('domains') || url.searchParams.get('domain') || '')
+    .split(',').map((d) => d.trim()).filter(Boolean);
+  const out = {};
+  for (const domain of domains) {
+    if (!EXPORT_DOMAIN_LABELS[domain]) continue;
+    if ((domain === 'market' || domain === 'events' || domain === 'venues') && !isFixedUser(user)) continue;
+    if (domain === 'networking' && !requirePermission(user, 'networking', 'view')) continue;
+    const rows = await fetchExportRows(domain, env);
+    const columns = EXPORT_COLUMNS[domain].map((c) => c.label);
+    out[domain] = {
+      label: EXPORT_DOMAIN_LABELS[domain],
+      columns,
+      rows: rows.map((r) => EXPORT_COLUMNS[domain].map((c) => String(c.get(r) ?? ''))),
+    };
+  }
+  return json(out);
 }
 
 // ---------------------------------------------------------------------------
@@ -10626,8 +10870,9 @@ async function handleCareerOpportunities(request, env, user) {
            LEFT JOIN network_people c ON c.id = o.contact_id
            ${where}
           ORDER BY CASE o.status
-            WHEN 'to_organize' THEN 0 WHEN 'preparing' THEN 1
-            WHEN 'applied' THEN 2 WHEN 'in_process' THEN 3 WHEN 'dead' THEN 4 ELSE 5 END,
+            WHEN 'to_organize' THEN 0
+            WHEN 'analisar' THEN 1 WHEN 'preparing' THEN 1 WHEN 'applied' THEN 1 WHEN 'in_process' THEN 1
+            WHEN 'mapped' THEN 2 WHEN 'dead' THEN 3 ELSE 4 END,
             CASE WHEN o.deadline IS NULL OR o.deadline = '' THEN 1 ELSE 0 END, o.deadline ASC`;
       const { results } = await env.DB.prepare(sql).bind(...args).all();
       return json((results || []).map(shapeOpportunity));
@@ -10640,6 +10885,14 @@ async function handleCareerOpportunities(request, env, user) {
     }
     const id = crypto.randomUUID();
     const now = Math.floor(Date.now() / 1000);
+    // II.1.7.0 — vaga vinda do Hub (hub_short_id presente) e sem responsável
+    // explícito no body: atribui automaticamente em rodízio Alice/Milene (o
+    // Lauro pediu "uma vaga para Alice e a seguinte para Milene"). Vagas
+    // criadas à mão no Pipeline não entram no rodízio — só as do Hub.
+    let assignedTo = body.assigned_to || null;
+    if (!assignedTo && body.hub_short_id) {
+      assignedTo = await nextRoundRobinAssistant(env);
+    }
     try {
       await env.DB.prepare(
         `INSERT INTO career_opportunities
@@ -10652,7 +10905,7 @@ async function handleCareerOpportunities(request, env, user) {
         body.project_id || null, body.description || '', body.requirements || '', body.location || '',
         body.salary_range || '', body.deadline || '', body.status || 'to_organize',
         Number(body.priority) || 3, Number(body.fit_score) || 3, body.url || '', body.notes || '',
-        JSON.stringify(body.tags || []), body.assigned_to || null, body.hub_short_id || null,
+        JSON.stringify(body.tags || []), assignedTo, body.hub_short_id || null,
         user.id, now, now
       ).run();
     } catch (e) {
@@ -10662,7 +10915,7 @@ async function handleCareerOpportunities(request, env, user) {
     // quando há hub_short_id — oportunidade criada à mão no Pipeline, a partir de
     // um evento ou de um email já nasce preenchida e não precisa da tarefa.
     if (body.hub_short_id) {
-      await createHubCareerTask(env, user, { id, title: body.title, url: body.url });
+      await createHubCareerTask(env, user, { id, title: body.title, url: body.url }, assignedTo);
     }
     const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
     return json(shapeOpportunity(row), 201);
@@ -10670,11 +10923,40 @@ async function handleCareerOpportunities(request, env, user) {
   return json({ error: 'Método não permitido' }, 405);
 }
 
+// II.1.7.0 — rodízio Alice/Milene para vagas vindas do Hub. Sem tabela de
+// estado dedicada: conta quantas oportunidades do Hub já têm responsável e
+// alterna pelo resto da divisão por N assistentes — auto-suficiente (não
+// depende de lembrar "de quem foi a vez passada" em KV/settings) e
+// determinístico o bastante pro caso de uso (não precisa ser perfeito sob
+// concorrência simultânea, que não acontece aqui — só o Hub chama isto).
+// Ordenado por nome (não por rowid) para "Alice antes de Milene" ser
+// prevísivel e não depender da ordem em que as contas foram criadas.
+async function nextRoundRobinAssistant(env) {
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT id FROM users WHERE role = 'assistant_fixed' ORDER BY name ASC"
+    ).all();
+    const assistants = results || [];
+    if (assistants.length === 0) return null;
+    if (assistants.length === 1) return assistants[0].id;
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM career_opportunities
+        WHERE hub_short_id IS NOT NULL AND assigned_to IS NOT NULL`
+    ).first();
+    const idx = (row && row.n ? row.n : 0) % assistants.length;
+    return assistants[idx].id;
+  } catch {
+    return null; // best-effort — nunca bloqueia a criação da oportunidade
+  }
+}
+
 // Tarefa de preenchimento para uma vaga recém-enviada do Hub para a Carreira.
-// assigned_to fica NULL de propósito: aparece em Tarefas sem dono, e qualquer
-// assistente pode pegar. Best-effort — se a tarefa falhar, a oportunidade já foi
-// criada e não deve ser desfeita por causa disso.
-async function createHubCareerTask(env, user, opportunity) {
+// v2.25.18: assigned_to ficava NULL de propósito (tarefa "solta" — qualquer
+// assistente podia pegar). II.1.7.0 — a oportunidade em si agora já tem um
+// responsável definido (rodízio); a tarefa passa a nascer atribuída à mesma
+// pessoa, em vez de solta, pra não haver dois "donos" divergentes pro mesmo
+// card (a oportunidade diz "é da Milene", a tarefa dizia "é de qualquer um").
+async function createHubCareerTask(env, user, opportunity, assignedTo) {
   const now = Math.floor(Date.now() / 1000);
   try {
     await env.DB.prepare(
@@ -10682,13 +10964,14 @@ async function createHubCareerTask(env, user, opportunity) {
         (id, title, description, assigned_to, created_by, urgency, importance, energy,
          status, tags, comments, subtasks, time_entries, favorited, drive_attachments,
          source, opportunity_id, created_at, updated_at)
-       VALUES (?,?,?,NULL,?,6,7,5,'todo','[]','[]','[]','[]',0,'[]','hub_career',?,?,?)`
+       VALUES (?,?,?,?,?,6,7,5,'todo','[]','[]','[]','[]',0,'[]','hub_career',?,?,?)`
     ).bind(
       crypto.randomUUID(),
       `Preencher card: ${opportunity.title}`,
       'Vaga enviada do Hub para o Pipeline de Carreira.\n\n'
         + 'Preencher informações do card: empresa, prazo, requisitos, próximos passos.'
         + (opportunity.url ? `\n\nVaga original: ${opportunity.url}` : ''),
+      assignedTo || null,
       user.id,
       opportunity.id,
       now,
@@ -10703,19 +10986,30 @@ async function createHubCareerTask(env, user, opportunity) {
 // v2.26.3 — Bloco 3: sincronização bidirecional vaga↔tarefa + auditoria.
 //
 // Status reais do Kanban de Carreira (careerShared.jsx): to_organize <
-// preparing < applied < in_process < (dead | mapped). dead/mapped são
-// terminais (fora do Kanban ativo — Bloco 2). O spec original deste bloco
-// assumia outro conjunto de status ('identified'/'researching'/'submitted'/
-// 'interview'/'offer'/'rejected') que não existe neste código — a tabela
-// abaixo foi adaptada para os status reais; ver relatório do Bloco 3.
-const OPP_STATUS_RANK = { to_organize: 0, preparing: 1, applied: 2, in_process: 3, dead: 4, mapped: 4 };
+// analisar < (dead | mapped). dead/mapped são terminais (fora do Kanban
+// ativo). O spec original deste bloco assumia outro conjunto de status
+// ('identified'/'researching'/'submitted'/'interview'/'offer'/'rejected')
+// que não existe neste código — a tabela abaixo foi adaptada para os status
+// reais; ver relatório do Bloco 3.
+//
+// II.1.7.0 — preparing/applied/in_process saíram do Kanban ativo (viraram
+// 'analisar', ver migration 0011) mas continuam aqui com o mesmo rank de
+// 'analisar' — cards antigos que por algum motivo não passaram pela
+// migration (ex.: restaurados de um backup) ainda se comportam certo em vez
+// de cair no rank 0 (to_organize) por engano.
+const OPP_STATUS_RANK = {
+  to_organize: 0,
+  analisar: 1, preparing: 1, applied: 1, in_process: 1,
+  dead: 2, mapped: 2,
+};
 
 // Oportunidade → tarefa: to_organize não mexe na tarefa vinculada (ainda não
-// há o que fazer); preparing/applied/in_process mantêm a tarefa 'doing'
-// (trabalho ativo); dead/mapped fecham a tarefa ('done'). Retorna null quando
-// o status da vaga não implica mudança na tarefa.
+// há o que fazer); analisar (e os status legados preparing/applied/
+// in_process) mantêm a tarefa 'doing' (trabalho ativo); dead/mapped fecham a
+// tarefa ('done'). Retorna null quando o status da vaga não implica mudança
+// na tarefa.
 function taskStatusForOpportunityStatus(oppStatus) {
-  if (oppStatus === 'preparing' || oppStatus === 'applied' || oppStatus === 'in_process') return 'doing';
+  if (oppStatus === 'analisar' || oppStatus === 'preparing' || oppStatus === 'applied' || oppStatus === 'in_process') return 'doing';
   if (oppStatus === 'dead' || oppStatus === 'mapped') return 'done';
   return null;
 }
@@ -10734,9 +11028,12 @@ async function syncTaskFromOpportunityStatus(env, opportunityId, newOppStatus) {
 }
 
 // Tarefa → oportunidade: só avança, nunca regride automaticamente (mesma
-// regra pedida no spec original). 'done' empurra para 'applied' (candidatura
-// enviada); 'todo'/'doing' empurram só de 'to_organize' para 'preparing'
-// (começou a trabalhar nisso). 'backlog' não mexe na oportunidade.
+// regra pedida no spec original). II.1.7.0 — com preparing/applied
+// colapsados em 'analisar', 'done' e 'todo'/'doing' agora empurram pro mesmo
+// lugar (de 'to_organize' para 'analisar' — "começou a trabalhar nisso" e
+// "terminou" viram o mesmo destino, já que não há mais estágios
+// intermediários de candidatura pra distinguir os dois). 'backlog' não mexe
+// na oportunidade.
 async function syncOpportunityFromTaskStatus(env, user, task, newTaskStatus) {
   if (!task.opportunity_id) return;
   const opp = await env.DB.prepare('SELECT id, status FROM career_opportunities WHERE id = ?')
@@ -10744,8 +11041,9 @@ async function syncOpportunityFromTaskStatus(env, user, task, newTaskStatus) {
   if (!opp) return;
   const rank = OPP_STATUS_RANK[opp.status] ?? 0;
   let target = null;
-  if (newTaskStatus === 'done' && rank < OPP_STATUS_RANK.applied) target = 'applied';
-  else if ((newTaskStatus === 'todo' || newTaskStatus === 'doing') && rank < OPP_STATUS_RANK.preparing) target = 'preparing';
+  if ((newTaskStatus === 'done' || newTaskStatus === 'todo' || newTaskStatus === 'doing') && rank < OPP_STATUS_RANK.analisar) {
+    target = 'analisar';
+  }
   if (!target || target === opp.status) return;
   const now = Math.floor(Date.now() / 1000);
   try {
@@ -12642,7 +12940,17 @@ function isHubReader(user) {
 // Intelligence Hub continue enviando (o freio, do lado do Hub, é um projeto
 // separado; aqui é a barreira do lado do AIDE, que sempre pode ser revertida
 // removendo este bloco).
-const HUB_INGEST_BLOCKED_PROJECTS = new Set(['emprego_vagas']);
+//
+// ATUALIZADO em II.1.7.0 (mesmo dia): Lauro ainda quer vagas de Postdoc para
+// emprego (mesmo não sendo PhD), só não quer emprego geral. Esse recorte é
+// feito no lado do Hub — por fonte, não mais por projeto inteiro (cada fonte
+// de Postdoc dentro de emprego_vagas ficou 'enabled' e as 3 fontes de vaga
+// geral — Techniekwerkt — ganharam 'enabled: false' em config.yaml; ver
+// collectors/base.py _resolve_projects). Como o projeto emprego_vagas volta
+// a enviar itens (só que agora exclusivamente Postdoc), o bloqueio aqui
+// precisa sair — mantido como Set vazio (documentado) em vez de removido,
+// para caso algum dia seja preciso voltar a barrar tudo rapidamente.
+const HUB_INGEST_BLOCKED_PROJECTS = new Set([]);
 
 // POST /api/hub/items — ingestão em lote. Idempotente via UNIQUE(external_id,
 // project_id) + ON CONFLICT DO NOTHING: itens repetidos contam como duplicates.

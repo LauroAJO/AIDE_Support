@@ -8,6 +8,27 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.7.0',
+    date: '2026-09-10',
+    title: 'Carreira: Kanban vira Mapear → Analisar; Hub: Postdoc de volta',
+    items: [
+      'Kanban de Carreira simplificado: 2 colunas ativas — Mapear (assistentes) → Analisar (Lauro decide)',
+      'Vaga vinda do Hub já chega com responsável — rodízio automático Alice/Milene',
+      'Arquivo saiu da aba visível: agora é um ícone discreto; envio pra lá é por botão no card ("Arquivo"/"Descartar")',
+      'Hub: vagas de Postdoc voltam a ser coletadas (Empregos); vaga geral continua parada',
+    ],
+  },
+  {
+    version: 'II.1.6.0',
+    date: '2026-09-10',
+    title: 'Export de Carreira/Mercado/Networking/Eventos/Venues',
+    items: [
+      'Novo painel "Exportar dados" em Configurações',
+      'CSV, TXT ou PDF — escolha quais áreas, até todas de uma vez',
+      'PDF gerado no navegador, um arquivo com uma seção por área',
+    ],
+  },
+  {
     version: 'II.1.5.0',
     date: '2026-09-10',
     title: 'PhD aceito! Carreira/Hub ajustados',

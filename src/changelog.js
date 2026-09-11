@@ -8,6 +8,26 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.7.2',
+    date: '2026-09-11',
+    title: 'Fix: login travado (D1 free tier estourou de novo, mais cedo)',
+    items: [
+      'Confirmado no painel da Cloudflare: aide-db leu 6M linhas em 24h — acima do teto de 5M/dia, travando inclusive o login',
+      'Toda ação autenticada rodava 3 queries no D1 só pra checar sessão/permissões — agora fica em cache por ~45s, cortando a maior parte dessas leituras repetidas',
+      'Mudanças de permissão/role/arquivamento continuam instantâneas — o cache é invalidado na hora nesses casos',
+    ],
+  },
+  {
+    version: 'II.1.7.1',
+    date: '2026-09-10',
+    title: 'Fix: Chat não pinga mais com a aba em segundo plano',
+    items: [
+      'Polling de mensagens (10s) agora só busca se a aba estiver visível — mesma trava que a Reunião já usava no poll de participantes',
+      'Motivo: Cloudflare passou a aplicar o limite diário de leitura do D1 free tier (5M linhas/dia) a partir de 01/09/2026, e o login (OAuth) chegou a falhar por estourar a cota',
+      'Fix sem custo — só reduz leituras desperdiçadas; upgrade pro Workers Paid continua sendo opcional, decisão do Lauro',
+    ],
+  },
+  {
     version: 'II.1.7.0',
     date: '2026-09-10',
     title: 'Carreira: Kanban vira Mapear → Analisar; Hub: Postdoc de volta',

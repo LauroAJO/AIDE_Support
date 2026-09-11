@@ -9,6 +9,33 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.7.2] — 2026-09-11
+
+### Fix: login travado — D1 free tier estourou de novo, desta vez mais cedo
+
+Relato: Alice e Milene completaram o OAuth do Google normalmente, mas não conseguiam entrar no AIDE depois disso — o login travava/falhava. Confirmado no painel Cloudflare (D1 → aide-db → Overview, últimas 24h): **6M linhas lidas**, acima do teto de 5M/dia do free tier (alta de 655% sobre o período anterior). O fix de ontem (II.1.7.1, trava de visibilidade no polling do Chat) reduziu um consumidor, mas não foi suficiente — a causa maior era estrutural: **toda** requisição autenticada (não só o Chat) rodava 3 queries no D1 (`getUserFromRequest`: lookup de sessão + `resolvePermissions` + `resolveGranularPermissions`, esta última com 2 queries via JOIN/Promise.all) só para responder "quem é esse usuário e o que ele pode fazer" — multiplicado por cada clique, cada carregamento de página, de 3 pessoas, o dia inteiro. Como o próprio `/api/auth/callback` (login) também lê/escreve no D1, quando a cota do dia já está zerada o login falha com o mesmo `D1_ERROR` de ontem — só que agora bloqueando o acesso em si, não só o recebimento de mensagens.
+
+- `_worker.js` (`getUserFromRequest`): novo cache em memória, no escopo do módulo (`AUTH_CACHE`, um `Map` token → resultado resolvido), com TTL de 45s. Uma isolate do Cloudflare Workers é reaproveitada entre várias requisições antes de ser reciclada, então esse cache — sem KV, sem D1, sem infraestrutura nova — absorve o caso comum de um mesmo usuário disparando várias requisições em poucos segundos (carregar uma página, os pollings, cliques em sequência), cortando a maior parte das 3 queries repetidas pra 1 (ou zero, em cache hit).
+- Invalidação proativa do cache nos pontos que mudam permissão/sessão — `handleLogout`, `handleUserApprove`, `handleUserRole`, `handleUserPermissions` (PUT), `handleUserArchive`, `handleUserGranularPermissions` (PUT lote/único e DELETE reset/único) — para que uma mudança de permissão feita pelo Lauro no painel de admin valha na hora, sem esperar os 45s do TTL expirarem.
+- TTL de 45s foi escolhido como equilíbrio: longo o bastante pra cortar a maior parte do tráfego repetido de um mesmo usuário num burst curto, curto o bastante pra uma revogação de acesso (arquivamento, mudança de role) nunca ficar "pendurada" por muito tempo mesmo nos poucos endpoints que não chamam a invalidação explícita.
+
+### Desvios/decisões técnicas (com justificativa)
+- Cache não é indexado por `user_id` (só por token) — invalidação por usuário percorre o Map inteiro removendo entradas cujo `value.id` bate. Aceitável porque o Map nunca passa de um punhado de entradas (poucos usuários ativos por vez).
+- Não foi adicionado nenhum mecanismo de cache entre isolates (KV, Durable Object) — o objetivo era reduzir leituras do D1 sem introduzir uma nova dependência paga/gerenciada; o cache por isolate já cobre a maior parte do padrão de tráfego observado (rajadas do mesmo usuário), mesmo sem garantia de persistir entre isolates diferentes.
+- Decisão de também fazer upgrade pro Workers Paid continua em aberto — fica com o usuário; este fix é só de código, sem custo.
+
+## [II.1.7.1] — 2026-09-10
+
+### Fix: Chat parava de respeitar a aba em segundo plano no polling (D1 free tier)
+
+Contexto: a partir de 01/09/2026 a Cloudflare passou a **aplicar** (não só ter) o limite diário do D1 free tier — 5M linhas lidas/dia — e o login (OAuth callback) chegou a falhar em produção com `D1_ERROR: Your account has exceeded D1's free tier daily row read limit`. Investigação (sem uma query única "culpada" — `chat_messages` já tem índices em `created_at`/`user_id`, então a query em si é indexada, não full-scan) apontou para o padrão de polling do frontend como a causa mais provável de volume: `ChatPage.jsx` fazia `GET /api/chat/messages?limit=50` a cada 10s **mesmo com a aba em segundo plano**, diferente do poll de participantes em `MeetingPage.jsx` (5s/10s), que já tinha uma trava de visibilidade. Outros pollers (`NotificationBell.jsx` 60s, `DashboardPage.jsx` 30s de um valor só, `TimerIndicator.jsx` 1s sem rede) foram descartados como contribuintes relevantes.
+
+- `ChatPage.jsx`: o `setInterval` do polling de mensagens ganhou `if (document.visibilityState !== 'visible') return;` no início do callback — mesma trava já usada no poll de participantes da Reunião. Não muda `POLL_MS` (continua 10s) — só deixa de disparar o fetch enquanto a aba não está em primeiro plano.
+
+### Desvios/decisões técnicas (com justificativa)
+- Fix é só do lado do código (custo zero) — decisão de também fazer upgrade pro Workers Paid ($5/mês, 25B linhas/mês) fica em aberto, é decisão do usuário, não foi tomada nem recomendada aqui.
+- Não foram tocados os pollers de Reunião (agenda/notas, 5s) nem Notificações/Dashboard — fora do escopo pedido; podem ser revisitados se o limite continuar sendo estourado mesmo depois deste fix.
+
 ## [II.1.7.0] — 2026-09-10
 
 ### Carreira: Kanban simplificado (Mapear → Analisar) + rodízio de responsáveis + Arquivo discreto

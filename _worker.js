@@ -673,6 +673,7 @@ async function handleLogout(request, env) {
   if (auth && auth.startsWith('Bearer ')) {
     const token = auth.slice(7);
     await env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run();
+    authCacheInvalidateToken(token);
   }
   return json({ ok: true });
 }
@@ -1082,11 +1083,48 @@ function shapeGmailEmail(row, withBody = false) {
 // Auth helpers
 // ---------------------------------------------------------------------------
 
+// Per-isolate cache of resolved {session, permissions, granular} keyed by
+// bearer token — added 2026-09-11 (II.1.7.2) to cut D1 reads. Before this,
+// EVERY authenticated request ran 3 D1 queries (session+user JOIN,
+// resolvePermissions, resolveGranularPermissions' 2-query Promise.all) just
+// to answer "who is this and what can they do" — with 3 users polling/
+// clicking all day, that alone was a large share of the daily D1 free-tier
+// row-read cap (5M/day), on top of already having broken login once when the
+// cap was hit (D1_ERROR on /api/auth/callback, since that route also touches
+// D1). A Cloudflare Workers isolate is reused across many requests before
+// being recycled, so a short-lived in-memory Map here serves as a free,
+// no-infra cache — no KV/D1 involved — for the common case of the same user
+// firing several requests within a few seconds (page load, polling, rapid
+// clicks). Entries expire after AUTH_CACHE_TTL_MS regardless, so a stale
+// permission change or a fresh archive/logout is never stale for long; the
+// mutation endpoints below also proactively invalidate so admin actions feel
+// instant instead of waiting out the TTL.
+const AUTH_CACHE = new Map(); // token -> { expiresAtMs, value }
+const AUTH_CACHE_TTL_MS = 45000; // 45s — long enough to absorb bursts, short enough that stale permissions/revocation never linger
+
+function authCacheInvalidateToken(token) {
+  if (token) AUTH_CACHE.delete(token);
+}
+
+// Broader invalidation for admin actions (role/permission/archive changes) —
+// we don't index the cache by user_id (it's tiny, a handful of entries at
+// most), so just drop anything belonging to that user, or the whole cache if
+// no user_id is given. Cheap either way given the size.
+function authCacheInvalidateUser(userId) {
+  for (const [token, entry] of AUTH_CACHE) {
+    if (!userId || (entry.value && entry.value.id === userId)) AUTH_CACHE.delete(token);
+  }
+}
+
 async function getUserFromRequest(request, env) {
   const auth = request.headers.get('Authorization');
   if (!auth || !auth.startsWith('Bearer ')) return null;
   const token = auth.slice(7);
   const now = Math.floor(Date.now() / 1000);
+
+  const cached = AUTH_CACHE.get(token);
+  if (cached && cached.expiresAtMs > Date.now()) return cached.value;
+
   // Archived users keep their D1 row but cannot use sessions. The `status`
   // column may not exist if migration 0022 hasn't been applied yet — fall
   // back to the legacy query so old environments keep working.
@@ -1105,12 +1143,17 @@ async function getUserFromRequest(request, env) {
         WHERE s.token = ? AND s.expires_at > ?`
     ).bind(token, now).first();
   }
-  if (!session) return null;
+  if (!session) {
+    AUTH_CACHE.delete(token);
+    return null;
+  }
   // resolvePermissions has its own try/catch around the perm tables so a
   // missing migration degrades to the external-preset defaults.
   const permissions = await resolvePermissions(session.id, env);
   const granular = await resolveGranularPermissions(session.id, env);
-  return { ...session, permissions, granular };
+  const value = { ...session, permissions, granular };
+  AUTH_CACHE.set(token, { expiresAtMs: Date.now() + AUTH_CACHE_TTL_MS, value });
+  return value;
 }
 
 function publicUser(user) {
@@ -12501,6 +12544,7 @@ async function handleUserApprove(request, env, user, targetUserId) {
        VALUES (?, ?, ?, ?)`
     ).bind(targetUserId, presetId, now, user.id).run();
   } catch { /* user_permissions not migrated */ }
+  authCacheInvalidateUser(targetUserId);
   const fresh = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(targetUserId).first();
   return json(await shapeAdminUser(env, fresh));
 }
@@ -12523,6 +12567,7 @@ async function handleUserRole(request, env, user, targetUserId) {
   } catch (e) {
     return json({ error: 'Falha ao atualizar role', detail: String(e) }, 500);
   }
+  authCacheInvalidateUser(targetUserId);
   const fresh = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(targetUserId).first();
   if (!fresh) return json({ error: 'Usuário não encontrado' }, 404);
   return json(await shapeAdminUser(env, fresh));
@@ -12575,6 +12620,7 @@ async function handleUserPermissions(request, env, user, targetUserId) {
     } catch (e) {
       return json({ error: 'Falha ao salvar permissões', detail: String(e) }, 500);
     }
+    authCacheInvalidateUser(targetUserId);
     const resolved = await resolvePermissions(targetUserId, env);
     return json({ ok: true, resolved });
   }
@@ -12652,6 +12698,7 @@ async function handleUserArchive(request, env, user, targetUserId) {
   }
   // Wipe sessions so the archived user immediately loses access.
   await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(targetUserId).run().catch(() => {});
+  authCacheInvalidateUser(targetUserId);
   return json({ archived: true, user_id: targetUserId, archived_at: now });
 }
 
@@ -12719,6 +12766,7 @@ async function handleUserGranularPermissions(request, env, user, targetUserId) {
         }
         return json({ error: 'Falha ao salvar permissões', detail: msg }, 500);
       }
+      authCacheInvalidateUser(targetUserId);
       return json({ ok: true, saved: rows.length });
     }
 
@@ -12742,6 +12790,7 @@ async function handleUserGranularPermissions(request, env, user, targetUserId) {
       }
       return json({ error: 'Falha ao salvar permissão', detail: msg }, 500);
     }
+    authCacheInvalidateUser(targetUserId);
     return json({ ok: true, feature, action, allowed: !!allowed });
   }
 
@@ -12756,6 +12805,7 @@ async function handleUserGranularPermissions(request, env, user, targetUserId) {
       } catch (e) {
         return json({ error: 'Falha ao restaurar preset', detail: String((e && e.message) || e) }, 500);
       }
+      authCacheInvalidateUser(targetUserId);
       return json({ reset: true });
     }
     const feature = String(body.feature || '').trim();
@@ -12768,6 +12818,7 @@ async function handleUserGranularPermissions(request, env, user, targetUserId) {
     } catch (e) {
       return json({ error: 'Falha ao remover override', detail: String((e && e.message) || e) }, 500);
     }
+    authCacheInvalidateUser(targetUserId);
     return json({ deleted: true, feature, action });
   }
 

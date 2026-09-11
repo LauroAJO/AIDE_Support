@@ -2705,13 +2705,27 @@ async function handleTimerStart(request, env, user) {
   const body = (await readJson(request)) || {};
   const now = Math.floor(Date.now() / 1000);
 
+  // v-payment-manual-for (II.1.8.0) — um lançamento MANUAL feito pelo owner
+  // pode ser registrado em nome de outra pessoa (ex.: Lauro lançando uma
+  // reunião que teve com a Milene, pra entrada e o pagamento caírem na conta
+  // dela, não na dele). Antes disso, esta função sempre usava `user.id` (quem
+  // está logado) — a entrada existia, só que sob a conta errada, por isso
+  // sumia da aba da pessoa certa em Pagamentos. Só o owner pode setar
+  // body.user_id, e só em entradas manuais; em qualquer outro caso
+  // (assistente logando o próprio tempo, timer ao vivo) continua sendo
+  // sempre o próprio caller, como sempre foi.
+  const targetUserId = (body.manual && user.role === 'owner' && body.user_id)
+    ? String(body.user_id)
+    : user.id;
+
   // Defensive: a missing availability table/column must not 500 the whole
-  // start (parity with stopActiveEntry). Falls back to rate 0.
+  // start (parity with stopActiveEntry). Falls back to rate 0. A taxa vem do
+  // destinatário da entrada (targetUserId), não de quem está lançando.
   let avail = null;
   try {
     avail = await env.DB.prepare(
       'SELECT hourly_rate, hourly_rate_brl FROM availability WHERE user_id = ?'
-    ).bind(user.id).first();
+    ).bind(targetUserId).first();
   } catch { /* availability ausente — mantém taxa 0 */ }
   const defaultRate = (avail && (avail.hourly_rate_brl || avail.hourly_rate)) || 0;
   const rate = body.hourly_rate != null ? Number(body.hourly_rate) || 0 : defaultRate;
@@ -2732,20 +2746,20 @@ async function handleTimerStart(request, env, user) {
       `INSERT INTO time_entries
          (id, task_id, user_id, started_at, ended_at, duration_seconds, hourly_rate, paid, notes, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?)`
-    ).bind(id, body.task_id || null, user.id, startedAt, endedAt, duration, rate, 0, body.notes || '', now).run();
+    ).bind(id, body.task_id || null, targetUserId, startedAt, endedAt, duration, rate, 0, body.notes || '', now).run();
     const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
     return json(shapeEntry(row), 201);
   }
 
   // Only one active entry per user — stop the previous one first.
-  await stopActiveEntry(env, user.id, now);
+  await stopActiveEntry(env, targetUserId, now);
 
   const id = crypto.randomUUID();
   await env.DB.prepare(
     `INSERT INTO time_entries
        (id, task_id, user_id, started_at, ended_at, duration_seconds, hourly_rate, paid, notes, created_at)
      VALUES (?,?,?,?,?,?,?,?,?,?)`
-  ).bind(id, body.task_id || null, user.id, now, null, null, rate, 0, body.notes || '', now).run();
+  ).bind(id, body.task_id || null, targetUserId, now, null, null, rate, 0, body.notes || '', now).run();
 
   const row = await env.DB.prepare(`${ENTRY_SELECT} WHERE e.id = ?`).bind(id).first();
   return json(shapeEntry(row), 201);

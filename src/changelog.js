@@ -8,6 +8,16 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.8.0',
+    date: '2026-09-11',
+    title: 'Pagamentos: lançamento manual — "Registrar para" + tarefa rápida',
+    items: [
+      'Fix: lançamento manual sempre ia pra conta de quem estava logado (Lauro), mesmo aberto na aba de outra pessoa — por isso "sumia" pra Milene/Alice. Agora tem um seletor "Registrar para"',
+      'Digitar um nome/título e clicar "Criar tarefa" (ou só Salvar) cria a tarefa na hora, já concluída e atribuída à pessoa escolhida (+ Lauro como co-responsável) — sem passar pelo formulário de área/projeto/frente',
+      'Esse formulário completo continua disponível pra quem quiser organizar por área/projeto/frente',
+    ],
+  },
+  {
     version: 'II.1.7.2',
     date: '2026-09-11',
     title: 'Fix: login travado (D1 free tier estourou de novo, mais cedo)',

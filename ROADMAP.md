@@ -13,6 +13,7 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.8.0 | 2026-09-11 | Pagamentos: lançamento manual ganha "Registrar para" (fix do bug em que a entrada sempre ia pra quem estava logado) + criação rápida de tarefa (um nome, um clique) já concluída e atribuída à pessoa certa |
 | II.1.7.2 | 2026-09-11 | Fix: login travado pra Alice/Milene (D1 free tier) — cache em memória de sessão/permissões corta as 3 queries de auth por request para 1 na maioria dos casos |
 | II.1.7.1 | 2026-09-10 | Fix: Chat para de fazer polling (10s) com a aba em segundo plano — mesma trava de visibilidade que a Reunião já tinha; mitigação sem custo pro limite diário do D1 free tier |
 | II.1.7.0 | 2026-09-10 | Carreira: Kanban simplifica para Mapear→Analisar (2 colunas ativas) com rodízio automático Alice/Milene e Arquivo discreto; Hub: Postdoc volta a ser coletado (emprego geral continua parado) |

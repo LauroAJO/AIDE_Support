@@ -9,6 +9,22 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.8.0] — 2026-09-11
+
+### Pagamentos: lançamento manual — "Registrar para" + tarefa rápida
+
+Relato do usuário: tentou registrar uma reunião de 30min que teve com a Milene, pelo botão "Adicionar tempo manualmente" em Pagamentos — clicou, preencheu tudo, mas a entrada não aparecia. Pediu também poder só digitar um nome ali sem precisar passar pelo fluxo de criar tarefa manualmente, ou (alternativa que ele mesmo sugeriu) que digitar um nome criasse a tarefa automaticamente, já concluída, com ele e a pessoa envolvida.
+
+**Causa do bug:** `POST /api/timer/start` (usado tanto pelo timer normal quanto pelo lançamento manual) sempre gravava `time_entries.user_id = user.id` — ou seja, **quem está logado**, nunca a pessoa selecionada na aba. Como o Lauro estava logado como ele mesmo, toda entrada manual que ele criava — mesmo com a aba da Milene aberta em Pagamentos — ia para a própria conta dele. A entrada existia no banco, só que na aba errada; por isso "sumia" para Milene.
+
+- `_worker.js` (`handleTimerStart`): entradas manuais (`body.manual`) agora aceitam `body.user_id`, mas só o **owner** pode usá-lo — para qualquer outro caller (assistente logando o próprio tempo, ou o timer ao vivo), `targetUserId` continua sempre `user.id`, sem mudança de comportamento. A busca de taxa (`availability`) também passou a usar `targetUserId`, não quem está lançando — a taxa aplicada é a da pessoa que está sendo paga.
+- `ManualEntryModal` (`PaymentPage.jsx`): novo seletor **"Registrar para"**, visível só pro owner, com Lauro + cada assistente ativa. Valor padrão = a aba de Pagamentos que estava aberta quando o modal foi acionado (abrir com a aba da Milene já pré-seleciona ela).
+- **Criação rápida de tarefa:** digitar um nome no campo de busca e clicar em "Criar tarefa "X"" (ou simplesmente clicar Salvar sem nunca ter selecionado uma tarefa existente) cria a tarefa na hora — `status: 'done'` (lançamento manual é sempre tempo que já aconteceu) e `assigned_to` = a pessoa escolhida em "Registrar para", com o Lauro entrando como co-responsável (`assignee_ids`, tabela `task_assignees`, migration 0052) quando o destinatário é outra pessoa. Sem precisar abrir o formulário de área/projeto/frente. Esse formulário completo (que também ganhou `assigned_to`/`assignee_ids` — antes a tarefa nascia sem responsável nenhum) continua disponível via "Nova tarefa", pra quem quiser organizar por área/projeto/frente.
+
+### Desvios/decisões técnicas (com justificativa)
+- Não foi implementado lançamento 100% sem tarefa (opção A do pedido — "só um nome, sem criar tarefa nenhuma") — o modelo de dados inteiro (relatórios, `time_entries.task_id` como FK NOT NULL na prática, a própria tabela de Pagamentos agrupada por tarefa) pressupõe toda entrada ligada a uma tarefa. A alternativa que o próprio usuário sugeriu (criar a tarefa automaticamente) foi implementada porque preserva essa consistência sem exigir uma reforma maior — e o resultado, na prática, é quase tão rápido quanto "só um nome": digitar e clicar uma vez.
+- Assistentes (não-owner) continuam sem o seletor "Registrar para" — a entrada delas sempre foi (e continua sendo) a própria, sem necessidade de escolher. Tarefas que elas criam via este modal continuam sem `assigned_to` automático, mesmo comportamento de antes — fora do escopo do pedido, que era especificamente sobre o fluxo do owner registrando para outra pessoa.
+
 ## [II.1.7.2] — 2026-09-11
 
 ### Fix: login travado — D1 free tier estourou de novo, desta vez mais cedo

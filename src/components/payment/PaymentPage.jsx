@@ -719,6 +719,13 @@ export default function PaymentPage() {
       {showManual && (
         <ManualEntryModal
           defaultRate={defaultRate}
+          isOwner={isOwner}
+          lauro={lauro}
+          allAssistants={allAssistants}
+          // Abriu a partir da aba da Milene → o lançamento já nasce pra ela,
+          // não pro Lauro (era o bug: sempre ia pra quem estava logado).
+          // Sem perfil de aba (ex.: "Todos") cai no próprio Lauro.
+          defaultForUserId={isOwner ? (profileUser?.id || user?.id) : user?.id}
           onClose={() => setShowManual(false)}
           onSaved={() => {
             setShowManual(false);
@@ -903,7 +910,14 @@ function EntryEditModal({ entry, defaultRate, onClose, onSaved }) {
   );
 }
 
-function ManualEntryModal({ defaultRate, onClose, onSaved }) {
+// v-payment-manual-for (II.1.8.0) — antes, todo lançamento manual (mesmo
+// aberto na aba da Milene) gravava em nome de quem estava LOGADO (Lauro),
+// porque /api/timer/start sempre usava o user autenticado. A entrada existia
+// no banco, só que sob o id do Lauro — por isso "não aparecia" pra Milene em
+// Pagamentos: ela estava lá, na aba errada. `forUserId` deixa o owner
+// escolher explicitamente de quem é a entrada; assistentes continuam sem o
+// seletor (sempre é a própria entrada delas, como já era).
+function ManualEntryModal({ defaultRate, isOwner, lauro, allAssistants, defaultForUserId, onClose, onSaved }) {
   const tasks = useStore((s) => s.tasks);
   const setTasks = useStore((s) => s.setTasks);
   const areas = useStore((s) => s.areas);
@@ -915,12 +929,13 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
   const pristine = useMemo(() => ({
     search: '', taskId: '', date: todayStr(),
     startTime: '09:00', endTime: '10:00', rate: defaultRate || 0, notes: '',
-  }), [defaultRate]);
+    forUserId: defaultForUserId || '',
+  }), [defaultRate, defaultForUserId]);
   const {
     value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
   } = useDraft('payment-manual', pristine);
 
-  const { search, taskId, date, startTime, endTime, rate, notes } = form;
+  const { search, taskId, date, startTime, endTime, rate, notes, forUserId } = form;
   const setField = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
   const setSearch = setField('search');
   const setTaskId = setField('taskId');
@@ -929,6 +944,9 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
   const setEndTime = setField('endTime');
   const setRate = setField('rate');
   const setNotes = setField('notes');
+  const setForUserId = setField('forUserId');
+  const lauroId = lauro?.id || null;
+  const effectiveForUserId = isOwner ? (forUserId || lauroId) : null; // null = backend usa o próprio caller
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -971,6 +989,12 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
 
   const durationSeconds = calcDurationSeconds(date, startTime, date, endTime);
 
+  // assigned_to = a pessoa pra quem o lançamento é (padrão pré-existente
+  // deixava isso em branco — a tarefa nascia solta, sem responsável nenhum).
+  // assignee_ids inclui o Lauro como co-responsável quando ele não é o próprio
+  // destinatário, pra tarefa refletir "reunião/trabalho entre os dois", como
+  // pedido — sem duplicar (task_assignees ignora quem já é o responsável
+  // principal).
   const createNewTask = async () => {
     setError('');
     const title = (createMode ? newTitle : search).trim();
@@ -982,6 +1006,8 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
         status: 'doing',
         project_id: newProjectId || null,
         front_id: newFrontId || null,
+        assigned_to: effectiveForUserId || null,
+        assignee_ids: (lauroId && effectiveForUserId && effectiveForUserId !== lauroId) ? [lauroId] : [],
       };
       const created = await apiFetch('/api/tasks', {
         method: 'POST',
@@ -1001,18 +1027,61 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
     }
   };
 
+  // Caminho rápido (v-payment-manual-for) — pedido do usuário: poder só
+  // digitar um nome em Pagamentos sem passar pelo formulário de "Nova
+  // tarefa" (área/projeto/frente). Um clique no aviso "Criar tarefa ‹X›"
+  // já cria a tarefa PRONTA — status 'done' (o lançamento manual é sempre
+  // tempo que já aconteceu) e responsável = a pessoa escolhida em "Registrar
+  // para" (+ Lauro como co-responsável, se for outra pessoa) — e a seleciona,
+  // sem abrir o painel de área/projeto/frente. `save()` também cai aqui
+  // automaticamente se o usuário digitar um nome e clicar direto em Salvar,
+  // sem nunca ter clicado no aviso.
+  const quickCreateTask = async (title) => {
+    const payload = {
+      title,
+      status: 'done',
+      assigned_to: effectiveForUserId || null,
+      assignee_ids: (lauroId && effectiveForUserId && effectiveForUserId !== lauroId) ? [lauroId] : [],
+    };
+    const created = await apiFetch('/api/tasks', { method: 'POST', body: JSON.stringify(payload) });
+    const updated = await apiFetch('/api/tasks');
+    setTasks(updated);
+    setTaskId(created.id);
+    setSearch(created.title);
+    return created.id;
+  };
+
+  const handleQuickCreateClick = async () => {
+    setError('');
+    const title = search.trim();
+    if (!title) return;
+    setCreating(true);
+    try {
+      await quickCreateTask(title);
+    } catch (e) {
+      setError(String((e && e.message) || e) || 'Falha ao criar tarefa.');
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const save = async () => {
     setError('');
-    if (!taskId) return setError('Selecione uma tarefa.');
+    let effectiveTaskId = taskId;
+    if (!effectiveTaskId && !search.trim()) {
+      return setError('Selecione uma tarefa ou digite um nome/título para criar uma.');
+    }
     if (durationSeconds <= 0) return setError('Hora final deve ser depois da inicial.');
     setBusy(true);
     try {
+      if (!effectiveTaskId) effectiveTaskId = await quickCreateTask(search.trim());
       const startedAt = new Date(`${date}T${startTime}`).toISOString();
       const endedAt = new Date(`${date}T${endTime}`).toISOString();
       await apiFetch('/api/timer/start', {
         method: 'POST',
         body: JSON.stringify({
-          task_id: taskId,
+          task_id: effectiveTaskId,
+          user_id: effectiveForUserId || undefined,
           started_at: startedAt,
           ended_at: endedAt,
           duration_seconds: durationSeconds,
@@ -1045,6 +1114,17 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
           {hasDraft && <DraftBanner onDiscard={discardDraft} />}
           {error && (
             <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>
+          )}
+          {isOwner && (
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-ink2">Registrar para</span>
+              <select value={effectiveForUserId || ''} onChange={(e) => setForUserId(e.target.value)} className="input">
+                {lauro && <option value={lauro.id}>{lauro.name || 'Lauro'} (você)</option>}
+                {(allAssistants || []).map((a) => (
+                  <option key={a.id} value={a.id}>{a.name || a.email}</option>
+                ))}
+              </select>
+            </label>
           )}
           <label className="block">
             <div className="mb-1 flex items-center justify-between">
@@ -1084,10 +1164,20 @@ function ManualEntryModal({ defaultRate, onClose, onSaved }) {
                 {noMatches && (
                   <button
                     type="button"
-                    onClick={() => { setNewTitle(search); setCreateMode(true); }}
-                    className="mt-1 flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-accent/40 bg-accent/5 px-2 py-1.5 text-[11px] font-medium text-accent hover:bg-accent/10"
+                    onClick={handleQuickCreateClick}
+                    disabled={creating}
+                    className="mt-1 flex w-full items-center justify-center gap-1 rounded-lg border border-dashed border-accent/40 bg-accent/5 px-2 py-1.5 text-[11px] font-medium text-accent hover:bg-accent/10 disabled:opacity-60"
                   >
-                    <Plus className="h-3 w-3" /> Criar tarefa &ldquo;{search.trim()}&rdquo;
+                    <Plus className="h-3 w-3" /> {creating ? 'Criando...' : `Criar tarefa "${search.trim()}"`}
+                  </button>
+                )}
+                {noMatches && (
+                  <button
+                    type="button"
+                    onClick={() => { setNewTitle(search); setCreateMode(true); }}
+                    className="mt-1 w-full text-center text-[11px] text-ink2 underline hover:text-ink"
+                  >
+                    ou escolher área/projeto/frente antes de criar
                   </button>
                 )}
               </>

@@ -103,6 +103,25 @@ async function handleAPI(request, env, ctx) {
   if (path === '/api/export/data/json') return handleExportDataJson(request, env, user);
   if (path === '/api/import/tasks') return handleImportTasks(request, env, user);
 
+  // Integração de dados externos (Fase 0 — II.1.9.0): ORCID/OpenAlex/ROR/
+  // CORDIS. Fila de enriquecimento processada em lote pelo cron diário;
+  // estas rotas servem para consulta e gatilho manual (owner only).
+  if (path === '/api/enrich/process-queue') return handleEnrichProcessQueue(request, env, user);
+  if (path === '/api/enrich/queue') return handleEnrichQueueCollection(request, env, user);
+  if (path.startsWith('/api/enrich/queue/')) {
+    return handleEnrichQueueItem(request, env, user, path.split('/')[4]);
+  }
+  if (path.startsWith('/api/external/profiles/')) {
+    return handleExternalProfiles(request, env, user, path.split('/')[4]);
+  }
+  if (path.startsWith('/api/external/publications/')) {
+    return handleExternalPublications(request, env, user, path.split('/')[4]);
+  }
+  if (path === '/api/graph/data') return handleGraphData(request, env, user);
+  if (path.startsWith('/api/sector-weight/')) {
+    return handleSectorWeight(request, env, user, path.split('/')[3]);
+  }
+
   if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
   // Tarefas recorrentes — precisa vir ANTES da rota genérica /api/tasks/:id
   // abaixo, senão 'recurring' seria tratado como um task id.
@@ -7247,6 +7266,277 @@ async function handleScheduledNotifications(request, env, user) {
   return json({ error: 'Método não permitido' }, 405);
 }
 
+// ── Integração de dados externos — Fase 0 (II.1.9.0) ────────────────────────
+// Só schema + fila + rotas de consulta. Os fetchers reais (ORCID/OpenAlex/
+// ROR/CORDIS) chegam nas Fases 1/2 — aqui eles são referenciados por `typeof
+// fn === 'function'` para a fila já poder existir e ser consultável sem
+// quebrar por ReferenceError enquanto essas funções não existem.
+
+async function queueEnrichment(entityType, entityId, source, priority, env) {
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO enrichment_queue (id, entity_type, entity_id, source, priority, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', unixepoch())`,
+  ).bind(id, entityType, entityId, source, priority || 0).run();
+  return id;
+}
+
+// Dispatcher defensivo: cada fonte só roda se a função de enriquecimento já
+// existir (Fase 1 = orcid/openalex, Fase 2 = ror/cordis). Até lá, o job fica
+// marcado como 'error' com uma mensagem clara, sem derrubar o resto da fila.
+async function runEnrichmentJob(job, env) {
+  const dispatch = {
+    orcid: typeof enrichPersonFromORCID === 'function' ? enrichPersonFromORCID : null,
+    openalex: typeof enrichPersonFromOpenAlex === 'function' ? enrichPersonFromOpenAlex : null,
+    ror: typeof enrichOrgFromROR === 'function' ? enrichOrgFromROR : null,
+    cordis: typeof enrichOrgFromCORDIS === 'function' ? enrichOrgFromCORDIS : null,
+  };
+  const fn = dispatch[job.source];
+  if (!fn) {
+    throw new Error(`Fonte '${job.source}' ainda não implementada (chega na fase correspondente do plano)`);
+  }
+  return fn(job.entity_id, env);
+}
+
+async function processEnrichmentQueue(env, limit = 10) {
+  const jobs = await env.DB.prepare(
+    `SELECT * FROM enrichment_queue WHERE status = 'pending' ORDER BY priority DESC, created_at ASC LIMIT ?`,
+  ).bind(limit).all();
+  let done = 0;
+  let failed = 0;
+  for (const job of (jobs.results || [])) {
+    try {
+      await env.DB.prepare(`UPDATE enrichment_queue SET status = 'processing', attempts = attempts + 1 WHERE id = ?`)
+        .bind(job.id).run();
+      await runEnrichmentJob(job, env);
+      await env.DB.prepare(`UPDATE enrichment_queue SET status = 'done', processed_at = unixepoch() WHERE id = ?`)
+        .bind(job.id).run();
+      done += 1;
+    } catch (e) {
+      const msg = (e && e.message) || String(e);
+      await env.DB.prepare(`UPDATE enrichment_queue SET status = 'error', last_error = ?, processed_at = unixepoch() WHERE id = ?`)
+        .bind(msg, job.id).run();
+      failed += 1;
+    }
+  }
+  return { processed: jobs.results ? jobs.results.length : 0, done, failed };
+}
+
+// Peso setorial calculado — mistura manual (40%) + OpenAlex h-index/citações
+// (30%) + financiamento CORDIS via organizações vinculadas (20%) + quartil
+// SJR das publicações ligadas (10%). Só os componentes disponíveis contam;
+// o peso é redistribuído entre eles (não penaliza quem só tem dado manual).
+async function calculateSectorWeight(personId, env) {
+  const person = await env.DB.prepare('SELECT * FROM network_people WHERE id = ?').bind(personId).first();
+  if (!person) return null;
+
+  const components = {};
+  const manual = person.sector_weight;
+  if (manual != null) components.manual = { value: Number(manual), weight: 0.4 };
+
+  try {
+    const profile = await env.DB.prepare(
+      `SELECT raw_json FROM external_profiles WHERE entity_type = 'person' AND entity_id = ? AND source = 'openalex'
+       ORDER BY fetched_at DESC LIMIT 1`,
+    ).bind(personId).first();
+    if (profile && profile.raw_json) {
+      const data = JSON.parse(profile.raw_json);
+      const hIndex = data?.summary_stats?.h_index;
+      if (hIndex != null) {
+        // h-index normalizado numa escala 0-10 (h=20 já é topo de escala aqui).
+        components.openalex = { value: Math.min(10, (Number(hIndex) / 20) * 10), weight: 0.3 };
+      }
+    }
+  } catch { /* sem perfil OpenAlex ainda — ignora componente */ }
+
+  try {
+    const funding = await env.DB.prepare(
+      `SELECT COALESCE(SUM(ep.eu_contribution), 0) AS total
+       FROM contact_org_links col
+       JOIN project_org_links pol ON pol.organization_id = col.organization_id
+       JOIN external_projects ep ON ep.id = pol.project_id
+       WHERE col.person_id = ?`,
+    ).bind(personId).first();
+    if (funding && funding.total > 0) {
+      // >= 2M€ de financiamento acumulado já pontua no topo da escala.
+      components.cordis = { value: Math.min(10, (funding.total / 2000000) * 10), weight: 0.2 };
+    }
+  } catch { /* migração 0025/0062 pode não estar presente ainda — ignora */ }
+
+  try {
+    const journal = await env.DB.prepare(
+      `SELECT hi.sjr_quartile AS q
+       FROM publication_entity_links pel
+       JOIN external_publications ext ON ext.id = pel.publication_id
+       JOIN hub_items hi ON hi.doi = ext.doi
+       WHERE pel.entity_type = 'person' AND pel.entity_id = ? AND hi.sjr_quartile != ''
+       ORDER BY ext.publication_year DESC LIMIT 1`,
+    ).bind(personId).first();
+    if (journal && journal.q) {
+      const quartileScore = { Q1: 10, Q2: 7, Q3: 4, Q4: 2 };
+      if (quartileScore[journal.q] != null) {
+        components.journal = { value: quartileScore[journal.q], weight: 0.1 };
+      }
+    }
+  } catch { /* sem publicações ligadas ainda — ignora componente */ }
+
+  const keys = Object.keys(components);
+  if (keys.length === 0) return null;
+  const totalWeight = keys.reduce((s, k) => s + components[k].weight, 0);
+  const score = keys.reduce((s, k) => s + (components[k].value * components[k].weight), 0) / totalWeight;
+
+  await env.DB.prepare(
+    `INSERT INTO sector_weight_log (id, person_id, computed_score, manual_component, openalex_component, cordis_component, journal_component, details_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())`,
+  ).bind(
+    crypto.randomUUID(), personId, score,
+    components.manual ? components.manual.value : null,
+    components.openalex ? components.openalex.value : null,
+    components.cordis ? components.cordis.value : null,
+    components.journal ? components.journal.value : null,
+    JSON.stringify(components),
+  ).run();
+
+  return { score, components };
+}
+
+async function handleEnrichProcessQueue(request, env, user) {
+  if (!user || user.role !== 'owner') return json({ error: 'Apenas o owner pode processar a fila' }, 403);
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  const result = await processEnrichmentQueue(env, 20);
+  return json(result);
+}
+
+async function handleEnrichQueueCollection(request, env, user) {
+  if (!user || user.role !== 'owner') return json({ error: 'Apenas o owner pode ver a fila' }, 403);
+  if (request.method === 'GET') {
+    const rows = await env.DB.prepare('SELECT * FROM enrichment_queue ORDER BY created_at DESC LIMIT 200').all();
+    return json(rows.results || []);
+  }
+  if (request.method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    if (!body.entity_type || !body.entity_id || !body.source) {
+      return json({ error: 'entity_type, entity_id e source são obrigatórios' }, 400);
+    }
+    const id = await queueEnrichment(body.entity_type, body.entity_id, body.source, body.priority || 0, env);
+    return json({ id, ok: true }, 201);
+  }
+  return json({ error: 'Método não permitido' }, 405);
+}
+
+async function handleEnrichQueueItem(request, env, user, id) {
+  if (!user || user.role !== 'owner') return json({ error: 'Apenas o owner pode gerenciar a fila' }, 403);
+  if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
+  if (!id) return json({ error: 'id obrigatório' }, 400);
+  await env.DB.prepare('DELETE FROM enrichment_queue WHERE id = ?').bind(id).run();
+  return json({ ok: true });
+}
+
+async function handleExternalProfiles(request, env, user, entityId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (!entityId) return json({ error: 'entityId obrigatório' }, 400);
+  const rows = await env.DB.prepare(
+    'SELECT * FROM external_profiles WHERE entity_id = ? ORDER BY fetched_at DESC',
+  ).bind(entityId).all();
+  return json(rows.results || []);
+}
+
+async function handleExternalPublications(request, env, user, personId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (!personId) return json({ error: 'personId obrigatório' }, 400);
+  const rows = await env.DB.prepare(
+    `SELECT ext.* FROM external_publications ext
+     JOIN publication_entity_links pel ON pel.publication_id = ext.id
+     WHERE pel.entity_type = 'person' AND pel.entity_id = ?
+     ORDER BY ext.publication_year DESC`,
+  ).bind(personId).all();
+  return json(rows.results || []);
+}
+
+async function handleSectorWeight(request, env, user, personId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (!personId) return json({ error: 'personId obrigatório' }, 400);
+  if (request.method === 'POST') {
+    const result = await calculateSectorWeight(personId, env);
+    if (!result) return json({ error: 'Sem dados suficientes para calcular' }, 404);
+    return json(result);
+  }
+  const row = await env.DB.prepare(
+    'SELECT * FROM sector_weight_log WHERE person_id = ? ORDER BY created_at DESC LIMIT 1',
+  ).bind(personId).first();
+  return json(row || null);
+}
+
+// Endpoint genérico de grafo — Fase 0 só expõe a rede de Networking (mesmo
+// dado que NetworkMapRede já usa), mas no formato {nodes, edges} do spec.
+// Fases futuras (colaboração científica via OpenAlex, projetos CORDIS) adicionam
+// `type` novos aqui sem mudar o formato de resposta.
+async function handleGraphData(request, env, user) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  const url = new URL(request.url);
+  const type = url.searchParams.get('type') || 'networking';
+  if (type !== 'networking') {
+    return json({ error: `Tipo de grafo '${type}' ainda não implementado` }, 400);
+  }
+  const [people, institutions, connections, contactOrgLinks, personRoles] = await Promise.all([
+    env.DB.prepare('SELECT * FROM network_people').all(),
+    env.DB.prepare('SELECT * FROM market_organizations').all(),
+    env.DB.prepare('SELECT * FROM network_connections').all(),
+    env.DB.prepare('SELECT * FROM contact_org_links').all(),
+    env.DB.prepare('SELECT * FROM person_roles').all(),
+  ]);
+  const graph = buildNetworkingGraphServer(
+    people.results || [], institutions.results || [], connections.results || [],
+    contactOrgLinks.results || [], personRoles.results || [],
+  );
+  return json(graph);
+}
+
+// Versão server-side (sem import ES module — _worker.js é um bundle único)
+// do mesmo adaptador usado no frontend em networkShared.js#buildNetworkingGraph.
+// Mantido deliberadamente simples/duplicado: o frontend consome via API
+// REST, não via import direto do arquivo React.
+function buildNetworkingGraphServer(people, institutions, connections, contactOrgLinks) {
+  const orgById = new Map(institutions.map((o) => [o.id, o]));
+  const nodes = people.filter((p) => p && p.id).map((p) => ({
+    id: p.id,
+    type: 'person',
+    label: p.name,
+    sublabel: p.role || '',
+    data: p,
+  }));
+  const edges = [];
+  (connections || []).forEach((c) => {
+    if (!c || !c.person_a_id || !c.person_b_id) return;
+    edges.push({
+      id: `conn-${c.id}`, from: c.person_a_id, to: c.person_b_id,
+      type: 'connection', label: c.connection_type || '',
+    });
+  });
+  // Arestas de "mesma organização" — pareamento completo por org, marcadas
+  // com type 'affiliation' para o layout de grafo genérico saber que elas só
+  // devem contar para o 1º grau (preserva a regra do buildEgoNetwork original).
+  const byOrg = new Map();
+  (contactOrgLinks || []).forEach((l) => {
+    if (!l || !l.organization_id || !l.person_id) return;
+    if (!byOrg.has(l.organization_id)) byOrg.set(l.organization_id, []);
+    byOrg.get(l.organization_id).push(l.person_id);
+  });
+  byOrg.forEach((personIds, orgId) => {
+    const org = orgById.get(orgId);
+    for (let i = 0; i < personIds.length; i += 1) {
+      for (let j = i + 1; j < personIds.length; j += 1) {
+        edges.push({
+          id: `aff-${orgId}-${personIds[i]}-${personIds[j]}`,
+          from: personIds[i], to: personIds[j],
+          type: 'affiliation', label: org ? org.name : 'mesma organização',
+        });
+      }
+    }
+  });
+  return { nodes, edges };
+}
+
 async function handleScheduledNotificationItem(request, env, user, id) {
   if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
   await env.DB.prepare('DELETE FROM scheduled_notifications WHERE id = ? AND from_user_id = ? AND sent = 0').bind(id, user.id).run();
@@ -7407,6 +7697,20 @@ async function runDailyNotifications(env) {
     const msg = (e && e.message) || String(e);
     bridgePush = { ok: false, error: 'exception', reason: msg };
     console.error('[CRON] Bridge push failed:', msg);
+  }
+
+  // --- Fila de enriquecimento externo (II.1.9.0 — Fase 0) ------------------
+  // Lote diário de até 20 jobs (ORCID/OpenAlex/ROR/CORDIS). Não bloqueante:
+  // até as Fases 1/2 implementarem os fetchers, os jobs só ficam marcados
+  // como 'error' (fonte ainda não implementada) sem derrubar o cron.
+  let enrichmentResult = null;
+  try {
+    enrichmentResult = await processEnrichmentQueue(env, 20);
+    console.log('[CRON] Fila de enriquecimento:', JSON.stringify(enrichmentResult));
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    enrichmentResult = { ok: false, error: msg };
+    console.error('[CRON] Fila de enriquecimento falhou:', msg);
   }
 
   // --- Perfis desatualizados (v2.25.14) -----------------------------------

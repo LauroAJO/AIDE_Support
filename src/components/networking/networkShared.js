@@ -166,6 +166,117 @@ export function buildEgoNetwork(centerId, degrees, people, connections, contactO
   return { nodesByDegree, edges, visited };
 }
 
+// ── Grafo genérico {nodes, edges} — Fase 0 da Integração de Dados Externos ──
+// Interface pensada para futuras visualizações (colaboração científica via
+// OpenAlex, rede de projetos CORDIS) reaproveitarem o MESMO layout de anéis
+// concêntricos do Mapa de Rede sem esse componente precisar conhecer o
+// domínio (pessoa/instituição) dos dados.
+//   node: { id, type, label, sublabel?, color?, shape?, size?, data, isBrazilian? }
+//   edge: { id, from, to, type, label?, style?, color?, width? }
+//
+// `buildEgoNetworkGeneric` é uma versão por-BFS de `buildEgoNetwork` acima,
+// com o MESMO comportamento no caso Networking (ver `firstHopOnlyTypes`
+// abaixo) — não troca a função já em uso por NetworkMapRede.jsx, que
+// continua com `buildEgoNetwork` intacta nesta fase.
+//
+// `firstHopOnlyTypes`: tipos de aresta que só contam pra formar o 1º grau —
+// nunca propagam pra 2º grau, mesmo que o nó de origem seja de 1º grau. É
+// assim que preservamos a regra "gente da mesma organização é sempre 1º
+// grau, nunca encadeia pra 2º grau" do buildEgoNetwork original, generalizada
+// pra qualquer domínio: no adaptador de Networking abaixo, 'affiliation' é o
+// único tipo marcado assim; 'connection' se propagate normalmente.
+export function buildEgoNetworkGeneric(centerId, degrees, nodes, edges, opts = {}) {
+  const firstHopOnlyTypes = new Set(opts.firstHopOnlyTypes || []);
+  const nodeList = Array.isArray(nodes) ? nodes.filter((n) => n && n.id) : [];
+  const known = new Set(nodeList.map((n) => n.id));
+  const edgeList = (Array.isArray(edges) ? edges : []).filter(
+    (e) => e && known.has(e.from) && known.has(e.to),
+  );
+
+  const neighborsOf = (id, excludeTypes) => edgeList
+    .filter((e) => (e.from === id || e.to === id) && !excludeTypes.has(e.type))
+    .map((e) => ({ id: e.from === id ? e.to : e.from, edge: e }));
+
+  const visited = new Set([centerId]);
+  const outEdges = [];
+  const nodesByDegree = { 0: [centerId] };
+
+  // 1º grau: TODA aresta conta, incluindo as "first-hop-only".
+  const firstHop = neighborsOf(centerId, new Set());
+  const firstDegree = [];
+  firstHop.forEach(({ id, edge }) => {
+    if (!known.has(id) || id === centerId) return;
+    if (!visited.has(id)) { visited.add(id); firstDegree.push(id); }
+    outEdges.push({ from: centerId, to: id, degree: 1, type: edge.type, edgeId: edge.id });
+  });
+  nodesByDegree[1] = firstDegree;
+
+  if (degrees >= 2) {
+    const secondDegree = [];
+    firstDegree.forEach((nodeId) => {
+      // 2º grau: exclui os tipos "first-hop-only" — eles não encadeiam.
+      const hop = neighborsOf(nodeId, firstHopOnlyTypes);
+      hop.forEach(({ id, edge }) => {
+        if (!known.has(id) || visited.has(id)) return;
+        visited.add(id);
+        secondDegree.push(id);
+        outEdges.push({ from: nodeId, to: id, degree: 2, type: edge.type, edgeId: edge.id });
+      });
+    });
+    nodesByDegree[2] = secondDegree;
+  }
+
+  return { nodesByDegree, edges: outEdges, visited };
+}
+
+// Adaptador: dados de Networking (pessoas/organizações) → {nodes, edges}
+// genéricos. Usado pelo endpoint GET /api/graph/data?type=networking (mesma
+// lógica duplicada no _worker.js em buildNetworkingGraphServer, já que
+// _worker.js é bundle único e não importa deste arquivo ES module).
+export function buildNetworkingGraph(people, institutions, connections, contactOrgLinks) {
+  const orgById = new Map((Array.isArray(institutions) ? institutions : []).map((o) => [o.id, o]));
+  const nodes = (Array.isArray(people) ? people : []).filter((p) => p && p.id).map((p) => ({
+    id: p.id,
+    type: 'person',
+    label: p.name,
+    sublabel: p.role || '',
+    color: (TEMP_META[p.temperature] || TEMP_META.never).dot,
+    data: p,
+    isBrazilian: isBrazilianCountry(p.country),
+  }));
+
+  const edges = [];
+  (Array.isArray(connections) ? connections : []).forEach((c) => {
+    if (!c || !c.person_a_id || !c.person_b_id) return;
+    edges.push({
+      id: `conn-${c.id}`, from: c.person_a_id, to: c.person_b_id,
+      type: 'connection', label: c.connection_type || '',
+    });
+  });
+
+  const links = Array.isArray(contactOrgLinks) ? contactOrgLinks : [];
+  const byOrg = new Map();
+  links.forEach((l) => {
+    if (!l || !l.organization_id || !l.person_id) return;
+    if (!byOrg.has(l.organization_id)) byOrg.set(l.organization_id, []);
+    byOrg.get(l.organization_id).push(l.person_id);
+  });
+  byOrg.forEach((personIds, orgId) => {
+    const org = orgById.get(orgId);
+    for (let i = 0; i < personIds.length; i += 1) {
+      for (let j = i + 1; j < personIds.length; j += 1) {
+        edges.push({
+          id: `aff-${orgId}-${personIds[i]}-${personIds[j]}`,
+          from: personIds[i], to: personIds[j],
+          type: 'affiliation', label: org ? org.name : 'mesma organização',
+        });
+      }
+    }
+  });
+
+  return { nodes, edges };
+}
+
 // Rótulo de uma aresta: o tipo da conexão quando existe uma em
 // network_connections; senão, o nome da organização em comum (o vínculo de 1º
 // grau também nasce de contact_org_links).

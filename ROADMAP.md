@@ -13,6 +13,7 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.9.0 | 2026-09-14 | Integração de Dados Externos — Fase 0: schema (external_profiles, enrichment_queue, external_publications, external_projects, sector_weight_log), fila de enriquecimento processada via cron diário, cálculo de peso setorial combinado, endpoint de grafo genérico {nodes,edges} para Networking |
 | II.1.8.0 | 2026-09-11 | Pagamentos: lançamento manual ganha "Registrar para" (fix do bug em que a entrada sempre ia pra quem estava logado) + criação rápida de tarefa (um nome, um clique) já concluída e atribuída à pessoa certa |
 | II.1.7.2 | 2026-09-11 | Fix: login travado pra Alice/Milene (D1 free tier) — cache em memória de sessão/permissões corta as 3 queries de auth por request para 1 na maioria dos casos |
 | II.1.7.1 | 2026-09-10 | Fix: Chat para de fazer polling (10s) com a aba em segundo plano — mesma trava de visibilidade que a Reunião já tinha; mitigação sem custo pro limite diário do D1 free tier |
@@ -35,7 +36,10 @@
 
 ## Em desenvolvimento
 
-- (nenhum item aberto no momento — ver Backlog)
+- Integração de Dados Externos (ORCID/OpenAlex/ROR/CORDIS/EURAXESS) — Fase 0
+  entregue (II.1.9.0). Fases 1-5 seguem o mesmo padrão de versão (II.1.10.0,
+  II.1.11.0, II.1.12.0, II.1.13.x, II.1.14.0), cada uma só começa depois de
+  verificação do Lauro no navegador da fase anterior.
 
 ## Backlog
 

@@ -8,6 +8,16 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.9.0',
+    date: '2026-09-14',
+    title: 'Integração de Dados Externos — Fase 0 (fundações)',
+    items: [
+      'Schema novo: perfis externos, fila de enriquecimento, publicações/projetos externos, log de peso setorial — nenhum fetcher real ainda (ORCID/OpenAlex/ROR/CORDIS chegam nas próximas fases)',
+      'Peso setorial agora pode ser calculado automaticamente combinando avaliação manual + citações + financiamento + revista, quando esses dados existirem',
+      'Novo endpoint de grafo genérico (base para as visualizações das próximas fases) — Mapa de Rede atual continua 100% como estava, sem tocar',
+    ],
+  },
+  {
     version: 'II.1.8.0',
     date: '2026-09-11',
     title: 'Pagamentos: lançamento manual — "Registrar para" + tarefa rápida',

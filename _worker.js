@@ -128,6 +128,22 @@ async function handleAPI(request, env, ctx) {
   if (path.match(/^\/api\/network\/people\/[^/]+\/link-external$/)) {
     return handleLinkExternalProfile(request, env, user, path.split('/')[4]);
   }
+  // Fase 2 — ROR + CORDIS (II.1.11.0). Mesmo padrão de busca/vínculo da
+  // Fase 1, aplicado a organizações do Mercado.
+  if (path === '/api/search/external/ror') return handleSearchExternalRor(request, env, user);
+  if (path.match(/^\/api\/market\/organizations\/[^/]+\/link-external$/)) {
+    return handleLinkExternalOrg(request, env, user, path.split('/')[4]);
+  }
+  if (path.match(/^\/api\/market\/organizations\/[^/]+\/enrich-cordis$/)) {
+    return handleEnrichOrgCordis(request, env, user, path.split('/')[4]);
+  }
+  if (path.match(/^\/api\/market\/organizations\/[^/]+\/external-projects$/)) {
+    return handleOrgExternalProjects(request, env, user, path.split('/')[4]);
+  }
+  // Fase 3 — OpenAlex → Hub (II.1.12.0).
+  if (path.match(/^\/api\/network\/people\/[^/]+\/import-publications$/)) {
+    return handleImportPersonPublications(request, env, user, path.split('/')[4]);
+  }
 
   if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
   // Tarefas recorrentes — precisa vir ANTES da rota genérica /api/tasks/:id
@@ -433,6 +449,10 @@ async function handleAPI(request, env, ctx) {
   // /:id/archive antes do genérico /:id.
   if (path.match(/^\/api\/hub\/items\/[^/]+\/archive$/) && method === 'PATCH') {
     return handleHubItemArchive(request, env, user, path.split('/')[4]);
+  }
+  // Fase 5 — EURAXESS (II.1.14.0). Antes do genérico /:id.
+  if (path.match(/^\/api\/hub\/items\/[^/]+\/enrich-euraxess$/)) {
+    return handleEnrichHubItemEuraxess(request, env, user, path.split('/')[4]);
   }
   if (path.startsWith('/api/hub/items/')) return handleHubItemById(request, env, user, path.split('/')[4]);
   if (path === '/api/hub/stats') return handleHubStats(request, env, user);
@@ -7482,21 +7502,112 @@ async function handleGraphData(request, env, user) {
   if (!user) return json({ error: 'Não autenticado' }, 401);
   const url = new URL(request.url);
   const type = url.searchParams.get('type') || 'networking';
-  if (type !== 'networking') {
-    return json({ error: `Tipo de grafo '${type}' ainda não implementado` }, 400);
+
+  if (type === 'networking') {
+    const [people, institutions, connections, contactOrgLinks, personRoles] = await Promise.all([
+      env.DB.prepare('SELECT * FROM network_people').all(),
+      env.DB.prepare('SELECT * FROM market_organizations').all(),
+      env.DB.prepare('SELECT * FROM network_connections').all(),
+      env.DB.prepare('SELECT * FROM contact_org_links').all(),
+      env.DB.prepare('SELECT * FROM person_roles').all(),
+    ]);
+    return json(buildNetworkingGraphServer(
+      people.results || [], institutions.results || [], connections.results || [],
+      contactOrgLinks.results || [], personRoles.results || [],
+    ));
   }
-  const [people, institutions, connections, contactOrgLinks, personRoles] = await Promise.all([
-    env.DB.prepare('SELECT * FROM network_people').all(),
-    env.DB.prepare('SELECT * FROM market_organizations').all(),
-    env.DB.prepare('SELECT * FROM network_connections').all(),
-    env.DB.prepare('SELECT * FROM contact_org_links').all(),
-    env.DB.prepare('SELECT * FROM person_roles').all(),
-  ]);
-  const graph = buildNetworkingGraphServer(
-    people.results || [], institutions.results || [], connections.results || [],
-    contactOrgLinks.results || [], personRoles.results || [],
-  );
-  return json(graph);
+
+  // Fase 4 (II.1.13.x) — dois tipos de grafo novos, sobre o mesmo formato
+  // genérico {nodes, edges} validado na Fase 0. Ambos são consumidos pela
+  // Fase 4 do frontend (ExternalGraphPage.jsx) — o "segundo consumidor real"
+  // que a Fase 0 deixou como condição para eventualmente generalizar
+  // NetworkMapRede.jsx (ainda não feito nesta entrega — ver CHANGELOG).
+
+  if (type === 'collaboration') {
+    // Colaboração científica: pessoas com OpenAlex vinculado, ligadas quando
+    // co-autoram a mesma publicação (mesmo publication_id em
+    // publication_entity_links). Pares só, sem duplicar aresta A-B/B-A.
+    const [people, links] = await Promise.all([
+      env.DB.prepare(`SELECT * FROM network_people WHERE openalex_author_id != ''`).all(),
+      env.DB.prepare(
+        `SELECT pel.publication_id, pel.entity_id, ep.title AS pub_title
+         FROM publication_entity_links pel
+         JOIN external_publications ep ON ep.id = pel.publication_id
+         WHERE pel.entity_type = 'person'`,
+      ).all(),
+    ]);
+    const knownIds = new Set((people.results || []).map((p) => p.id));
+    const byPub = new Map();
+    (links.results || []).forEach((l) => {
+      if (!knownIds.has(l.entity_id)) return;
+      if (!byPub.has(l.publication_id)) byPub.set(l.publication_id, { title: l.pub_title, people: [] });
+      byPub.get(l.publication_id).people.push(l.entity_id);
+    });
+    const nodes = (people.results || []).map((p) => ({
+      id: p.id, type: 'person', label: p.name, sublabel: p.role || '', data: p,
+    }));
+    const edgeSet = new Map();
+    byPub.forEach(({ title }, pubId) => {
+      const entry = byPub.get(pubId);
+      const ppl = entry.people;
+      for (let i = 0; i < ppl.length; i += 1) {
+        for (let j = i + 1; j < ppl.length; j += 1) {
+          const key = [ppl[i], ppl[j]].sort().join('|');
+          if (!edgeSet.has(key)) {
+            edgeSet.set(key, {
+              id: `collab-${key}`, from: ppl[i], to: ppl[j], type: 'coauthorship', label: entry.title,
+            });
+          }
+        }
+      }
+    });
+    return json({ nodes, edges: Array.from(edgeSet.values()) });
+  }
+
+  if (type === 'cordis') {
+    // Rede de projetos EU: organizações ligadas quando compartilham um
+    // mesmo external_projects.id em project_org_links (busca best-effort da
+    // Fase 2 — ver aviso na UI).
+    const [orgs, links] = await Promise.all([
+      env.DB.prepare('SELECT * FROM market_organizations').all(),
+      env.DB.prepare(
+        `SELECT pol.project_id, pol.organization_id, ep.title AS proj_title, ep.acronym
+         FROM project_org_links pol
+         JOIN external_projects ep ON ep.id = pol.project_id`,
+      ).all(),
+    ]);
+    const orgById = new Map((orgs.results || []).map((o) => [o.id, o]));
+    const byProj = new Map();
+    (links.results || []).forEach((l) => {
+      if (!orgById.has(l.organization_id)) return;
+      if (!byProj.has(l.project_id)) byProj.set(l.project_id, { title: l.acronym || l.proj_title, orgs: [] });
+      byProj.get(l.project_id).orgs.push(l.organization_id);
+    });
+    const involvedOrgIds = new Set();
+    byProj.forEach(({ orgs: os }) => os.forEach((id) => involvedOrgIds.add(id)));
+    const nodes = Array.from(involvedOrgIds).map((id) => {
+      const o = orgById.get(id);
+      return { id, type: 'organization', label: o.name, sublabel: o.type || '', data: o };
+    });
+    const edgeSet = new Map();
+    byProj.forEach(({ title }, projId) => {
+      const entry = byProj.get(projId);
+      const os = entry.orgs;
+      for (let i = 0; i < os.length; i += 1) {
+        for (let j = i + 1; j < os.length; j += 1) {
+          const key = [os[i], os[j]].sort().join('|');
+          if (!edgeSet.has(key)) {
+            edgeSet.set(key, {
+              id: `cordis-${key}`, from: os[i], to: os[j], type: 'shared-project', label: entry.title,
+            });
+          }
+        }
+      }
+    });
+    return json({ nodes, edges: Array.from(edgeSet.values()) });
+  }
+
+  return json({ error: `Tipo de grafo '${type}' ainda não implementado` }, 400);
 }
 
 // Versão server-side (sem import ES module — _worker.js é um bundle único)
@@ -7756,6 +7867,299 @@ async function handleLinkExternalProfile(request, env, user, personId) {
     // (via enrichment_queue, se o usuário também enfileirar) ou o usuário
     // pode clicar "Atualizar" de novo depois.
     return json({ ok: true, linked: true, source, external_id: externalId, fetchError: (e && e.message) || String(e) }, 207);
+  }
+}
+
+// ── Integração de Dados Externos — Fase 2 (II.1.11.0): ROR + CORDIS ────────
+// Enriquecimento de ORGANIZAÇÕES (market_organizations). ROR segue o mesmo
+// padrão da Fase 1 (busca → usuário escolhe → vincula → enriquece na hora).
+// CORDIS não tem um "ID de organização" prático de resolver por nome com
+// confiança (a busca pública é por texto livre, não por entidade) — então,
+// em vez de vincular um ID, o botão "Buscar projetos CORDIS" faz uma busca
+// por nome e liga os projetos financiados pela UE que mencionam essa
+// organização como participante/coordenadora. É best-effort por natureza
+// (falso-positivo por nome parecido é possível) — documentado como tal.
+
+async function enrichOrgFromROR(orgId, env, force = false) {
+  const org = await env.DB.prepare('SELECT id, ror_id FROM market_organizations WHERE id = ?').bind(orgId).first();
+  if (!org || !org.ror_id) throw new Error('Organização sem ROR ID vinculado');
+  if (!force) {
+    const cached = await getFreshExternalProfile(env, 'organization', orgId, 'ror');
+    if (cached) return JSON.parse(cached.raw_json);
+  }
+  const rorId = org.ror_id;
+  const rorUrl = rorId.startsWith('http') ? rorId : `https://ror.org/${rorId}`;
+  const shortId = rorUrl.replace('https://ror.org/', '');
+  const record = await fetchJsonOrThrow(`https://api.ror.org/v2/organizations/${shortId}`);
+  const displayName = (record.names || []).find((n) => (n.types || []).includes('ror_display'))?.value
+    || (record.names || [])[0]?.value || '';
+  const wikidataId = (record.external_ids || []).find((e) => e.type === 'wikidata')?.preferred || '';
+  const location = record.locations?.[0]?.geonames_details || {};
+  const data = {
+    display_name: displayName,
+    types: record.types || [],
+    status: record.status || '',
+    established: record.established || null,
+    country: location.country_code || '',
+    city: location.name || '',
+    website: (record.links || []).find((l) => l.type === 'website')?.value || '',
+    wikidata_id: wikidataId,
+  };
+  await upsertExternalProfileGeneric(env, 'organization', orgId, 'ror', shortId, data);
+  // Wikidata ID só é preenchido automaticamente se ainda estava vazio — não
+  // sobrescreve um valor que o usuário já tenha editado manualmente.
+  if (wikidataId) {
+    await env.DB.prepare(
+      `UPDATE market_organizations SET wikidata_id = ? WHERE id = ? AND (wikidata_id IS NULL OR wikidata_id = '')`,
+    ).bind(wikidataId, orgId).run();
+  }
+  return data;
+}
+
+// Variante genérica de upsertExternalProfile (Fase 1 assumia entity_type
+// 'person' fixo) — reaproveitada aqui para organizações.
+async function upsertExternalProfileGeneric(env, entityType, entityId, source, externalId, rawJson) {
+  const existing = await env.DB.prepare(
+    'SELECT id FROM external_profiles WHERE entity_type = ? AND entity_id = ? AND source = ?',
+  ).bind(entityType, entityId, source).first();
+  const now = Math.floor(Date.now() / 1000);
+  if (existing) {
+    await env.DB.prepare(
+      'UPDATE external_profiles SET external_id = ?, raw_json = ?, fetched_at = ? WHERE id = ?',
+    ).bind(externalId, JSON.stringify(rawJson), now, existing.id).run();
+    return existing.id;
+  }
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO external_profiles (id, entity_type, entity_id, source, external_id, raw_json, fetched_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())`,
+  ).bind(id, entityType, entityId, source, externalId, JSON.stringify(rawJson), now).run();
+  return id;
+}
+
+async function handleSearchExternalRor(request, env, user) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  const url = new URL(request.url);
+  const q = (url.searchParams.get('q') || '').trim();
+  if (!q) return json([]);
+  try {
+    const data = await fetchJsonOrThrow(`https://api.ror.org/v2/organizations?query=${encodeURIComponent(q)}`);
+    const results = (data.items || []).slice(0, 10).map((r) => {
+      const displayName = (r.names || []).find((n) => (n.types || []).includes('ror_display'))?.value
+        || (r.names || [])[0]?.value || '';
+      const loc = r.locations?.[0]?.geonames_details || {};
+      return {
+        ror_id: (r.id || '').replace('https://ror.org/', ''),
+        display_name: displayName,
+        country: loc.country_name || '',
+        city: loc.name || '',
+        types: r.types || [],
+      };
+    });
+    return json(results);
+  } catch (e) {
+    return json({ error: 'Falha ao buscar no ROR', detail: (e && e.message) || String(e) }, 502);
+  }
+}
+
+async function handleLinkExternalOrg(request, env, user, orgId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!orgId) return json({ error: 'orgId obrigatório' }, 400);
+  const body = (await readJson(request)) || {};
+  const { source, external_id: externalId, force } = body;
+  if (source !== 'ror') return json({ error: "source deve ser 'ror'" }, 400);
+  await env.DB.prepare('UPDATE market_organizations SET ror_id = ? WHERE id = ?').bind(externalId || '', orgId).run();
+  if (!externalId) return json({ ok: true, unlinked: true });
+  try {
+    const result = await enrichOrgFromROR(orgId, env, !!force);
+    return json({ ok: true, linked: true, source, external_id: externalId, profile: result });
+  } catch (e) {
+    return json({ ok: true, linked: true, source, external_id: externalId, fetchError: (e && e.message) || String(e) }, 207);
+  }
+}
+
+// Busca CORDIS por nome — best-effort, sem etapa de "escolher candidato"
+// (a API pública de busca do CORDIS é texto-livre, não resolução de
+// entidade). Filtra contenttype='project', liga até 10 resultados mais
+// relevantes como possíveis projetos financiados envolvendo a organização.
+async function handleEnrichOrgCordis(request, env, user, orgId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!orgId) return json({ error: 'orgId obrigatório' }, 400);
+  const org = await env.DB.prepare('SELECT id, name FROM market_organizations WHERE id = ?').bind(orgId).first();
+  if (!org) return json({ error: 'Organização não encontrada' }, 404);
+  try {
+    const query = encodeURIComponent(`contenttype='project' AND '${org.name}'`);
+    const data = await fetchJsonOrThrow(`https://cordis.europa.eu/search?q=${query}&format=json`);
+    const hits = data?.hits?.hit || [];
+    let linked = 0;
+    for (const h of hits.slice(0, 10)) {
+      const p = h.project;
+      if (!p || !p.id) continue;
+      const existing = await env.DB.prepare(
+        `SELECT id FROM external_projects WHERE source = 'cordis' AND external_id = ?`,
+      ).bind(p.id).first();
+      const pubId = existing ? existing.id : crypto.randomUUID();
+      if (existing) {
+        await env.DB.prepare(
+          `UPDATE external_projects SET title=?, acronym=?, total_cost=?, eu_contribution=?, start_date=?, end_date=?, raw_json=?, fetched_at=unixepoch() WHERE id=?`,
+        ).bind(p.title || '', p.acronym || '', Number(p.totalCost) || null, Number(p.ecMaxContribution) || null, p.startDate || '', p.endDate || '', JSON.stringify(p), pubId).run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO external_projects (id, source, external_id, title, acronym, total_cost, eu_contribution, start_date, end_date, raw_json, fetched_at, created_at)
+           VALUES (?, 'cordis', ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch())`,
+        ).bind(pubId, p.id, p.title || '', p.acronym || '', Number(p.totalCost) || null, Number(p.ecMaxContribution) || null, p.startDate || '', p.endDate || '', JSON.stringify(p)).run();
+      }
+      const linkExists = await env.DB.prepare(
+        'SELECT id FROM project_org_links WHERE project_id = ? AND organization_id = ?',
+      ).bind(pubId, orgId).first();
+      if (!linkExists) {
+        await env.DB.prepare(
+          `INSERT INTO project_org_links (id, project_id, organization_id, role, created_at)
+           VALUES (?, ?, ?, 'participant (busca por nome — não confirmado)', unixepoch())`,
+        ).bind(crypto.randomUUID(), pubId, orgId).run();
+        linked += 1;
+      }
+    }
+    return json({ ok: true, found: hits.length, linked });
+  } catch (e) {
+    return json({ error: 'Falha ao buscar no CORDIS', detail: (e && e.message) || String(e) }, 502);
+  }
+}
+
+async function handleOrgExternalProjects(request, env, user, orgId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (!orgId) return json({ error: 'orgId obrigatório' }, 400);
+  const rows = await env.DB.prepare(
+    `SELECT ep.* FROM external_projects ep
+     JOIN project_org_links pol ON pol.project_id = ep.id
+     WHERE pol.organization_id = ?
+     ORDER BY ep.start_date DESC`,
+  ).bind(orgId).all();
+  return json(rows.results || []);
+}
+
+// ── Integração de Dados Externos — Fase 3 (II.1.12.0): OpenAlex → Hub ──────
+// Publicações já trazidas pela Fase 1 (external_publications, via
+// enrichPersonFromOpenAlex) viram itens navegáveis em Hub → Artigos
+// Científicos — mesma tabela hub_items que o Intelligence Hub já popula,
+// mesmo project_id ('artigos', ver ArtigosPage.jsx) — sem rota nova, sem UI
+// nova: os artigos importados aparecem lá, lado a lado com os coletados
+// pelo pipeline externo.
+const HUB_ARTICLES_PROJECT = 'artigos';
+
+async function importPersonPublicationsToHub(personId, env) {
+  const person = await env.DB.prepare('SELECT id, name FROM network_people WHERE id = ?').bind(personId).first();
+  if (!person) throw new Error('Pessoa não encontrada');
+  const pubs = await env.DB.prepare(
+    `SELECT ext.* FROM external_publications ext
+     JOIN publication_entity_links pel ON pel.publication_id = ext.id
+     WHERE pel.entity_type = 'person' AND pel.entity_id = ? AND ext.source = 'openalex'`,
+  ).bind(personId).all();
+
+  let imported = 0;
+  let skipped = 0;
+  for (const p of (pubs.results || [])) {
+    if (!p.external_id || !p.title) { skipped += 1; continue; }
+    let raw = {};
+    try { raw = JSON.parse(p.raw_json || '{}'); } catch { raw = {}; }
+    const externalId = String(p.external_id).replace('https://openalex.org/', '');
+    const doi = p.doi || '';
+    const oaBestLocation = raw.primary_location || {};
+    const isOa = !!(raw.open_access && raw.open_access.is_oa);
+    try {
+      const res = await env.DB.prepare(
+        `INSERT INTO hub_items
+          (external_id, project_id, title, url, source_name, published_at,
+           tipo, resumo, collected_at, short_id,
+           doi, journal_name, publication_year, access_type, article_type)
+         VALUES (?, ?, ?, ?, ?, ?, 'artigo', ?, unixepoch(), LOWER(HEX(RANDOMBLOB(3))), ?, ?, ?, ?, 'journal-article')
+         ON CONFLICT(external_id, project_id) DO NOTHING`,
+      ).bind(
+        `openalex-${externalId}`, HUB_ARTICLES_PROJECT, p.title,
+        doi ? `https://doi.org/${doi}` : (oaBestLocation.landing_page_url || ''),
+        `OpenAlex (via ${person.name})`, p.publication_year ? `${p.publication_year}-01-01` : null,
+        `Importado via vínculo OpenAlex de ${person.name}. ${p.cited_by_count || 0} citações.`,
+        doi, p.journal_name || '', p.publication_year || null, isOa ? 'open' : 'closed',
+      ).run();
+      if (res.meta && res.meta.changes > 0) imported += 1; else skipped += 1;
+    } catch {
+      skipped += 1;
+    }
+  }
+  return { total: (pubs.results || []).length, imported, skipped };
+}
+
+async function handleImportPersonPublications(request, env, user, personId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (!isHubReader(user)) return json({ error: 'Sem permissão para o Hub' }, 403);
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!personId) return json({ error: 'personId obrigatório' }, 400);
+  try {
+    const result = await importPersonPublicationsToHub(personId, env);
+    return json({ ok: true, ...result });
+  } catch (e) {
+    return json({ error: 'Falha ao importar publicações', detail: (e && e.message) || String(e) }, 500);
+  }
+}
+
+// ── Integração de Dados Externos — Fase 5 (II.1.14.0): EURAXESS ───────────
+// Ao contrário de ORCID/OpenAlex/ROR/CORDIS (Fases 1/2), o EURAXESS bloqueia
+// tráfego automatizado (bot-detection, respostas 403/429 confirmadas durante
+// o desenvolvimento desta fase — ver CHANGELOG para o desvio completo). Por
+// isso o enriquecimento automático é só best-effort: tenta uma vez, e se
+// falhar (o caso mais comum na prática), grava o motivo em
+// `euraxess_sync_note` e o campo fica disponível para preenchimento manual
+// no modal de detalhe da vaga (PATCH /api/hub/items/:id, campos já
+// aceitos desde a extensão feita nesta fase).
+async function enrichHubItemFromEuraxess(itemId, env) {
+  const item = await env.DB.prepare('SELECT id, url, euraxess_url FROM hub_items WHERE id = ?').bind(itemId).first();
+  if (!item) throw new Error('Item do Hub não encontrado');
+  const targetUrl = item.euraxess_url || item.url;
+  if (!targetUrl || !targetUrl.includes('euraxess')) {
+    throw new Error('Item sem URL do EURAXESS — preencha euraxess_url manualmente primeiro');
+  }
+  try {
+    const res = await fetch(targetUrl, { headers: { Accept: 'text/html', 'User-Agent': 'Mozilla/5.0 (compatible; AIDE/1.0)' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const html = await res.text();
+    // EURAXESS embute os dados da vaga como JSON-LD (schema.org JobPosting)
+    // na página — extrai isso em vez de fazer parsing frágil de HTML solto.
+    const match = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+    if (!match) throw new Error('JSON-LD não encontrado na página (layout pode ter mudado)');
+    const data = JSON.parse(match[1]);
+    const hostInstitution = data.hiringOrganization?.name || '';
+    const deadline = data.validThrough || '';
+    await env.DB.prepare(
+      `UPDATE hub_items SET
+         host_institution = COALESCE(NULLIF(?, ''), host_institution),
+         application_deadline = COALESCE(NULLIF(?, ''), application_deadline),
+         euraxess_sync_note = 'sincronizado automaticamente em ' || datetime('now')
+       WHERE id = ?`,
+    ).bind(hostInstitution, deadline, itemId).run();
+    return { ok: true, host_institution: hostInstitution, application_deadline: deadline };
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    await env.DB.prepare(
+      `UPDATE hub_items SET euraxess_sync_note = ? WHERE id = ?`,
+    ).bind(`falha em ${new Date().toISOString()}: ${msg} — preencha manualmente`, itemId).run();
+    throw new Error(msg);
+  }
+}
+
+async function handleEnrichHubItemEuraxess(request, env, user, itemId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (!isHubReader(user)) return json({ error: 'Sem permissão para o Hub' }, 403);
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!itemId) return json({ error: 'itemId obrigatório' }, 400);
+  try {
+    const result = await enrichHubItemFromEuraxess(itemId, env);
+    return json(result);
+  } catch (e) {
+    // Falha é o caminho esperado na prática (bot-detection do EURAXESS) —
+    // 207 em vez de 500: o frontend mostra a nota e o campo continua editável.
+    return json({ ok: false, error: (e && e.message) || String(e) }, 207);
   }
 }
 
@@ -13845,6 +14249,31 @@ async function handleHubItemPatch(request, env, user, id) {
       body.resumo_override ?? null,
       id
     ).run();
+    // Campos EURAXESS (Fase 5 — II.1.14.0, migration 0063) — preenchimento
+    // manual, já que a coleta automática do EURAXESS não é confiável (ver
+    // enrichHubItemFromEuraxess). Coluna à parte, tolerante a bancos onde a
+    // migração ainda não rodou.
+    if (
+      body.host_institution !== undefined || body.application_deadline !== undefined
+      || body.funding_programme !== undefined || body.contract_type !== undefined
+      || body.euraxess_url !== undefined
+    ) {
+      try {
+        await env.DB.prepare(
+          `UPDATE hub_items SET
+             host_institution = COALESCE(?, host_institution),
+             application_deadline = COALESCE(?, application_deadline),
+             funding_programme = COALESCE(?, funding_programme),
+             contract_type = COALESCE(?, contract_type),
+             euraxess_url = COALESCE(?, euraxess_url)
+           WHERE id = ?`
+        ).bind(
+          body.host_institution ?? null, body.application_deadline ?? null,
+          body.funding_programme ?? null, body.contract_type ?? null,
+          body.euraxess_url ?? null, id,
+        ).run();
+      } catch { /* migração 0063 não aplicada ainda */ }
+    }
   } catch (e) {
     return json({ error: 'Falha ao editar item', detail: String(e) }, 500);
   }

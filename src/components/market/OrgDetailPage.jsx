@@ -195,7 +195,7 @@ export default function OrgDetailPage() {
 
       {/* Conteúdo */}
       <div className="min-h-0 flex-1 overflow-y-auto pb-6">
-        {tab === 'overview' && <OverviewTab org={org} onPatch={patchOrg} isOwner={user?.role === 'owner'} />}
+        {tab === 'overview' && <OverviewTab org={org} onPatch={patchOrg} isOwner={user?.role === 'owner'} onReload={loadFull} />}
         {tab === 'contacts' && <ContactsTab org={org} onReload={loadFull} navigate={navigate} />}
         {tab === 'projects' && <ProjectsTab org={org} onReload={loadFull} />}
         {tab === 'notes' && <NotesTab orgId={id} />}
@@ -268,7 +268,176 @@ function Header({ org, onEdit }) {
 // ---------------------------------------------------------------------------
 // Aba: Visão Geral
 // ---------------------------------------------------------------------------
-function OverviewTab({ org, onPatch, isOwner }) {
+// Integração de Dados Externos — Fase 2 (II.1.11.0): ROR (vínculo manual,
+// mesmo padrão buscar→escolher→vincular da Fase 1) + CORDIS (busca por nome,
+// best-effort — sem etapa de escolha, a API do CORDIS é texto-livre).
+function OrgExternalDataSection({ org, onReload }) {
+  const [query, setQuery] = useState(org.name || '');
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState(null);
+  const [linking, setLinking] = useState(false);
+  const [rorProfile, setRorProfile] = useState(null);
+  const [cordisProjects, setCordisProjects] = useState([]);
+  const [cordisSearching, setCordisSearching] = useState(false);
+  const [cordisMsg, setCordisMsg] = useState('');
+
+  const loadRorProfile = () => {
+    apiFetch(`/api/external/profiles/${org.id}`)
+      .then((rows) => {
+        const row = (Array.isArray(rows) ? rows : []).find((r) => r.source === 'ror');
+        setRorProfile(row ? JSON.parse(row.raw_json || '{}') : null);
+      })
+      .catch(() => setRorProfile(null));
+  };
+  const loadCordisProjects = () => {
+    apiFetch(`/api/market/organizations/${org.id}/external-projects`)
+      .then((rows) => setCordisProjects(Array.isArray(rows) ? rows : []))
+      .catch(() => setCordisProjects([]));
+  };
+  useEffect(() => {
+    if (org.ror_id) loadRorProfile(); else setRorProfile(null);
+    loadCordisProjects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [org.id, org.ror_id]);
+
+  const search = async () => {
+    if (!query.trim()) return;
+    setSearching(true);
+    setResults(null);
+    try {
+      const r = await apiFetch(`/api/search/external/ror?q=${encodeURIComponent(query.trim())}`);
+      setResults(Array.isArray(r) ? r : []);
+    } catch {
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const link = async (externalId, force = false) => {
+    setLinking(true);
+    try {
+      await apiFetch(`/api/market/organizations/${org.id}/link-external`, {
+        method: 'POST',
+        body: JSON.stringify({ source: 'ror', external_id: externalId, force }),
+      });
+      setResults(null);
+      onReload && onReload();
+      loadRorProfile();
+    } finally {
+      setLinking(false);
+    }
+  };
+  const unlink = () => link('');
+
+  const searchCordis = async () => {
+    setCordisSearching(true);
+    setCordisMsg('');
+    try {
+      const r = await apiFetch(`/api/market/organizations/${org.id}/enrich-cordis`, { method: 'POST' });
+      setCordisMsg(`${r.found || 0} projeto(s) encontrado(s) no CORDIS, ${r.linked || 0} novo(s) vinculado(s).`);
+      loadCordisProjects();
+    } catch (e) {
+      setCordisMsg(`Falha na busca: ${e?.message || e}`);
+    } finally {
+      setCordisSearching(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4">
+      <span className="text-xs font-semibold uppercase tracking-wide text-muted">Dados externos</span>
+
+      {/* ROR */}
+      <div className="mt-2 rounded-lg border border-line bg-surface2 p-2.5">
+        <div className="mb-1.5 flex items-center justify-between">
+          <p className="text-[11px] font-semibold uppercase text-muted">ROR</p>
+          {org.ror_id && (
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => link(org.ror_id, true)} disabled={linking} className="text-[10px] text-accent hover:underline disabled:opacity-50">
+                {linking ? 'Atualizando…' : 'Atualizar'}
+              </button>
+              <button type="button" onClick={unlink} disabled={linking} className="text-[10px] text-red-600 hover:underline disabled:opacity-50">
+                Desvincular
+              </button>
+            </div>
+          )}
+        </div>
+        {!org.ror_id ? (
+          <div>
+            <div className="flex gap-1.5">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && search()}
+                placeholder="Nome para buscar..."
+                className="input flex-1 text-xs"
+              />
+              <button type="button" onClick={search} disabled={searching} className="rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink2 hover:bg-surface disabled:opacity-50">
+                {searching ? '...' : 'Buscar'}
+              </button>
+            </div>
+            {results && results.length === 0 && <p className="mt-1.5 text-[11px] text-muted">Nenhum resultado.</p>}
+            {results && results.length > 0 && (
+              <div className="mt-1.5 max-h-40 space-y-1 overflow-y-auto">
+                {results.map((r) => (
+                  <button
+                    key={r.ror_id}
+                    type="button"
+                    onClick={() => link(r.ror_id)}
+                    disabled={linking}
+                    className="block w-full rounded-md border border-line bg-surface px-2 py-1 text-left text-[11px] hover:bg-white disabled:opacity-50"
+                  >
+                    <span className="block font-medium text-ink">{r.display_name}</span>
+                    <span className="block text-[10px] text-muted">{[r.city, r.country].filter(Boolean).join(', ')}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-[11px] text-ink2">
+            <p className="font-mono text-[10px] text-muted">{org.ror_id}</p>
+            {rorProfile ? (
+              <p className="mt-1">
+                {rorProfile.display_name} · {[rorProfile.city, rorProfile.country].filter(Boolean).join(', ')}
+                {rorProfile.wikidata_id && <span className="ml-1 text-muted">· wikidata {rorProfile.wikidata_id}</span>}
+              </p>
+            ) : (
+              <p className="mt-1 text-muted">Perfil ainda não sincronizado — clique em "Atualizar".</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* CORDIS */}
+      <div className="mt-2 rounded-lg border border-line bg-surface2 p-2.5">
+        <div className="mb-1.5 flex items-center justify-between">
+          <p className="text-[11px] font-semibold uppercase text-muted">Projetos CORDIS (UE)</p>
+          <button type="button" onClick={searchCordis} disabled={cordisSearching} className="text-[10px] text-accent hover:underline disabled:opacity-50">
+            {cordisSearching ? 'Buscando…' : 'Buscar por nome'}
+          </button>
+        </div>
+        <p className="text-[10px] text-muted">Busca por texto livre (nome da organização) — resultados são best-effort, confira antes de usar.</p>
+        {cordisMsg && <p className="mt-1 text-[11px] text-ink2">{cordisMsg}</p>}
+        {cordisProjects.length > 0 && (
+          <div className="mt-1.5 max-h-48 space-y-1 overflow-y-auto">
+            {cordisProjects.map((p) => (
+              <div key={p.id} className="rounded-md border border-line bg-surface px-2 py-1 text-[11px]">
+                <span className="block font-medium text-ink">{p.acronym || p.title}</span>
+                <span className="block text-[10px] text-muted">
+                  {p.start_date}–{p.end_date} · €{p.eu_contribution ? Number(p.eu_contribution).toLocaleString('pt-BR') : '—'} (contrib. UE)
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OverviewTab({ org, onPatch, isOwner, onReload }) {
   const [description, setDescription] = useState(org.description || '');
   const [relNotes, setRelNotes] = useState(org.relevance_notes || '');
   const [city, setCity] = useState(org.city || '');
@@ -360,6 +529,8 @@ function OverviewTab({ org, onPatch, isOwner }) {
             <SliderRow label="🚀 Spin-off" value={org.relevance_for_spinoff} onChange={(n) => onPatch({ relevance_for_spinoff: n })} />
           </div>
         </div>
+
+        <OrgExternalDataSection org={org} onReload={onReload} />
 
         <div className="rounded-xl border border-line bg-surface p-4">
           <label className="text-xs font-semibold uppercase tracking-wide text-muted">Status</label>

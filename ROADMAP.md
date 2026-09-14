@@ -13,6 +13,10 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.14.0 | 2026-09-14 | Integração de Dados Externos — Fase 5: EURAXESS (campos manuais em Vagas PhD/Empregos + sincronização automática best-effort, já que o EURAXESS bloqueia tráfego automatizado) |
+| II.1.13.0 | 2026-09-14 | Integração de Dados Externos — Fase 4: visualizações de grafo genéricas (colaboração científica via OpenAlex, rede de organizações via CORDIS), nova página /networking/graph |
+| II.1.12.0 | 2026-09-14 | Integração de Dados Externos — Fase 3: importar publicações OpenAlex de uma pessoa para o Hub → Artigos Científicos, com um clique |
+| II.1.11.0 | 2026-09-14 | Integração de Dados Externos — Fase 2: vínculo e enriquecimento de organizações (Mercado) via ROR, busca best-effort de projetos CORDIS por nome |
 | II.1.10.0 | 2026-09-14 | Integração de Dados Externos — Fase 1: vínculo manual ORCID/OpenAlex por pessoa (buscar → escolher candidato → vincular), enriquecimento síncrono (h-index, citações, trabalhos, vínculos institucionais), publicações OpenAlex salvas para reaproveitar no peso setorial |
 | II.1.9.0 | 2026-09-14 | Integração de Dados Externos — Fase 0: schema (external_profiles, enrichment_queue, external_publications, external_projects, sector_weight_log), fila de enriquecimento processada via cron diário, cálculo de peso setorial combinado, endpoint de grafo genérico {nodes,edges} para Networking |
 | II.1.8.0 | 2026-09-11 | Pagamentos: lançamento manual ganha "Registrar para" (fix do bug em que a entrada sempre ia pra quem estava logado) + criação rápida de tarefa (um nome, um clique) já concluída e atribuída à pessoa certa |
@@ -37,10 +41,13 @@
 
 ## Em desenvolvimento
 
-- Integração de Dados Externos (ORCID/OpenAlex/ROR/CORDIS/EURAXESS) — Fases 0
-  e 1 entregues (II.1.9.0, II.1.10.0). Fases 2-5 seguem o mesmo padrão de
-  versão (II.1.11.0, II.1.12.0, II.1.13.x, II.1.14.0), cada uma só começa
-  depois de verificação do Lauro no navegador da fase anterior.
+- Integração de Dados Externos (ORCID/OpenAlex/ROR/CORDIS/EURAXESS) — todas as
+  6 fases entregues (II.1.9.0 a II.1.14.0): schema/grafo genérico (Fase 0),
+  ORCID/OpenAlex por pessoa (Fase 1), ROR/CORDIS por organização (Fase 2),
+  publicações OpenAlex → Hub (Fase 3), visualizações de grafo em
+  /networking/graph (Fase 4), campos manuais + sync best-effort EURAXESS
+  (Fase 5). Ver CHANGELOG.md para detalhes e desvios de cada fase, e o
+  documento de testes entregue ao Lauro para o roteiro de verificação.
 
 ## Backlog
 

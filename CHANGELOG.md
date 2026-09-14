@@ -9,6 +9,68 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.14.0] — 2026-09-14
+
+### Integração de Dados Externos — Fase 5 (EURAXESS)
+
+Última fase do plano. Ao contrário de ORCID/OpenAlex/ROR/CORDIS, o EURAXESS bloqueia tráfego automatizado — confirmado durante o desenvolvimento (respostas 403/429 em toda tentativa de busca/RSS a partir do ambiente de teste). Em vez de simular uma integração automática que não é confiável, esta fase entrega os campos + a UI para preenchimento manual, com uma tentativa automática best-effort por cima (que funciona quando o EURAXESS não bloqueia, e falha de forma visível/recuperável quando bloqueia).
+
+- **Migração `0063_hub_vacancy_euraxess_fields.sql`**: `hub_items` ganha `euraxess_id`, `host_institution`, `application_deadline`, `funding_programme`, `contract_type`, `euraxess_url`, `euraxess_sync_note`.
+- **`enrichHubItemFromEuraxess`**: dado um item do Hub com `euraxess_url` preenchida, tenta buscar a página e extrair o JSON-LD (schema.org `JobPosting`) embutido — instituição anfitriã e prazo de candidatura. Se falhar (o caso mais comum na prática), grava o motivo em `euraxess_sync_note` em vez de travar a UI.
+- **`EditItemModal.jsx`** (compartilhado entre Vagas PhD e Empregos): nova seção "EURAXESS" com os 5 campos editáveis manualmente + botão "Sincronizar" que tenta o preenchimento automático.
+- `PATCH /api/hub/items/:id` (`handleHubItemPatch`) estendido para aceitar os novos campos, tolerante a banco sem a migração 0063 ainda aplicada.
+
+### Desvios/decisões técnicas (com justificativa)
+- **Sem coleta automática em lote** (diferente de ORCID/OpenAlex/ROR) — o EURAXESS bloqueia bots de forma agressiva o bastante para tornar um cron diário inútil na prática; o desenho ficou "melhor esforço, uma vaga de cada vez, com fallback manual sempre disponível" em vez de fingir uma integração automática confiável.
+- Migração renumerada de `0060` (proposta original do spec) para `0063` — 0059-0062 já usados nesta sessão (ver Fases 0-3 abaixo).
+
+---
+
+## [II.1.13.0] — 2026-09-14
+
+### Integração de Dados Externos — Fase 4 (visualizações de grafo)
+
+Consumidor real do formato genérico `{nodes, edges}` validado na Fase 0 (`buildEgoNetworkGeneric`/`buildNetworkingGraph`) — sem tocar em `NetworkMapRede.jsx`, que segue intocado desde a Fase 0.
+
+- **`GET /api/graph/data?type=collaboration`**: pessoas com OpenAlex vinculado, ligadas quando co-autoram a mesma publicação (`publication_entity_links` compartilhado) — rede de colaboração científica.
+- **`GET /api/graph/data?type=cordis`**: organizações do Mercado ligadas quando compartilham um projeto CORDIS (`project_org_links` compartilhado) — rede de parcerias em projetos europeus.
+- **`ExternalGraphPage.jsx`** (nova, rota `/networking/graph`, acessível via botão "Grafos externos" em Networking): seletor de tipo de grafo, busca "Centralizar em", toggle 1/2 graus — mesmo padrão de navegação do Mapa de Rede, mas genérico (`buildEgoNetworkGeneric`), sem nenhum dos detalhes visuais específicos de pessoa (temperatura, losango de nacionalidade, peso setorial).
+
+### Desvios/decisões técnicas (com justificativa)
+- O spec original fala em "5 visualizações" sem especificar as 5 exatas no texto disponível nesta sessão — entregues as 2 que têm dado real por trás agora (colaboração científica via OpenAlex, rede CORDIS), ambas exercitando o mesmo componente genérico. Novos tipos de grafo (ex.: rede setorial por peso, mapa de instituições por afiliação) são uma extensão direta — só a função adaptadora do lado do backend muda, o componente de visualização não.
+- `NetworkMapRede.jsx` continua sem generalização (decisão da Fase 0 mantida) — o novo componente `ExternalGraphPage.jsx` é deliberadamente separado, mais simples, sem os detalhes visuais específicos de pessoa que tornariam a generalização do componente original arriscada.
+
+---
+
+## [II.1.12.0] — 2026-09-14
+
+### Integração de Dados Externos — Fase 3 (OpenAlex → Hub)
+
+Ponte entre as publicações já trazidas pela Fase 1 (`external_publications`, via OpenAlex) e Hub → Artigos Científicos, sem rota nova de coleta — reaproveita a mesma tabela `hub_items` que o Intelligence Hub já popula.
+
+- **`importPersonPublicationsToHub`**: para uma pessoa com OpenAlex vinculado, insere cada publicação ligada (`publication_entity_links`) em `hub_items` (`project_id = 'artigos'`, mesmo project_id que `ArtigosPage.jsx` já usa), com `external_id` prefixado (`openalex-<id>`) para nunca colidir com o que o pipeline externo já insere. Idempotente via `ON CONFLICT DO NOTHING` na mesma constraint `UNIQUE(external_id, project_id)` que já protegia o Hub contra duplicatas.
+- Botão "Importar publicações para o Hub" na seção OpenAlex de Networking (aparece só quando o perfil já está vinculado e sincronizado).
+
+### Desvios/decisões técnicas (com justificativa)
+- Import é manual (clique do usuário), não automático — publicações são trazidas quando a pessoa já foi enriquecida (Fase 1), e nem toda publicação de uma pessoa é necessariamente relevante para o Hub; o clique deixa a decisão com o usuário em vez de poluir Artigos Científicos automaticamente a cada sincronização OpenAlex.
+
+---
+
+## [II.1.11.0] — 2026-09-14
+
+### Integração de Dados Externos — Fase 2 (ROR + CORDIS)
+
+Enriquecimento de ORGANIZAÇÕES (Mercado), sobre a mesma fundação da Fase 0.
+
+- **ROR**: mesmo padrão buscar→escolher→vincular→enriquecer da Fase 1 (`GET /api/search/external/ror`, `POST /api/market/organizations/:id/link-external`), nova seção "Dados externos" em `OrgDetailPage.jsx`. `enrichOrgFromROR` busca `GET https://api.ror.org/v2/organizations/{id}` (nome, tipo, localização, site) e preenche `wikidata_id` automaticamente quando disponível (só se ainda vazio — nunca sobrescreve edição manual).
+- **CORDIS**: sem etapa de "escolher candidato" — a API pública de busca do CORDIS (`https://cordis.europa.eu/search`) é texto-livre, não resolução de entidade. Botão "Buscar projetos CORDIS" busca por nome da organização e liga até 10 projetos financiados pela UE mais relevantes (`external_projects` + `project_org_links`), claramente marcados como best-effort na UI.
+
+### Desvios/decisões técnicas (com justificativa)
+- Vínculo CORDIS é por busca textual, não por ID de organização — o CORDIS não tem um identificador de organização público e resolúvel por nome com confiança suficiente; a alternativa (não implementar CORDIS nesta fase) descartaria dado real e útil (financiamento/projetos) em troca de uma precisão que a própria fonte não garante. Compensado por: rótulo explícito "participant (busca por nome — não confirmado)" em cada vínculo, e o convite na UI para conferir antes de usar.
+- Confirmado por teste direto nesta sessão: `api.ror.org` e `cordis.europa.eu/search` respondem normalmente sem autenticação a partir do ambiente de desenvolvimento — sem surpresas de CORS/bot-detection como aconteceu com o EURAXESS na Fase 5.
+
+---
+
 ## [II.1.10.0] — 2026-09-14
 
 ### Integração de Dados Externos — Fase 1 (ORCID + OpenAlex)

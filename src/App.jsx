@@ -21,6 +21,7 @@ import PaymentPage from './components/payment/PaymentPage';
 import DashboardPage from './components/dashboard/DashboardPage';
 import MeetingPage from './components/meeting/MeetingPage';
 import NetworkingPage from './components/networking/NetworkingPage';
+import ExternalGraphPage from './components/networking/ExternalGraphPage';
 import ChatPage from './components/chat/ChatPage';
 import ImportPage from './components/import/ImportPage';
 import MarketPage from './components/market/MarketPage';
@@ -253,6 +254,12 @@ export default function App() {
           <Route
             path="/networking"
             element={<ProtectedRoute feature="networking"><NetworkingPage /></ProtectedRoute>}
+          />
+          {/* Fase 4 (II.1.13.0) — grafos genéricos (colaboração científica,
+              projetos CORDIS). Mesmo feature gate do Networking. */}
+          <Route
+            path="/networking/graph"
+            element={<ProtectedRoute feature="networking"><ExternalGraphPage /></ProtectedRoute>}
           />
           <Route
             path="/payment"

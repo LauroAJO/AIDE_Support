@@ -34,6 +34,46 @@ const AREA_OPTIONS = [
   { value: 'outro', label: 'Outro' },
 ];
 
+// Fase 5 (II.1.14.0) — tenta sincronizar automaticamente a partir da URL
+// EURAXESS salva no item. Best-effort: o EURAXESS bloqueia a maior parte do
+// tráfego automatizado (bot-detection, 403/429 confirmados durante o
+// desenvolvimento) — quando falha, o backend grava o motivo em
+// euraxess_sync_note e os campos continuam editáveis manualmente.
+function EuraxessSyncButton({ itemId, onSynced }) {
+  const [syncing, setSyncing] = useState(false);
+  const [msg, setMsg] = useState('');
+  const run = async () => {
+    setSyncing(true);
+    setMsg('');
+    try {
+      const r = await apiFetch(`/api/hub/items/${itemId}/enrich-euraxess`, { method: 'POST' });
+      if (r.ok) {
+        setMsg('Sincronizado.');
+        onSynced && onSynced(r);
+      } else {
+        setMsg(r.error || 'Falha ao sincronizar — preencha manualmente.');
+      }
+    } catch (e) {
+      setMsg(String(e.message || e));
+    } finally {
+      setSyncing(false);
+    }
+  };
+  return (
+    <div className="flex items-center gap-2">
+      {msg && <span className="text-[10px] text-muted">{msg}</span>}
+      <button
+        type="button"
+        onClick={run}
+        disabled={syncing}
+        className="text-[11px] font-medium text-accent hover:underline disabled:opacity-50"
+      >
+        {syncing ? 'Sincronizando…' : 'Sincronizar'}
+      </button>
+    </div>
+  );
+}
+
 // Modal de edição reutilizável (Vagas PhD / Empregos). `item` traz o item do
 // hub_items a editar; `onClose` cancela; `onSaved(updatedItem)` é chamado com
 // o item já atualizado pelo backend após um PATCH bem-sucedido — a página que
@@ -54,18 +94,33 @@ export default function EditItemModal({ item, onClose, onSaved }) {
     title: item?.title_override || item?.title || '',
     resumo: item?.resumo_override || item?.resumo || '',
     notes: item?.user_notes || '',
+    // Fase 5 (II.1.14.0) — campos EURAXESS, preenchimento manual (a coleta
+    // automática é best-effort, ver enrichHubItemFromEuraxess no worker).
+    hostInstitution: item?.host_institution || '',
+    applicationDeadline: item?.application_deadline || '',
+    fundingProgramme: item?.funding_programme || '',
+    contractType: item?.contract_type || '',
+    euraxessUrl: item?.euraxess_url || '',
   }), [item]);
   const {
     value: form, setValue: setForm, clearDraft, discardDraft, hasDraft,
   } = useDraft(`hub-item-${item?.id || 'new'}`, pristine);
 
-  const { country, area, title, resumo, notes } = form;
+  const {
+    country, area, title, resumo, notes,
+    hostInstitution, applicationDeadline, fundingProgramme, contractType, euraxessUrl,
+  } = form;
   const setField = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
   const setCountry = setField('country');
   const setArea = setField('area');
   const setTitle = setField('title');
   const setResumo = setField('resumo');
   const setNotes = setField('notes');
+  const setHostInstitution = setField('hostInstitution');
+  const setApplicationDeadline = setField('applicationDeadline');
+  const setFundingProgramme = setField('fundingProgramme');
+  const setContractType = setField('contractType');
+  const setEuraxessUrl = setField('euraxessUrl');
 
   const isDirty = JSON.stringify(form) !== JSON.stringify(pristine);
   const guard = useUnsavedGuard({
@@ -84,6 +139,11 @@ export default function EditItemModal({ item, onClose, onSaved }) {
         user_notes: notes || null,
         title_override: title || null,
         resumo_override: resumo || null,
+        host_institution: hostInstitution || null,
+        application_deadline: applicationDeadline || null,
+        funding_programme: fundingProgramme || null,
+        contract_type: contractType || null,
+        euraxess_url: euraxessUrl || null,
       };
       const updated = await apiFetch(`/api/hub/items/${item.id}`, {
         method: 'PATCH',
@@ -175,6 +235,79 @@ export default function EditItemModal({ item, onClose, onSaved }) {
               className="resize-none rounded-lg border border-line bg-surface2 px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-accent focus:outline-none"
             />
           </label>
+
+          {/* Fase 5 (II.1.14.0) — campos EURAXESS. Preenchimento manual;
+              "Sincronizar" tenta preencher automaticamente a partir da URL
+              (best-effort — o EURAXESS bloqueia a maior parte das tentativas
+              automatizadas, ver nota abaixo quando falha). */}
+          <div className="rounded-lg border border-line bg-surface2/60 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted">EURAXESS</span>
+              {item.id && (
+                <EuraxessSyncButton
+                  itemId={item.id}
+                  onSynced={(patch) => setForm((f) => ({
+                    ...f,
+                    hostInstitution: patch.host_institution || f.hostInstitution,
+                    applicationDeadline: patch.application_deadline || f.applicationDeadline,
+                  }))}
+                />
+              )}
+            </div>
+            <label className="flex flex-col gap-1 text-xs font-medium text-ink2">
+              URL da vaga no EURAXESS
+              <input
+                type="text"
+                value={euraxessUrl}
+                onChange={(e) => setEuraxessUrl(e.target.value)}
+                placeholder="https://euraxess.ec.europa.eu/jobs/..."
+                className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+              />
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <label className="flex flex-col gap-1 text-xs font-medium text-ink2">
+                Instituição anfitriã
+                <input
+                  type="text"
+                  value={hostInstitution}
+                  onChange={(e) => setHostInstitution(e.target.value)}
+                  className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium text-ink2">
+                Prazo de candidatura
+                <input
+                  type="text"
+                  value={applicationDeadline}
+                  onChange={(e) => setApplicationDeadline(e.target.value)}
+                  placeholder="AAAA-MM-DD"
+                  className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium text-ink2">
+                Programa de financiamento
+                <input
+                  type="text"
+                  value={fundingProgramme}
+                  onChange={(e) => setFundingProgramme(e.target.value)}
+                  placeholder="Ex: Horizon Europe, Marie Curie..."
+                  className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium text-ink2">
+                Tipo de contrato
+                <input
+                  type="text"
+                  value={contractType}
+                  onChange={(e) => setContractType(e.target.value)}
+                  className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+                />
+              </label>
+            </div>
+            {item.euraxess_sync_note && (
+              <p className="mt-2 text-[11px] text-muted">{item.euraxess_sync_note}</p>
+            )}
+          </div>
 
           {error && <p className="text-sm text-danger">{error}</p>}
         </div>

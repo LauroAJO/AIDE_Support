@@ -8,6 +8,41 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.14.0',
+    date: '2026-09-14',
+    title: 'Integração de Dados Externos — Fase 5 (EURAXESS)',
+    items: [
+      'EURAXESS bloqueia buscas automatizadas (confirmado nesta sessão — 403/429 em toda tentativa) — em vez de fingir uma integração automática, Vagas PhD/Empregos ganham 5 campos EURAXESS editáveis à mão (instituição, prazo, programa, tipo de contrato, link)',
+      'Botão "Sincronizar" tenta preencher automaticamente a partir da página EURAXESS quando possível; quando falha, grava o motivo em vez de travar',
+    ],
+  },
+  {
+    version: 'II.1.13.0',
+    date: '2026-09-14',
+    title: 'Integração de Dados Externos — Fase 4 (grafos)',
+    items: [
+      'Nova página /networking/graph ("Grafos externos"): rede de colaboração científica (coautoria via OpenAlex) e rede de organizações por projeto CORDIS compartilhado',
+      'Mapa de Rede original continua intocado — o novo visualizador é um componente separado e mais simples',
+    ],
+  },
+  {
+    version: 'II.1.12.0',
+    date: '2026-09-14',
+    title: 'Integração de Dados Externos — Fase 3 (OpenAlex → Hub)',
+    items: [
+      'Botão "Importar publicações para o Hub" na seção OpenAlex de Networking — manda as publicações já vinculadas da pessoa direto pra Hub → Artigos Científicos, sem duplicar em reimportações',
+    ],
+  },
+  {
+    version: 'II.1.11.0',
+    date: '2026-09-14',
+    title: 'Integração de Dados Externos — Fase 2 (ROR + CORDIS)',
+    items: [
+      'Mercado: nova seção "Dados externos" em cada organização — buscar/vincular ROR (nome, tipo, localização, site) igual ao fluxo de ORCID/OpenAlex da Fase 1',
+      'Botão "Buscar projetos CORDIS" liga até 10 projetos financiados pela UE por nome da organização (busca textual, sem ID confiável — marcado como best-effort na UI)',
+    ],
+  },
+  {
     version: 'II.1.10.0',
     date: '2026-09-14',
     title: 'Integração de Dados Externos — Fase 1 (ORCID + OpenAlex)',

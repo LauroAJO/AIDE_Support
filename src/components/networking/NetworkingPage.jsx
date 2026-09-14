@@ -532,6 +532,17 @@ export default function NetworkingPage() {
               <Grid3x3 className="h-3.5 w-3.5" /> Heatmap
             </button>
           </div>
+          {/* Fase 4 (II.1.13.0) — grafos genéricos (colaboração científica,
+              projetos CORDIS), separado do Mapa de Rede acima (que continua
+              intocado, ver desvio da Fase 0 no CHANGELOG). */}
+          <button
+            type="button"
+            onClick={() => navigate('/networking/graph')}
+            className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2"
+            title="Grafos externos (colaboração científica, CORDIS)"
+          >
+            <Network className="h-3.5 w-3.5" /> Grafos externos
+          </button>
           {user?.role === 'owner' && (
             <button
               onClick={syncDex}
@@ -1163,6 +1174,34 @@ function SectorWeightSection({ person, onPatch }) {
 // ORCID/OpenAlex. Nome sozinho nunca é confiável pra auto-linkar, então o
 // fluxo é sempre buscar → o usuário escolhe o candidato certo → vincula
 // (e já enriquece na hora, síncrono — POST /api/network/people/:id/link-external).
+// Fase 3 (II.1.12.0) — importa as publicações OpenAlex já trazidas (Fase 1)
+// para Hub → Artigos Científicos. Idempotente (ON CONFLICT DO NOTHING no
+// backend) — clicar de novo só traz o que for novo.
+function ImportPublicationsButton({ personId }) {
+  const [importing, setImporting] = useState(false);
+  const [msg, setMsg] = useState('');
+  const run = async () => {
+    setImporting(true);
+    setMsg('');
+    try {
+      const r = await apiFetch(`/api/network/people/${personId}/import-publications`, { method: 'POST' });
+      setMsg(`${r.imported || 0} novo(s) importado(s) pro Hub (${r.total || 0} publicações no total, ${r.skipped || 0} já existiam ou sem dados suficientes).`);
+    } catch (e) {
+      setMsg(`Falha: ${e?.message || e}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+  return (
+    <div className="mt-1">
+      <button type="button" onClick={run} disabled={importing} className="text-[10px] text-accent hover:underline disabled:opacity-50">
+        {importing ? 'Importando…' : 'Importar publicações para o Hub'}
+      </button>
+      {msg && <p className="mt-0.5 text-[10px] text-muted">{msg}</p>}
+    </div>
+  );
+}
+
 function ExternalSourceRow({ label, source, person, onPatched }) {
   const linkedId = source === 'orcid' ? person.orcid_id : person.openalex_author_id;
   const [query, setQuery] = useState(person.name || '');
@@ -1281,10 +1320,13 @@ function ExternalSourceRow({ label, source, person, onPatched }) {
           <p className="font-mono text-[10px] text-muted">{linkedId}</p>
           {loadingProfile && <p className="mt-1 text-muted">Carregando perfil…</p>}
           {!loadingProfile && profile && source === 'openalex' && (
-            <p className="mt-1">
-              h-index {profile.h_index ?? '—'} · {profile.cited_by_count ?? 0} citações · {profile.works_count ?? 0} trabalhos
-              {profile.worksImportError && <span className="ml-1 text-amber-600">(publicações não sincronizaram: {profile.worksImportError})</span>}
-            </p>
+            <>
+              <p className="mt-1">
+                h-index {profile.h_index ?? '—'} · {profile.cited_by_count ?? 0} citações · {profile.works_count ?? 0} trabalhos
+                {profile.worksImportError && <span className="ml-1 text-amber-600">(publicações não sincronizaram: {profile.worksImportError})</span>}
+              </p>
+              <ImportPublicationsButton personId={person.id} />
+            </>
           )}
           {!loadingProfile && profile && source === 'orcid' && (
             <p className="mt-1">{profile.worksCount ?? 0} trabalhos · {(profile.employments || []).length} vínculos institucionais</p>

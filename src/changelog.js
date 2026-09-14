@@ -8,6 +8,16 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.10.0',
+    date: '2026-09-14',
+    title: 'Integração de Dados Externos — Fase 1 (ORCID + OpenAlex)',
+    items: [
+      'Networking: nova seção "Dados externos" no perfil de cada pessoa — busca por nome, você escolhe o candidato certo, vincula ORCID e/ou OpenAlex',
+      'Vincular já traz na hora h-index, citações, trabalhos e vínculos institucionais — sem esperar processamento em lote',
+      'Cache de 24h evita rebuscar toda hora; botão "Atualizar" força uma busca nova quando precisar',
+    ],
+  },
+  {
     version: 'II.1.9.0',
     date: '2026-09-14',
     title: 'Integração de Dados Externos — Fase 0 (fundações)',

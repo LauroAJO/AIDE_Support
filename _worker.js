@@ -121,6 +121,13 @@ async function handleAPI(request, env, ctx) {
   if (path.startsWith('/api/sector-weight/')) {
     return handleSectorWeight(request, env, user, path.split('/')[3]);
   }
+  // Fase 1 — ORCID + OpenAlex (II.1.10.0). Busca de candidatos (usuário
+  // escolhe o certo) + vínculo/enriquecimento síncrono de uma pessoa.
+  if (path === '/api/search/external/orcid') return handleSearchExternalOrcid(request, env, user);
+  if (path === '/api/search/external/openalex') return handleSearchExternalOpenAlex(request, env, user);
+  if (path.match(/^\/api\/network\/people\/[^/]+\/link-external$/)) {
+    return handleLinkExternalProfile(request, env, user, path.split('/')[4]);
+  }
 
   if (path === '/api/tasks') return handleTasksCollection(request, env, user, ctx);
   // Tarefas recorrentes — precisa vir ANTES da rota genérica /api/tasks/:id
@@ -7537,6 +7544,221 @@ function buildNetworkingGraphServer(people, institutions, connections, contactOr
   return { nodes, edges };
 }
 
+// ── Integração de Dados Externos — Fase 1 (II.1.10.0): ORCID + OpenAlex ────
+// Enriquecimento de PESSOAS. Regras do plano: cache de 24h+ antes de
+// re-buscar, parâmetro `mailto` em toda chamada OpenAlex (polite pool —
+// evita rate-limit mais agressivo), falha de rede nunca derruba o resto do
+// app (tudo em try/catch, propagado só até o processador da fila).
+
+const OPENALEX_MAILTO = 'lauro.ajo@gmail.com';
+const EXTERNAL_PROFILE_FRESH_MS = 24 * 60 * 60 * 1000; // 24h
+
+async function fetchJsonOrThrow(url) {
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ao buscar ${url}`);
+  return res.json();
+}
+
+async function getFreshExternalProfile(env, entityType, entityId, source) {
+  const row = await env.DB.prepare(
+    `SELECT * FROM external_profiles WHERE entity_type = ? AND entity_id = ? AND source = ?
+     ORDER BY fetched_at DESC LIMIT 1`,
+  ).bind(entityType, entityId, source).first();
+  if (!row || !row.fetched_at) return null;
+  const ageMs = Date.now() - (row.fetched_at * 1000);
+  return ageMs < EXTERNAL_PROFILE_FRESH_MS ? row : null;
+}
+
+async function upsertExternalProfile(env, entityType, entityId, source, externalId, rawJson) {
+  const existing = await env.DB.prepare(
+    'SELECT id FROM external_profiles WHERE entity_type = ? AND entity_id = ? AND source = ?',
+  ).bind(entityType, entityId, source).first();
+  const now = Math.floor(Date.now() / 1000);
+  if (existing) {
+    await env.DB.prepare(
+      'UPDATE external_profiles SET external_id = ?, raw_json = ?, fetched_at = ? WHERE id = ?',
+    ).bind(externalId, JSON.stringify(rawJson), now, existing.id).run();
+    return existing.id;
+  }
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO external_profiles (id, entity_type, entity_id, source, external_id, raw_json, fetched_at, created_at)
+     VALUES (?, 'person', ?, ?, ?, ?, ?, unixepoch())`,
+  ).bind(id, entityId, source, externalId, JSON.stringify(rawJson), now).run();
+  return id;
+}
+
+// Busca pública ORCID (sem autenticação — API pública, sem necessidade de
+// client_id/secret para leitura). `force` ignora o cache de 24h (usado pelo
+// botão "Atualizar agora" do frontend).
+async function enrichPersonFromORCID(personId, env, force = false) {
+  const person = await env.DB.prepare('SELECT id, orcid_id FROM network_people WHERE id = ?').bind(personId).first();
+  if (!person || !person.orcid_id) throw new Error('Pessoa sem ORCID iD vinculado');
+  if (!force) {
+    const cached = await getFreshExternalProfile(env, 'person', personId, 'orcid');
+    if (cached) return JSON.parse(cached.raw_json);
+  }
+  const orcidId = person.orcid_id;
+  const record = await fetchJsonOrThrow(`https://pub.orcid.org/v3.0/${orcidId}/record`);
+  const givenNames = record?.person?.name?.['given-names']?.value || '';
+  const familyName = record?.person?.name?.['family-name']?.value || '';
+  const worksGroup = record?.['activities-summary']?.works?.group || [];
+  const works = worksGroup.slice(0, 50).map((g) => {
+    const summary = g['work-summary']?.[0] || {};
+    return {
+      title: summary.title?.title?.value || '',
+      year: summary['publication-date']?.year?.value || null,
+      doi: (summary['external-ids']?.['external-id'] || []).find((e) => e['external-id-type'] === 'doi')?.['external-id-value'] || '',
+      journal: summary['journal-title']?.value || '',
+    };
+  });
+  const employments = (record?.['activities-summary']?.employments?.['affiliation-group'] || []).map((g) => {
+    const s = g.summaries?.[0]?.['employment-summary'] || {};
+    return { org: s.organization?.name || '', role: s['role-title'] || '', current: !s['end-date'] };
+  });
+  const data = { givenNames, familyName, works, employments, worksCount: worksGroup.length };
+  await upsertExternalProfile(env, 'person', personId, 'orcid', orcidId, data);
+  return data;
+}
+
+// Busca OpenAlex por author id (já vinculado). Também traz até 25 trabalhos
+// recentes, salvos em external_publications + publication_entity_links —
+// reaproveitados depois pelo cálculo de peso setorial (componente `journal`)
+// e pela Fase 3 (Hub).
+async function enrichPersonFromOpenAlex(personId, env, force = false) {
+  const person = await env.DB.prepare('SELECT id, openalex_author_id FROM network_people WHERE id = ?').bind(personId).first();
+  if (!person || !person.openalex_author_id) throw new Error('Pessoa sem OpenAlex author ID vinculado');
+  if (!force) {
+    const cached = await getFreshExternalProfile(env, 'person', personId, 'openalex');
+    if (cached) return JSON.parse(cached.raw_json);
+  }
+  const authorId = person.openalex_author_id;
+  const author = await fetchJsonOrThrow(`https://api.openalex.org/authors/${authorId}?mailto=${OPENALEX_MAILTO}`);
+  const summary = {
+    display_name: author.display_name || '',
+    works_count: author.works_count || 0,
+    cited_by_count: author.cited_by_count || 0,
+    h_index: author.summary_stats?.h_index ?? null,
+    i10_index: author.summary_stats?.i10_index ?? null,
+    last_known_institution: author.last_known_institutions?.[0]?.display_name || '',
+  };
+
+  // Trabalhos recentes — best-effort; se a chamada falhar, o perfil ainda é
+  // salvo com o resumo (h-index/citações), só sem a lista de publicações.
+  try {
+    const worksResp = await fetchJsonOrThrow(
+      `https://api.openalex.org/works?filter=author.id:${authorId}&sort=publication_year:desc&per-page=25&mailto=${OPENALEX_MAILTO}`,
+    );
+    for (const w of (worksResp.results || [])) {
+      const doi = (w.doi || '').replace('https://doi.org/', '');
+      const pubId = crypto.randomUUID();
+      const existing = doi
+        ? await env.DB.prepare('SELECT id FROM external_publications WHERE doi = ? AND doi != \'\'').bind(doi).first()
+        : await env.DB.prepare('SELECT id FROM external_publications WHERE source = \'openalex\' AND external_id = ?').bind(w.id).first();
+      const targetId = existing ? existing.id : pubId;
+      if (existing) {
+        await env.DB.prepare(
+          `UPDATE external_publications SET title=?, journal_name=?, publication_year=?, cited_by_count=?, raw_json=?, fetched_at=unixepoch() WHERE id=?`,
+        ).bind(w.display_name || '', w.primary_location?.source?.display_name || '', w.publication_year || null, w.cited_by_count || 0, JSON.stringify(w), targetId).run();
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO external_publications (id, source, external_id, doi, title, journal_name, publication_year, cited_by_count, raw_json, fetched_at, created_at)
+           VALUES (?, 'openalex', ?, ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch())`,
+        ).bind(targetId, w.id, doi, w.display_name || '', w.primary_location?.source?.display_name || '', w.publication_year || null, w.cited_by_count || 0, JSON.stringify(w)).run();
+      }
+      const linkExists = await env.DB.prepare(
+        `SELECT id FROM publication_entity_links WHERE publication_id = ? AND entity_type = 'person' AND entity_id = ?`,
+      ).bind(targetId, personId).first();
+      if (!linkExists) {
+        await env.DB.prepare(
+          `INSERT INTO publication_entity_links (id, publication_id, entity_type, entity_id, role, created_at)
+           VALUES (?, ?, 'person', ?, 'author', unixepoch())`,
+        ).bind(crypto.randomUUID(), targetId, personId).run();
+      }
+    }
+    summary.recentWorksImported = (worksResp.results || []).length;
+  } catch (e) {
+    summary.worksImportError = (e && e.message) || String(e);
+  }
+
+  await upsertExternalProfile(env, 'person', personId, 'openalex', authorId, summary);
+  return summary;
+}
+
+// Rotas de busca (para o usuário escolher o candidato certo antes de
+// vincular — nome sozinho nunca é confiável o suficiente pra auto-linkar).
+async function handleSearchExternalOrcid(request, env, user) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  const url = new URL(request.url);
+  const q = (url.searchParams.get('q') || '').trim();
+  if (!q) return json([]);
+  try {
+    const data = await fetchJsonOrThrow(`https://pub.orcid.org/v3.0/search/?q=${encodeURIComponent(q)}&rows=10`);
+    const results = (data.result || []).map((r) => ({
+      orcid_id: r['orcid-identifier']?.path || '',
+      uri: r['orcid-identifier']?.uri || '',
+    }));
+    return json(results);
+  } catch (e) {
+    return json({ error: 'Falha ao buscar no ORCID', detail: (e && e.message) || String(e) }, 502);
+  }
+}
+
+async function handleSearchExternalOpenAlex(request, env, user) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  const url = new URL(request.url);
+  const q = (url.searchParams.get('q') || '').trim();
+  if (!q) return json([]);
+  try {
+    const data = await fetchJsonOrThrow(
+      `https://api.openalex.org/authors?search=${encodeURIComponent(q)}&per-page=10&mailto=${OPENALEX_MAILTO}`,
+    );
+    const results = (data.results || []).map((a) => ({
+      openalex_id: (a.id || '').replace('https://openalex.org/', ''),
+      display_name: a.display_name || '',
+      works_count: a.works_count || 0,
+      cited_by_count: a.cited_by_count || 0,
+      last_known_institution: a.last_known_institutions?.[0]?.display_name || '',
+    }));
+    return json(results);
+  } catch (e) {
+    return json({ error: 'Falha ao buscar no OpenAlex', detail: (e && e.message) || String(e) }, 502);
+  }
+}
+
+// Vincula (ou desvincula, com external_id='') um ID externo a uma pessoa e,
+// se vinculando, já roda o enriquecimento na hora (síncrono) em vez de
+// esperar o cron do dia seguinte — feedback imediato pro usuário que acabou
+// de escolher o candidato certo na busca.
+async function handleLinkExternalProfile(request, env, user, personId) {
+  if (!user) return json({ error: 'Não autenticado' }, 401);
+  if (!canDo(user.granular, 'networking', 'edit_contacts')) {
+    return json({ error: 'Sem permissão para editar contatos' }, 403);
+  }
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!personId) return json({ error: 'personId obrigatório' }, 400);
+  const body = (await readJson(request)) || {};
+  const { source, external_id: externalId, force } = body;
+  if (source !== 'orcid' && source !== 'openalex') {
+    return json({ error: "source deve ser 'orcid' ou 'openalex'" }, 400);
+  }
+  const column = source === 'orcid' ? 'orcid_id' : 'openalex_author_id';
+  await env.DB.prepare(`UPDATE network_people SET ${column} = ? WHERE id = ?`).bind(externalId || '', personId).run();
+  if (!externalId) return json({ ok: true, unlinked: true });
+  try {
+    const result = source === 'orcid'
+      ? await enrichPersonFromORCID(personId, env, !!force)
+      : await enrichPersonFromOpenAlex(personId, env, !!force);
+    return json({ ok: true, linked: true, source, external_id: externalId, profile: result });
+  } catch (e) {
+    // O vínculo (coluna orcid_id/openalex_author_id) já foi salvo mesmo se o
+    // fetch falhar agora — o cron diário tenta de novo automaticamente
+    // (via enrichment_queue, se o usuário também enfileirar) ou o usuário
+    // pode clicar "Atualizar" de novo depois.
+    return json({ ok: true, linked: true, source, external_id: externalId, fetchError: (e && e.message) || String(e) }, 207);
+  }
+}
+
 async function handleScheduledNotificationItem(request, env, user, id) {
   if (request.method !== 'DELETE') return json({ error: 'Método não permitido' }, 405);
   await env.DB.prepare('DELETE FROM scheduled_notifications WHERE id = ? AND from_user_id = ? AND sent = 0').bind(id, user.id).run();
@@ -9555,6 +9777,9 @@ function shapeNetworkPerson(row) {
     sector_weight_sources: row.sector_weight_sources || '',
     sector_weight_updated_at: row.sector_weight_updated_at || null,
     sector_weight_updated_by: row.sector_weight_updated_by || null,
+    // Integração de Dados Externos — Fase 1 (II.1.10.0).
+    orcid_id: row.orcid_id || '',
+    openalex_author_id: row.openalex_author_id || '',
     created_at: row.created_at,
     updated_at: row.updated_at
   };

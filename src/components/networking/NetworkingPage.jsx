@@ -784,6 +784,7 @@ export default function NetworkingPage() {
                 onChangeOutreach={(s) => changeOutreach(selectedItem.id, s)}
                 onPatchProfessional={(patch) => patchProfessional(selectedItem.id, patch)}
                 onPatchPerson={(patch) => patchPerson(selectedItem.id, patch)}
+                onReloadPeople={loadAll}
                 onViewMarket={() => {
                   // A sub-aba de contatos do Mercado não existe mais: vai direto
                   // à página da organização vinculada (contact_professional.organization_id)
@@ -1158,6 +1159,157 @@ function SectorWeightSection({ person, onPatch }) {
   );
 }
 
+// Integração de Dados Externos — Fase 1 (II.1.10.0): vínculo manual com
+// ORCID/OpenAlex. Nome sozinho nunca é confiável pra auto-linkar, então o
+// fluxo é sempre buscar → o usuário escolhe o candidato certo → vincula
+// (e já enriquece na hora, síncrono — POST /api/network/people/:id/link-external).
+function ExternalSourceRow({ label, source, person, onPatched }) {
+  const linkedId = source === 'orcid' ? person.orcid_id : person.openalex_author_id;
+  const [query, setQuery] = useState(person.name || '');
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState(null);
+  const [linking, setLinking] = useState(false);
+  const [profile, setProfile] = useState(null);
+  const [loadingProfile, setLoadingProfile] = useState(false);
+
+  const loadProfile = () => {
+    setLoadingProfile(true);
+    apiFetch(`/api/external/profiles/${person.id}`)
+      .then((rows) => {
+        const row = (Array.isArray(rows) ? rows : []).find((r) => r.source === source);
+        setProfile(row ? JSON.parse(row.raw_json || '{}') : null);
+      })
+      .catch(() => setProfile(null))
+      .finally(() => setLoadingProfile(false));
+  };
+  useEffect(() => {
+    if (linkedId) loadProfile();
+    else setProfile(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkedId, person.id]);
+
+  const search = async () => {
+    if (!query.trim()) return;
+    setSearching(true);
+    setResults(null);
+    try {
+      const r = await apiFetch(`/api/search/external/${source}?q=${encodeURIComponent(query.trim())}`);
+      setResults(Array.isArray(r) ? r : []);
+    } catch {
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const link = async (externalId, force = false) => {
+    setLinking(true);
+    try {
+      await apiFetch(`/api/network/people/${person.id}/link-external`, {
+        method: 'POST',
+        body: JSON.stringify({ source, external_id: externalId, force }),
+      });
+      setResults(null);
+      onPatched && onPatched();
+      loadProfile();
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  const unlink = () => link('');
+
+  return (
+    <div className="rounded-lg border border-line bg-surface2 p-2.5">
+      <div className="mb-1.5 flex items-center justify-between">
+        <p className="text-[11px] font-semibold uppercase text-muted">{label}</p>
+        {linkedId && (
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => link(linkedId, true)} disabled={linking} className="text-[10px] text-accent hover:underline disabled:opacity-50">
+              {linking ? 'Atualizando…' : 'Atualizar'}
+            </button>
+            <button type="button" onClick={unlink} disabled={linking} className="text-[10px] text-red-600 hover:underline disabled:opacity-50">
+              Desvincular
+            </button>
+          </div>
+        )}
+      </div>
+
+      {!linkedId ? (
+        <div>
+          <div className="flex gap-1.5">
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && search()}
+              placeholder="Nome para buscar..."
+              className="input flex-1 text-xs"
+            />
+            <button type="button" onClick={search} disabled={searching} className="rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink2 hover:bg-surface disabled:opacity-50">
+              {searching ? '...' : 'Buscar'}
+            </button>
+          </div>
+          {results && results.length === 0 && (
+            <p className="mt-1.5 text-[11px] text-muted">Nenhum resultado.</p>
+          )}
+          {results && results.length > 0 && (
+            <div className="mt-1.5 max-h-40 space-y-1 overflow-y-auto">
+              {results.map((r) => {
+                const id = source === 'orcid' ? r.orcid_id : r.openalex_id;
+                const title = source === 'orcid' ? r.orcid_id : r.display_name;
+                const sub = source === 'orcid'
+                  ? ''
+                  : [r.last_known_institution, r.works_count ? `${r.works_count} trabalhos` : '', r.cited_by_count ? `${r.cited_by_count} citações` : ''].filter(Boolean).join(' · ');
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => link(id)}
+                    disabled={linking}
+                    className="block w-full rounded-md border border-line bg-surface px-2 py-1 text-left text-[11px] hover:bg-white disabled:opacity-50"
+                  >
+                    <span className="block font-medium text-ink">{title}</span>
+                    {sub && <span className="block text-[10px] text-muted">{sub}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="text-[11px] text-ink2">
+          <p className="font-mono text-[10px] text-muted">{linkedId}</p>
+          {loadingProfile && <p className="mt-1 text-muted">Carregando perfil…</p>}
+          {!loadingProfile && profile && source === 'openalex' && (
+            <p className="mt-1">
+              h-index {profile.h_index ?? '—'} · {profile.cited_by_count ?? 0} citações · {profile.works_count ?? 0} trabalhos
+              {profile.worksImportError && <span className="ml-1 text-amber-600">(publicações não sincronizaram: {profile.worksImportError})</span>}
+            </p>
+          )}
+          {!loadingProfile && profile && source === 'orcid' && (
+            <p className="mt-1">{profile.worksCount ?? 0} trabalhos · {(profile.employments || []).length} vínculos institucionais</p>
+          )}
+          {!loadingProfile && !profile && (
+            <p className="mt-1 text-muted">Perfil ainda não sincronizado — clique em "Atualizar".</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExternalDataSection({ person, onPatched }) {
+  return (
+    <div>
+      <p className="mb-1.5 text-xs font-semibold uppercase text-muted">Dados externos</p>
+      <div className="space-y-2">
+        <ExternalSourceRow label="ORCID" source="orcid" person={person} onPatched={onPatched} />
+        <ExternalSourceRow label="OpenAlex" source="openalex" person={person} onPatched={onPatched} />
+      </div>
+    </div>
+  );
+}
+
 // Histórico de interações estruturado — lista + formulário inline + exclusão.
 const EMPTY_INTERACTION = { interaction_type: 'email_sent', date: '', summary: '', outcome: '', next_step: '', next_step_date: '' };
 function InteractionsSection({ personId }) {
@@ -1295,7 +1447,7 @@ function TagsSection({ tags, onEdit }) {
   );
 }
 
-function DetailPanel({ item, kind, people, connections, isOwner, hasPro, outreachStatus, proProfile, onChangeOutreach, onPatchProfessional, onPatchPerson, onViewMarket, onEdit, onDelete, onReloadConnections }) {
+function DetailPanel({ item, kind, people, connections, isOwner, hasPro, outreachStatus, proProfile, onChangeOutreach, onPatchProfessional, onPatchPerson, onViewMarket, onEdit, onDelete, onReloadConnections, onReloadPeople }) {
   const isPerson = kind === 'person';
   const linked = useMemo(() => {
     if (!isPerson) return [];
@@ -1421,6 +1573,9 @@ function DetailPanel({ item, kind, people, connections, isOwner, hasPro, outreac
 
         {/* Peso setorial — avaliação manual de influência no setor (v2.25.9) */}
         {isPerson && <SectorWeightSection person={item} onPatch={onPatchPerson} />}
+
+        {/* Dados externos — ORCID/OpenAlex (II.1.10.0, Fase 1) */}
+        {isPerson && <ExternalDataSection person={item} onPatched={onReloadPeople} />}
 
         {/* Como se conheceram (Prompt G) — só p/ pessoas com perfil no Mercado */}
         {isPerson && hasPro && (

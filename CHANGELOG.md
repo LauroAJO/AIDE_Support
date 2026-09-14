@@ -9,6 +9,24 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.10.0] — 2026-09-14
+
+### Integração de Dados Externos — Fase 1 (ORCID + OpenAlex)
+
+Segunda entrega do plano de integração externa, sobre a fundação da Fase 0. Enriquecimento de PESSOAS via ORCID e OpenAlex — vínculo manual (nome sozinho nunca é confiável o bastante pra auto-linkar), enriquecimento imediato ao vincular.
+
+- **Fluxo de vínculo**: nova seção "Dados externos" no painel de detalhe de uma pessoa em Networking (logo abaixo de Peso Setorial) — buscar por nome em `GET /api/search/external/orcid` ou `GET /api/search/external/openalex`, escolher o candidato certo na lista de resultados, `POST /api/network/people/:id/link-external` grava o ID na coluna (`orcid_id`/`openalex_author_id`, migration 0062) e já dispara o enriquecimento síncrono na hora — sem esperar o cron do dia seguinte.
+- **`enrichPersonFromORCID`**: busca `GET https://pub.orcid.org/v3.0/{id}/record` (API pública, sem necessidade de client_id/secret pra leitura) — nome, até 50 trabalhos (título/ano/DOI/journal) e vínculos institucionais (emprego atual/passado). Salvo em `external_profiles` (source='orcid').
+- **`enrichPersonFromOpenAlex`**: busca `GET https://api.openalex.org/authors/{id}` (h-index, i10-index, citações, trabalhos) + até 25 trabalhos recentes via `GET /works?filter=author.id:{id}`, salvos em `external_publications`/`publication_entity_links` — mesma tabela que a Fase 0 já preparou pro cálculo de peso setorial (componente `journal`) e que a Fase 3 vai reaproveitar pro Hub. Todo request OpenAlex leva `mailto=lauro.ajo@gmail.com` (polite pool, evita rate-limit agressivo).
+- **Cache de 24h**: `getFreshExternalProfile` — um vínculo já enriquecido nas últimas 24h não dispara novo fetch a não ser que o usuário clique "Atualizar" (`force=true`). Falha de rede nunca quebra a UI — vínculo (coluna orcid_id/openalex_author_id) é salvo mesmo se o fetch falhar na hora; resposta `207` avisa o frontend, que mostra "Perfil ainda não sincronizado".
+- `shapeNetworkPerson` (backend) e o payload de pessoa passaram a expor `orcid_id`/`openalex_author_id` — antes ficavam de fora do whitelist de campos retornados pela API.
+
+### Desvios/decisões técnicas (com justificativa)
+- Sem migração nova nesta fase — as colunas (`orcid_id`, `openalex_author_id`) e tabelas (`external_profiles`, `external_publications`, `publication_entity_links`) já foram criadas na Fase 0 (migration 0062), exatamente para isto.
+- Busca ORCID via endpoint público `/v3.0/search/` (sem autenticação) — suficiente para o caso de uso "usuário confirma manualmente", sem precisar registrar credenciais OAuth de API da ORCID (que exigiriam client_id/secret geridos à parte).
+- `runEnrichmentJob` (dispatcher da fila, Fase 0) não precisou de nenhuma mudança — o guard `typeof enrichPersonFromORCID === 'function'` já liga sozinho agora que as funções existem (declarações são hoisted em JS).
+- Vínculo/enriquecimento desta fase é sempre **síncrono**, disparado pelo clique do usuário (`link-external`) — a fila `enrichment_queue`/`processEnrichmentQueue` da Fase 0 continua existindo para o cron diário reprocessar em lote (fica pronta para Fase 2, que deve popular a fila com mais volume — organizações via ROR/CORDIS).
+
 ## [II.1.9.0] — 2026-09-14
 
 ### Integração de Dados Externos — Fase 0 (Fundações)

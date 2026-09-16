@@ -24,6 +24,7 @@ import NetworkingPage from './components/networking/NetworkingPage';
 import ExternalGraphPage from './components/networking/ExternalGraphPage';
 import ChatPage from './components/chat/ChatPage';
 import ImportPage from './components/import/ImportPage';
+import DataHubPage from './components/data/DataHubPage';
 import MarketPage from './components/market/MarketPage';
 import OrgDetailPage from './components/market/OrgDetailPage';
 import CareerPage from './components/career/CareerPage';
@@ -271,6 +272,11 @@ export default function App() {
             element={<ProtectedRoute feature="chat"><ChatPage /></ProtectedRoute>}
           />
           <Route path="/import" element={<FixedRoute><ImportPage /></FixedRoute>} />
+          {/* Dados — II.1.16.0. Ponto único de importar/exportar (menu de
+              perfil); sem wrapper de permissão na rota porque o conteúdo
+              muda por role dentro da própria página (ver DataHubPage.jsx) —
+              /import continua existindo por trás, ainda com FixedRoute. */}
+          <Route path="/data" element={<DataHubPage />} />
           <Route path="/market" element={<FixedRoute><MarketPage /></FixedRoute>} />
           <Route path="/market/org/:id" element={<FixedRoute><OrgDetailPage /></FixedRoute>} />
           <Route path="/career" element={<FixedRoute><CareerPage /></FixedRoute>} />

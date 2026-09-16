@@ -8,6 +8,15 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.16.0',
+    date: '2026-09-16',
+    title: 'Importar/Exportar unificados em "Dados"',
+    items: [
+      'Menu do perfil: "Importar Dados" e "Exportar Tarefas" viraram um único item "Dados" (abas Exportar/Importar) — sem duplicar com Configurações',
+      'Todos continuam vendo e usando o que já usavam (import de Mercado, export de tarefas/notas); só o painel multi-domínio continua owner-only',
+    ],
+  },
+  {
     version: 'II.1.15.0',
     date: '2026-09-16',
     title: 'Fix: Exportar dados nunca tinha ido ao ar (owner-only)',

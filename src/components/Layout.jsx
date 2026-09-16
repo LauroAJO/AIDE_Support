@@ -14,7 +14,7 @@ import {
   Network as NetworkIcon,
   MessageSquare,
   Shield,
-  Upload,
+  Database,
   GitMerge,
   Building2,
   Briefcase,
@@ -26,7 +26,6 @@ import {
   User,
   Users,
   Settings,
-  Download,
   LogOut,
 } from 'lucide-react';
 import { useStore } from '../store';
@@ -38,7 +37,6 @@ import TimerIndicator from './timer/TimerIndicator';
 import TimerCheckMonitor from './timer/TimerCheckMonitor';
 import NotificationBell from './notifications/NotificationBell';
 import GlobalSearch from './search/GlobalSearch';
-import ExportTasksModal from './tasks/ExportTasksModal';
 
 // Nav único e ordenado (sidebar + bottom nav). `feature` = permissão (owner vê
 // tudo); `fixed: true` = só owner + assistente fixo. `group` agrupa visualmente
@@ -98,7 +96,6 @@ export default function Layout({ children }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const [bridgePending, setBridgePending] = useState(0);
   const [dexPending, setDexPending] = useState(0);
-  const [showExport, setShowExport] = useState(false);
   const menuRef = useRef(null);
 
   const firstName = (user?.name || user?.email || '').split(' ')[0];
@@ -284,27 +281,18 @@ export default function Layout({ children }) {
                     <span className="flex-1">Configurações</span>
                   </button>
                 )}
-                {/* Importar Dados — todos (owner + fixo + externo).
-                    NOTA: leva a /import, que é o importador de ORGANIZAÇÕES e
-                    CONTACTOS de mercado. Para tarefas é o botão "Importar" na
-                    página de Tarefas. */}
+                {/* Dados — II.1.16.0. Ponto único de importar/exportar,
+                    substituindo os dois itens separados que existiam aqui
+                    ("Importar Dados" e "Exportar Tarefas") — visível pra
+                    todos, o conteúdo da página /data é que muda por role
+                    (ver DataHubPage.jsx). */}
                 <button
                   type="button"
-                  onClick={() => go('/import')}
+                  onClick={() => go('/data')}
                   className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
                 >
-                  <Upload className="h-4 w-4" />
-                  <span className="flex-1">Importar Dados</span>
-                </button>
-                {/* Exportar Tarefas — todos. O âmbito ("todas" vs "minhas") é
-                    que é owner-only, e quem o decide é o servidor. */}
-                <button
-                  type="button"
-                  onClick={() => { setMenuOpen(false); setShowExport(true); }}
-                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-ink transition hover:bg-surface2"
-                >
-                  <Download className="h-4 w-4" />
-                  <span className="flex-1">Exportar Tarefas</span>
+                  <Database className="h-4 w-4" />
+                  <span className="flex-1">Dados</span>
                 </button>
                 {/* Revisar Bridge — owner only, com badge de pendências */}
                 {isOwner && (
@@ -503,8 +491,6 @@ export default function Layout({ children }) {
           </div>
         </div>
       )}
-
-      {showExport && <ExportTasksModal isOwner={isOwner} onClose={() => setShowExport(false)} />}
     </div>
   );
 }

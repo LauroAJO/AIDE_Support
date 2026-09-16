@@ -13,6 +13,7 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.16.0 | 2026-09-16 | Unificação: import/export virou um único item "Dados" no menu de perfil (`/data`, abas Exportar/Importar), tirando a duplicação entre menu e Configurações |
 | II.1.15.0 | 2026-09-16 | Fix: painel "Exportar dados" (Carreira/Mercado/Networking/Eventos/Venues) nunca tinha sido commitado desde a II.1.6.0 — recriado e restrito ao owner (antes o acesso variava por domínio) |
 | II.1.14.0 | 2026-09-14 | Integração de Dados Externos — Fase 5: EURAXESS (campos manuais em Vagas PhD/Empregos + sincronização automática best-effort, já que o EURAXESS bloqueia tráfego automatizado) |
 | II.1.13.0 | 2026-09-14 | Integração de Dados Externos — Fase 4: visualizações de grafo genéricas (colaboração científica via OpenAlex, rede de organizações via CORDIS), nova página /networking/graph |

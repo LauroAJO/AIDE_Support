@@ -9,6 +9,24 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.16.0] — 2026-09-16
+
+### Unificação: Importar/Exportar num único lugar ("Dados")
+
+**Contexto:** depois da II.1.15.0, o usuário reportou (com print) que só via "Exportar Tarefas" — que na verdade é um item **diferente e pré-existente** do menu de perfil, sem relação com o painel novo. Investigação revelou que import/export estava espalhado em três lugares: "Importar Dados" e "Exportar Tarefas" no menu de perfil (dropdown do avatar), e uma seção "Dados" dentro de Configurações com export de tarefas/notas (duplicando o que já existia no menu) + o painel multi-domínio novo. Pedido do usuário: unificar tudo num só lugar dentro do menu do perfil.
+
+- **Nova página `/data`** (`DataHubPage.jsx`), com duas abas — **Exportar** (todos: tarefas + notas, próprias; owner: + painel multi-domínio Carreira/Mercado/Networking/Eventos/Venues) e **Importar** (só quem já podia: owner + assistente fixo — reaproveita `ImportPage.jsx` sem mudança nenhuma nela).
+- **Menu de perfil**: os dois itens antigos ("Importar Dados", "Exportar Tarefas") viraram um único item **"Dados"**, levando pra `/data`.
+- **Configurações → Dados**: a seção virou só um link de atalho pra `/data` — o conteúdo duplicado (botões de export de tarefas/notas, painel multi-domínio) saiu de lá.
+- `ExportDataPanel` (painel multi-domínio, recriado na II.1.15.0) foi movido de dentro de `SettingsPage.jsx` para seu próprio arquivo (`src/components/data/ExportDataPanel.jsx`), reaproveitado tanto pela nova página quanto — se precisar no futuro — por qualquer outro lugar.
+
+### Desvios/decisões técnicas (com justificativa)
+- A rota `/import` continua existindo por trás (com `FixedRoute`, como sempre teve) — não removida, só deixou de ser o destino direto do menu. `/data` não tem wrapper de permissão na rota em si porque o conteúdo muda por role dentro da própria página (a aba Importar simplesmente não renderiza pra quem não é owner/assistente fixo).
+- Visibilidade decidida via `AskUserQuestion` com o usuário: o item "Dados" continua visível pra todos os usuários (não virou owner-only) — Alice/Milene continuam vendo e usando import de Mercado e export das próprias tarefas/notas pelo mesmo lugar; só o painel multi-domínio (que já era owner-only desde a II.1.15.0) continua exclusivo do owner.
+- `downloadExport` (helper genérico de download autenticado usado pra notas) foi duplicado de `SettingsPage.jsx` para `DataHubPage.jsx` em vez de virar um export compartilhado — é uma função de 10 linhas, sem estado, o mesmo padrão de pequena duplicação já aceito no projeto (ex.: `EXPORT_STATUS_LABELS` no worker vs `careerShared.jsx`).
+
+---
+
 ## [II.1.15.0] — 2026-09-16
 
 ### Fix: painel "Exportar dados" (multi-domínio) nunca tinha chegado à produção + restrito ao owner

@@ -5393,21 +5393,18 @@ function buildGenericTxt(rows, columns, title) {
 }
 
 // GET /api/export/data?domain=career|market|networking|events|venues&format=csv|txt
-// Mesmo controle de acesso das páginas de origem: Mercado/Eventos/Venues são
-// owner + assistente fixo (isFixedUser); Networking segue a permissão
-// granular 'networking'/'view'; Carreira é liberado a qualquer sessão válida
-// (mesma regra de GET /api/career/opportunities).
+// II.1.15.0 — restrito ao owner (Lauro), ponto final. Antes o acesso variava
+// por domínio (Mercado/Eventos/Venues = isFixedUser; Networking = permissão
+// granular; Carreira = qualquer sessão) espelhando cada página de origem;
+// agora a EXPORTAÇÃO em si (diferente da navegação normal nas páginas) é
+// owner-only em todos os domínios — pedido explícito do usuário, não uma
+// generalização da regra antiga.
 async function handleExportData(request, env, user) {
+  if (!user || user.role !== 'owner') return json({ error: 'Restrito ao owner' }, 403);
   const url = new URL(request.url);
   const domain = url.searchParams.get('domain');
   const formato = String(url.searchParams.get('format') || 'csv').toLowerCase();
   if (!EXPORT_DOMAIN_LABELS[domain]) return json({ error: 'domain inválido' }, 400);
-  if ((domain === 'market' || domain === 'events' || domain === 'venues') && !isFixedUser(user)) {
-    return json({ error: 'Restrito ao owner e assistentes fixos' }, 403);
-  }
-  if (domain === 'networking' && !requirePermission(user, 'networking', 'view')) {
-    return json({ error: 'Sem permissão' }, 403);
-  }
   const rows = await fetchExportRows(domain, env);
   const columns = EXPORT_COLUMNS[domain];
   const label = EXPORT_DOMAIN_LABELS[domain];
@@ -5425,14 +5422,13 @@ async function handleExportData(request, env, user) {
 // src/lib/exportData.js). Aceita 1+ domínios numa só chamada — o PDF, ao
 // contrário do CSV/TXT, pode juntar várias seções num único arquivo.
 async function handleExportDataJson(request, env, user) {
+  if (!user || user.role !== 'owner') return json({ error: 'Restrito ao owner' }, 403);
   const url = new URL(request.url);
   const domains = String(url.searchParams.get('domains') || url.searchParams.get('domain') || '')
     .split(',').map((d) => d.trim()).filter(Boolean);
   const out = {};
   for (const domain of domains) {
     if (!EXPORT_DOMAIN_LABELS[domain]) continue;
-    if ((domain === 'market' || domain === 'events' || domain === 'venues') && !isFixedUser(user)) continue;
-    if (domain === 'networking' && !requirePermission(user, 'networking', 'view')) continue;
     const rows = await fetchExportRows(domain, env);
     const columns = EXPORT_COLUMNS[domain].map((c) => c.label);
     out[domain] = {

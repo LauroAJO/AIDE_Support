@@ -8,6 +8,15 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.15.0',
+    date: '2026-09-16',
+    title: 'Fix: Exportar dados nunca tinha ido ao ar (owner-only)',
+    items: [
+      'O painel "Exportar dados" (Carreira/Mercado/Networking/Eventos/Venues) da II.1.6.0 nunca tinha sido commitado — só o backend estava em produção. Recriado em Configurações → Dados',
+      'Exportar a base completa de um domínio agora é restrito ao owner (antes variava por domínio) — pedido explícito, não afeta a navegação normal das páginas',
+    ],
+  },
+  {
     version: 'II.1.14.0',
     date: '2026-09-14',
     title: 'Integração de Dados Externos — Fase 5 (EURAXESS)',

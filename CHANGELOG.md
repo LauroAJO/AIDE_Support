@@ -9,6 +9,23 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.15.0] — 2026-09-16
+
+### Fix: painel "Exportar dados" (multi-domínio) nunca tinha chegado à produção + restrito ao owner
+
+**Contexto:** o usuário reportou só ter exportação de tarefas disponível em Configurações, apesar do CHANGELOG registrar o painel multi-domínio (Carreira/Mercado/Networking/Eventos/Venues, CSV/TXT/PDF) como entregue na II.1.6.0 (2026-09-10). Investigação (`git fetch origin` + `git log`/`git diff` contra `origin/main`) confirmou a causa: o backend (`GET /api/export/data`, `GET /api/export/data/json` em `_worker.js`) sempre esteve em produção, mas os dois arquivos de frontend que o usam — `src/lib/exportData.js` (novo) e o painel em `SettingsPage.jsx` — nunca foram commitados. Não existe nenhum commit `II.1.6.0` no histórico do `origin/main`; a entrega da época (parte 3 da sessão) aparentemente nunca foi seguida de um `git add`/commit desses dois arquivos específicos, e a entrega seguinte (II.1.7.0, parte 4) listou explicitamente os arquivos a commitar sem incluí-los — o gap passou despercebido porque o build sempre passou (o frontend não referenciava os arquivos ausentes, então não havia erro de import quebrado).
+
+- **`src/lib/exportData.js`** (recriado): `downloadDomainFile(domain, format)` para CSV/TXT (download direto via `GET /api/export/data`); `downloadDomainsPdf(domains)` monta o PDF no navegador via `jspdf`/`jspdf-autotable` (import dinâmico) a partir de `GET /api/export/data/json`.
+- **`SettingsPage.jsx`**: painel "Exportar dados (owner)" na seção Dados — chips de seleção por domínio + "Selecionar todos", formato CSV/TXT/PDF, botão único. Só renderiza quando `user.role === 'owner'`.
+- **Restrição adicional, pedido explícito do usuário nesta entrega:** a exportação multi-domínio passou a ser **owner-only em todos os domínios**, no backend (`handleExportData`/`handleExportDataJson` em `_worker.js`) — antes o controle de acesso variava por domínio, espelhando cada página de origem (Mercado/Eventos/Venues = owner + assistente fixo; Networking = permissão granular; Carreira = qualquer sessão válida). Essa regra antiga continua valendo para a navegação normal dentro de cada página — só a ação de **exportar a base inteira de um domínio** ficou restrita ao owner. O gate no frontend (painel só aparece pro owner) é conveniência de UI; a autorização real é no backend, que agora recusa com 403 mesmo se alguém chamar a rota direto.
+
+### Desvios/decisões técnicas (com justificativa)
+- Sem migração — é puramente um gap de frontend + um endurecimento de permissão, nenhuma tabela/coluna nova.
+- Não foi possível confirmar exatamente em qual entrega os dois arquivos se perderam (a sessão anterior que fez a II.1.6.0 não deixou um commit isolado para comparar) — o diagnóstico foi feito comparando `origin/main` real contra o que o CHANGELOG.md descrevia, não reconstruindo o incidente passo a passo.
+- `EXPORT_DOMAINS` (lista de domínios exportáveis) foi duplicada em `src/lib/exportData.js`, espelhando `EXPORT_DOMAIN_LABELS` do `_worker.js` — mesmo padrão já usado em outros pares frontend/backend deste projeto (ex.: `src/changelog.js` vs `CHANGELOG.md`).
+
+---
+
 ## [II.1.14.0] — 2026-09-14
 
 ### Integração de Dados Externos — Fase 5 (EURAXESS)

@@ -11901,7 +11901,9 @@ async function handleCareerOpportunities(request, env, user) {
     // quando há hub_short_id — oportunidade criada à mão no Pipeline, a partir de
     // um evento ou de um email já nasce preenchida e não precisa da tarefa.
     if (body.hub_short_id) {
-      await createHubCareerTask(env, user, { id, title: body.title, url: body.url }, assignedTo);
+      // [PAUSADO] Criação automática de tarefa ao enviar do Hub
+      // Reactivar quando definido o fluxo de atribuição correcto
+      // await createHubCareerTask(env, user, { id, title: body.title, url: body.url }, assignedTo);
     }
     const row = await env.DB.prepare('SELECT * FROM career_opportunities WHERE id = ?').bind(id).first();
     return json(shapeOpportunity(row), 201);

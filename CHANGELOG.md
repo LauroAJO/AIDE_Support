@@ -9,6 +9,29 @@ Formato: ARCO.MAJOR.MINOR.PATCH
 
 ---
 
+## [II.1.17.0] — 2026-10-21
+
+### Hub: completar seleção múltipla (Vagas PhD / Empregos) e envio em lote para Carreira
+
+**Contexto:** ticket pedia implementar do zero checkbox/seleção múltipla + "Adicionar à Carreira" em lote nas sub-abas do Hub. Investigação (obrigatória antes do código, conforme o próprio ticket) revelou que `VagasPhDPage.jsx` e `EmpregoPage.jsx` **já tinham** seleção múltipla parcial (checkbox nos cards, `selectedIds` em `Set`, barra de ações com "Selecionar todos"/"Limpar seleção"/mover para a outra aba/deletar em lote) — faltava só: checkbox na visão de **Lista** (que é o `view` padrão), atalho **Escape** para limpar seleção, e o próprio botão **"→ Carreira" em lote** (que não existia em lugar nenhum — "Adicionar à Carreira" só funcionava item a item). Decisão de escopo (`AskUserQuestion`, resposta do usuário): Notícias e Artigos Científicos, que hoje não têm nenhuma seleção múltipla, ficaram de fora — a ação em lote só faz sentido para Vagas PhD/Empregos, e criar seleção do zero nessas duas abas sem nenhuma ação em lote associada seria esforço sem retorno.
+
+- **Checkbox na visão de Lista** (`VagasListTable`/`EmpregosListTable`): coluna nova à esquerda, com checkbox de cabeçalho com estado *indeterminate* (nem todos/nem nenhum selecionado) — mesmo padrão nas duas tabelas.
+- **Escape limpa a seleção**: listener de teclado (`keydown`) ativo só enquanto houver itens selecionados, removido ao limpar — evita capturar Escape de outros modais quando não há seleção ativa.
+- **Botão "→ Carreira" em lote**: novo, na barra de ações (ao lado dos botões já existentes de mover/deletar). Chama `POST /api/career/opportunities/batch` com os `hub_item_ids` selecionados (até 50 por vez) e mostra toast com contagem de criadas/já existentes/erros.
+- **Backend — `POST /api/career/opportunities/batch`** (`_worker.js`): replica fielmente o fluxo individual já existente (`addToCareer` do frontend) para cada item — mesmo mapeamento `track`/`type` por projeto (`phd_vagas` → `phd`, `emprego_vagas` → `job`), mesmo rodízio Alice/Milene (`nextRoundRobinAssistant`), mesma fonte nas notas. Ao final de cada item criado, arquiva o `hub_item` (`archived_at`) — o mesmo mecanismo que já faz o item sumir da lista ativa do Hub (`GET /api/hub/items` filtra `archived_at IS NULL`). `createHubCareerTask` **não é chamado** (já está pausado desde `f31cc4f`).
+
+### Desvios/decisões técnicas (com justificativa)
+- **Indicador "já adicionada" (B2.3 do ticket) não foi implementado como item separado** — desnecessário: o mecanismo de arquivamento já existente remove o item da lista ativa assim que ele é enviado para Carreira, em ambas as visões (lista e cards), porque consomem o mesmo array filtrado. Criar uma badge separada duplicaria esse comportamento sem necessidade.
+- **Schema do lote não inventa colunas novas** (o rascunho do ticket sugeria `hub_items.added_to_career`, `career_opportunities.organization`/`hub_type` — nenhuma dessas existe). O endpoint em lote usa exatamente as mesmas colunas e o mesmo fluxo (`INSERT` em `career_opportunities` + `UPDATE hub_items SET archived_at`) já usados pelo fluxo individual.
+- **"Skipped" definido como `hub_item.archived_at` já setado** (não por um `SELECT ... WHERE hub_short_id = ?` em `career_opportunities`, como o rascunho do ticket sugeria) — mais barato (sem segunda query por item) e semanticamente idêntico: um hub_item só fica `archived_at` quando já foi enviado para Carreira.
+- Blocks 1 e 2 entregues juntos num único commit/bump de versão (MINOR) em vez de separados como o ticket pedia — o botão "→ Carreira" em lote (Block 2, frontend) e a limpeza de seleção (Block 1) ficaram na mesma edição dos mesmos arquivos (`VagasPhDPage.jsx`/`EmpregoPage.jsx`); separar exigiria desfazer e refazer trechos sobrepostos sem nenhum ganho real, já que o botão de Block 2 não faz sentido sem o endpoint de Block 2.
+- **Block 3 (coletores diários PhD/postdoc) não precisou de nenhuma mudança em `config.yaml`** — auditoria confirmou que já estava exatamente no estado pretendido (`phd_vagas` com todas as fontes ativas; `emprego_vagas` só com fontes de Postdoc/pesquisa ativas, as 3 fontes de emprego geral Techniekwerkt desativadas). Em compensação, a auditoria do Windows Task Scheduler encontrou uma regressão real: as tarefas `IntelligenceHub-Daily`/`IntelligenceHub-OnBoot` ainda apontavam para o caminho antigo (`...\IntelligenceHub\run_hub.ps1`), quebrado desde a renomeação da pasta para `IntelligenceHubAIDE` (sessão anterior) — a execução de hoje de manhã (21/10, 07:32) já tinha falhado por isso (`0x8007010B`, diretório inválido). Corrigido via `Set-ScheduledTask` (PowerShell elevado, rodado pelo usuário).
+
+### Verificação:
+[A ser preenchido pelo usuário após testar no navegador]
+
+---
+
 ## [II.1.16.0] — 2026-09-16
 
 ### Unificação: Importar/Exportar num único lugar ("Dados")

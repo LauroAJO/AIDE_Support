@@ -13,6 +13,7 @@
 
 | Versão | Data | Descrição |
 |--------|------|-----------|
+| II.1.17.0 | 2026-10-21 | Hub: seleção múltipla completa (checkbox na Lista, Escape limpa) + envio em lote para Carreira (`POST /api/career/opportunities/batch`) em Vagas PhD/Empregos; agendamento diário do Intelligence Hub corrigido (apontava para pasta renomeada) |
 | II.1.16.0 | 2026-09-16 | Unificação: import/export virou um único item "Dados" no menu de perfil (`/data`, abas Exportar/Importar), tirando a duplicação entre menu e Configurações |
 | II.1.15.0 | 2026-09-16 | Fix: painel "Exportar dados" (Carreira/Mercado/Networking/Eventos/Venues) nunca tinha sido commitado desde a II.1.6.0 — recriado e restrito ao owner (antes o acesso variava por domínio) |
 | II.1.14.0 | 2026-09-14 | Integração de Dados Externos — Fase 5: EURAXESS (campos manuais em Vagas PhD/Empregos + sincronização automática best-effort, já que o EURAXESS bloqueia tráfego automatizado) |

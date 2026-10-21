@@ -201,6 +201,7 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null,
   const [highlightedId, setHighlightedId] = useState(null);
   const cardRefs = useRef({}); // item.id -> DOM node, para scroll-into-view do highlight
   const highlightedShortIdRef = useRef(null); // evita re-disparar o highlight no mesmo short_id
+  const [sendingToCareer, setSendingToCareer] = useState(false);
 
   // Carga inicial (ou reset): zera offset/items e busca a primeira página.
   const load = async () => {
@@ -427,6 +428,39 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null,
   const selectAll = () => setSelectedIds(new Set(filtered.map((it) => it.id)));
   const clearSelection = () => setSelectedIds(new Set());
 
+  // Escape limpa a seleção — ver mesmo comentário em VagasPhDPage.jsx.
+  useEffect(() => {
+    if (selectedIds.size === 0) return;
+    const onKeyDown = (e) => { if (e.key === 'Escape') clearSelection(); };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds.size]);
+
+  // ── Enviar selecionados para Carreira (lote) ──────────────────────────────
+  const sendSelectedToCareer = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setSendingToCareer(true);
+    try {
+      const res = await apiFetch('/api/career/opportunities/batch', {
+        method: 'POST',
+        body: JSON.stringify({ hub_item_ids: ids }),
+      });
+      const parts = [];
+      if (res.created > 0) parts.push(`${res.created} adicionada(s)`);
+      if (res.skipped > 0) parts.push(`${res.skipped} já existia(m)`);
+      if (res.errors > 0) parts.push(`${res.errors} erro(s)`);
+      showToast(parts.join(' · ') || 'Nenhum item processado');
+      setItems((prev) => prev.filter((it) => !selectedIds.has(it.id)));
+      clearSelection();
+    } catch (e) {
+      showToast(`Falha ao enviar para Carreira: ${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      setSendingToCareer(false);
+    }
+  };
+
   const bulkDelete = async () => {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
@@ -585,6 +619,15 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null,
           <div className="flex-1" />
           <button
             type="button"
+            onClick={sendSelectedToCareer}
+            disabled={sendingToCareer}
+            className="flex items-center gap-1.5 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-60"
+          >
+            {sendingToCareer ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            {sendingToCareer ? 'Enviando...' : '→ Carreira'}
+          </button>
+          <button
+            type="button"
             onClick={bulkMoveToPhd}
             className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs font-medium text-ink2 hover:bg-surface2"
           >
@@ -627,6 +670,13 @@ export default function EmpregoPage({ refreshToken = 0, highlightShortId = null,
             onLinkTask={(it) => setLinkingItem(it)}
             onDelete={isOwner ? (it) => setConfirmItem(it) : null}
             deletingId={deleting}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
+            onSelectAllVisible={() => setSelectedIds((prev) => {
+              const allSelected = sortedForList.length > 0 && sortedForList.every((it) => prev.has(it.id));
+              if (allSelected) return new Set();
+              return new Set(sortedForList.map((it) => it.id));
+            })}
           />
         ) : (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
@@ -910,7 +960,32 @@ function SortHeader({ label, sortKey, active, dir, onSort, className = '' }) {
   );
 }
 
-function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, added, onLinkTask, onDelete, deletingId }) {
+// Checkbox do cabeçalho com estado indeterminate — ver mesmo padrão em
+// VagasPhDPage.jsx (SelectAllCheckbox).
+function SelectAllCheckbox({ items, selectedIds, onToggle }) {
+  const ref = useRef(null);
+  const selectedCount = items.filter((it) => selectedIds.has(it.id)).length;
+  const allSelected = items.length > 0 && selectedCount === items.length;
+  const someSelected = selectedCount > 0 && !allSelected;
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = someSelected;
+  }, [someSelected]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={allSelected}
+      onChange={onToggle}
+      className="h-3.5 w-3.5 accent-accent cursor-pointer"
+      title={allSelected ? 'Desmarcar todos' : 'Selecionar todos'}
+    />
+  );
+}
+
+function EmpregosListTable({
+  items, sortKey, sortDir, onSort, onOpen, onAdd, added, onLinkTask, onDelete, deletingId,
+  selectedIds = new Set(), onToggleSelect = () => {}, onSelectAllVisible = () => {},
+}) {
   if (items.length === 0) {
     return (
       <div className="rounded-xl border border-line bg-surface px-4 py-12 text-center text-sm text-muted">
@@ -923,6 +998,9 @@ function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, add
       <table className="w-full border-collapse text-[11px]">
         <thead className="border-b border-line bg-surface2/60">
           <tr>
+            <th scope="col" className="w-8 px-2.5 py-1">
+              <SelectAllCheckbox items={items} selectedIds={selectedIds} onToggle={onSelectAllVisible} />
+            </th>
             <SortHeader label="Título" sortKey="title" active={sortKey === 'title'} dir={sortDir} onSort={onSort} />
             <SortHeader label="Instituição" sortKey="institution" active={sortKey === 'institution'} dir={sortDir} onSort={onSort} />
             <SortHeader label="Cidade" sortKey="city" active={sortKey === 'city'} dir={sortDir} onSort={onSort} />
@@ -939,8 +1017,16 @@ function EmpregosListTable({ items, sortKey, sortDir, onSort, onOpen, onAdd, add
               <tr
                 key={it.id}
                 onClick={() => onOpen(it)}
-                className={`cursor-pointer border-b border-line/60 last:border-0 hover:bg-surface2/50 ${i % 2 === 1 ? 'bg-surface2/20' : ''}`}
+                className={`cursor-pointer border-b border-line/60 last:border-0 hover:bg-surface2/50 ${i % 2 === 1 ? 'bg-surface2/20' : ''} ${selectedIds.has(it.id) ? 'bg-accent/5' : ''}`}
               >
+                <td className="px-2.5 py-1" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(it.id)}
+                    onChange={() => onToggleSelect(it.id)}
+                    className="h-3.5 w-3.5 accent-accent cursor-pointer"
+                  />
+                </td>
                 <td className="max-w-[280px] truncate px-2.5 py-1 font-normal text-xs text-ink" title={effectiveTitle(it)}>
                   {effectiveTitle(it)}
                 </td>

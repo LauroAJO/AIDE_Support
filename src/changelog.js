@@ -8,6 +8,16 @@
 // pouco por sessão. Mais recente primeiro.
 export const CHANGELOG = [
   {
+    version: 'II.1.17.0',
+    date: '2026-10-21',
+    title: 'Hub: seleção em lote completa + envio em lote para Carreira',
+    items: [
+      'Vagas PhD / Empregos: checkbox também na visão de Lista (já existia nos cards), Escape limpa a seleção',
+      'Novo botão "→ Carreira" em lote na barra de seleção — envia até 50 itens de uma vez (POST /api/career/opportunities/batch)',
+      'Agendamento diário do Intelligence Hub corrigido (apontava para a pasta renomeada IntelligenceHub → IntelligenceHubAIDE)',
+    ],
+  },
+  {
     version: 'II.1.16.0',
     date: '2026-09-16',
     title: 'Importar/Exportar unificados em "Dados"',

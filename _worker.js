@@ -411,6 +411,9 @@ async function handleAPI(request, env, ctx) {
 
   // Carreira (Etapa 2) — oportunidades, documentos, metas.
   if (path === '/api/career/opportunities') return handleCareerOpportunities(request, env, user);
+  // /batch antes do genérico /:id — senão "batch" seria lido como um id
+  // (mesmo motivo do /audit logo abaixo).
+  if (path === '/api/career/opportunities/batch') return handleCareerOpportunitiesBatch(request, env, user);
   // v2.26.3 — Bloco 3, Parte B: histórico de mudanças de uma oportunidade
   // (opportunity_audit_log, migration 0056). Rota específica ANTES da genérica
   // de item — /api/career/opportunities/:id/audit também bateria em
@@ -11909,6 +11912,89 @@ async function handleCareerOpportunities(request, env, user) {
     return json(shapeOpportunity(row), 201);
   }
   return json({ error: 'Método não permitido' }, 405);
+}
+
+// POST /api/career/opportunities/batch — envio em lote de itens do Hub
+// (Vagas PhD / Empregos) para o Kanban de Carreira. Replica EXATAMENTE o
+// fluxo individual já usado por VagasPhDPage.jsx/EmpregoPage.jsx
+// (addToCareer): cria a oportunidade com os mesmos campos/mapeamento
+// track/type por projeto e depois arquiva o hub_item (archived_at), que é
+// o mecanismo real de "já adicionada" — o item some da lista ativa do Hub
+// (GET /api/hub/items já filtra archived_at IS NULL). Não existe coluna
+// added_to_career nem tabela de "organização em texto livre" — notes carrega
+// a fonte, igual ao fluxo individual. createHubCareerTask NÃO é chamado aqui
+// (já está pausado desde f31cc4f — pause auto-task creation on hub->career).
+const HUB_PROJECT_TRACK = { phd_vagas: 'phd', emprego_vagas: 'job' };
+
+async function handleCareerOpportunitiesBatch(request, env, user) {
+  if (request.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
+  if (!isHubReader(user)) return json({ error: 'Sem acesso ao Hub' }, 403);
+
+  const body = (await readJson(request)) || {};
+  const ids = Array.isArray(body.hub_item_ids) ? body.hub_item_ids : [];
+  if (!ids.length || ids.length > 50) {
+    return json({ error: 'Entre 1 e 50 itens por vez' }, 400);
+  }
+
+  const results = { created: [], skipped: [], errors: [] };
+
+  for (const hubItemId of ids) {
+    try {
+      const hubItem = await env.DB.prepare(
+        'SELECT * FROM hub_items WHERE id = ? AND deleted_at IS NULL'
+      ).bind(hubItemId).first();
+
+      if (!hubItem) {
+        results.errors.push({ id: hubItemId, reason: 'Item não encontrado' });
+        continue;
+      }
+      // Já arquivado (archived_at setado) == já foi enviado para Carreira
+      // antes (pelo fluxo individual ou por um lote anterior).
+      if (hubItem.archived_at) {
+        results.skipped.push({ id: hubItemId, title: hubItem.title });
+        continue;
+      }
+
+      const track = HUB_PROJECT_TRACK[hubItem.project_id] || 'job';
+      const now = Math.floor(Date.now() / 1000);
+      const id = crypto.randomUUID();
+
+      let assignedTo = await nextRoundRobinAssistant(env);
+      // mesma regra do fluxo individual: só entra no rodízio quando há
+      // hub_short_id (sempre o caso aqui, hub_item sempre tem short_id).
+
+      const fonte = hubItem.source_name ? `Fonte: ${hubItem.source_name}\n\n` : '';
+      await env.DB.prepare(
+        `INSERT INTO career_opportunities
+          (id, title, type, track, organization_id, contact_id, project_id, description,
+           requirements, location, salary_range, deadline, status, priority, fit_score, url,
+           notes, tags, assigned_to, hub_short_id, created_by, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, hubItem.title, track, track, null, null, null,
+        hubItem.justificativa || '',
+        '', '', '', '', 'to_organize', 3, 3, hubItem.url || '',
+        `${fonte}${hubItem.resumo || ''}`.trim(), '[]', assignedTo,
+        hubItem.short_id || null, user.id, now, now
+      ).run();
+
+      await env.DB.prepare(
+        `UPDATE hub_items SET archived_at = CURRENT_TIMESTAMP WHERE id = ? AND archived_at IS NULL`
+      ).bind(hubItemId).run();
+
+      results.created.push({ id, title: hubItem.title });
+    } catch (e) {
+      results.errors.push({ id: hubItemId, reason: String(e.message || e) });
+    }
+  }
+
+  return json({
+    ok: true,
+    created: results.created.length,
+    skipped: results.skipped.length,
+    errors: results.errors.length,
+    details: results,
+  });
 }
 
 // II.1.7.0 — rodízio Alice/Milene para vagas vindas do Hub. Sem tabela de

@@ -5572,6 +5572,9 @@ async function handleBridge(request, env, ctx, path) {
   // para o ID nativo dele. Autenticação já resolvida pelo gate `hasSecret` /
   // `user` logo acima nesta função — igual a todas as outras rotas /api/bridge/*.
   if (path === '/api/bridge/mapping' && method === 'GET') return handleBridgeMappingList(env);
+  // Pagamentos das assistentes para o LifeGame (somente leitura). Sem PIX, banco,
+  // titulos de tarefa ou notas: so numeros. Autenticacao pelo gate acima.
+  if (path === '/api/bridge/payments' && method === 'GET') return handleBridgePayments(request, env);
 
   // BRIDGE_RESEND_APPROVED — endpoint administrativo pontual, sem UI. Reenvia
   // a notificação AIDE→LifeGame (POST /api/bridge/tasks/approved) para uma
@@ -8846,6 +8849,55 @@ function monthRange(month) {
 // `overrideUserId` é DE QUEM é o resumo. Sem ele cai na primeira assistente —
 // caminho legado mantido só para chamadas internas sem um usuário-alvo; todas
 // as rotas HTTP passam um id explícito (ver handlePaymentSummary).
+// GET /api/bridge/payments?month=AAAA-MM - resumo minimo por assistente para o LifeGame.
+// Nao devolve chave PIX, banco, titulo de tarefa nem notas.
+async function handleBridgePayments(request, env) {
+  const url = new URL(request.url);
+  const month = url.searchParams.get('month') || new Date().toISOString().slice(0, 7);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    return json({ error: 'month invalido, use AAAA-MM' }, 400);
+  }
+  const { results: us } = await env.DB.prepare(
+    "SELECT id, name, email, role FROM users WHERE role IN ('assistant_fixed','assistant_external','assistant')"
+  ).all();
+  const { start, end } = monthRange(month);
+  const assistants = [];
+  let brlRate = 0;
+  let brlRateUpdatedAt = null;
+  for (const u of us || []) {
+    const s = await computePaymentSummary(env, month, u.id);
+    brlRate = s.brlRate;
+    brlRateUpdatedAt = s.brlRateUpdatedAt;
+    const { results: pr } = await env.DB.prepare(
+      'SELECT id, paid_at FROM time_entries WHERE user_id = ? AND started_at >= ? AND started_at < ?'
+    ).bind(u.id, start, end).all();
+    const paidAt = new Map((pr || []).map((r) => [r.id, r.paid_at || null]));
+    assistants.push({
+      userId: u.id,
+      name: u.name || u.email || '',
+      role: u.role,
+      totalHours: s.totalHours,
+      totalDueBrl: s.totalDueBrl,
+      totalPaidBrl: s.totalPaidBrl,
+      balanceBrl: s.balanceBrl,
+      totalDueEur: s.totalDueEur,
+      totalPaidEur: s.totalPaidEur,
+      balanceEur: s.balanceEur,
+      entries: (s.entries || []).map((e) => ({
+        id: e.id,
+        hours: e.hours,
+        amountBrl: e.amountBrl,
+        amountEur: e.amountEur,
+        paid: !!e.paid,
+        paidAt: paidAt.get(e.id) || null,
+        startedAt: e.started_at,
+        projectName: e.projectName || null,
+      })),
+    });
+  }
+  return json({ month, brlEurRate: brlRate, brlEurUpdatedAt: brlRateUpdatedAt, assistants, generatedAt: Date.now() });
+}
+
 async function computePaymentSummary(env, month, overrideUserId = null) {
   const { start, end } = monthRange(month);
   const { assistantId: legacyAssistantId } = await getRoleUsers(env);

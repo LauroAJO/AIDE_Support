@@ -300,7 +300,7 @@ export default function HubPage({
         ) : filtered.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-muted">Nenhum item encontrado.</div>
         ) : view === 'cards' ? (
-          <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {filtered.map((it) => (
               <NoticiaCard
                 key={it.id}
@@ -423,37 +423,40 @@ export default function HubPage({
 // v2.26.6 (Bloco 5E/5F) — card compacto para a alternativa "Cards" da
 // Notícias (a "Lista" já existia como tabela). Mesmo padrão de compactação
 // do Bloco 5F: p-3, título text-sm, meta text-xs.
+// v2.26.7 (Change 2b — cards mais compactos): mesmo tratamento aplicado a
+// VagaCard/EmpregoCard — padding/fontes menores, resumo curto em 1 linha só
+// (era o maior contribuinte para a altura do card).
 function NoticiaCard({ item, onOpen, onDelete, deleting }) {
-  const resumo = (item.resumo || '').slice(0, 130);
-  const truncated = (item.resumo || '').length > 130;
+  const resumo = (item.resumo || '').slice(0, 80);
+  const truncated = (item.resumo || '').length > 80;
   return (
     <div
       onClick={onOpen}
-      className="flex cursor-pointer flex-col gap-2 rounded-xl border border-line bg-surface p-3 transition hover:border-accent/50 hover:shadow-soft"
+      className="flex cursor-pointer flex-col gap-1.5 rounded-lg border border-line bg-surface p-2.5 transition hover:border-accent/50 hover:shadow-soft"
     >
       <div className="flex items-start justify-between gap-2">
-        <h3 className="text-sm font-medium leading-snug text-ink">{item.title}</h3>
+        <h3 className="text-xs font-medium leading-snug text-ink">{item.title}</h3>
         {onDelete && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
             disabled={deleting}
-            className="shrink-0 rounded-md p-1 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+            className="shrink-0 rounded-md p-0.5 text-ink2 transition hover:bg-danger/10 hover:text-danger disabled:opacity-50"
             title="Remover item"
           >
-            {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
           </button>
         )}
       </div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted">
         {item.source_name && (
-          <span className="inline-flex items-center gap-1"><Building2 className="h-3.5 w-3.5" />{item.source_name}</span>
+          <span className="inline-flex items-center gap-1"><Building2 className="h-3 w-3" />{item.source_name}</span>
         )}
-        <span className="inline-flex items-center gap-1"><CalendarDays className="h-3.5 w-3.5" />{fmtDate(item.collected_at || item.received_at)}</span>
-        <Badge className="bg-accent/10 text-accent">{projectLabel(item.project_id)}</Badge>
-        <RelevanciaBadge item={item} />
+        <span className="inline-flex items-center gap-1"><CalendarDays className="h-3 w-3" />{fmtDateShort(item.collected_at || item.received_at)}</span>
+        <span className="inline-flex items-center rounded-full bg-accent/10 px-1.5 py-0 text-[10px] font-medium text-accent">{projectLabel(item.project_id)}</span>
+        <span className="text-[10px] font-medium text-ink2">{item.relevancia != null ? Number(item.relevancia).toFixed(1) : nivel(item)}</span>
       </div>
-      {resumo && <p className="text-xs leading-relaxed text-ink2">{resumo}{truncated && '…'}</p>}
+      {resumo && <p className="line-clamp-1 text-[11px] leading-snug text-ink2">{resumo}{truncated && '…'}</p>}
     </div>
   );
 }

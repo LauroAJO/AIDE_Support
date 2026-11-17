@@ -93,6 +93,7 @@ export default function ChatPage() {
   // Polling.
   useEffect(() => {
     const id = setInterval(async () => {
+      if (document.visibilityState !== 'visible') return;
       try {
         const list = await apiFetch('/api/chat/messages?limit=50');
         const ordered = [...(list || [])].reverse();
